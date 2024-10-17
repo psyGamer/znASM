@@ -8,8 +8,6 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    std.log.info("Hello world! {s} {} ", .{ znasm.text, znasm.size.MiBit(1) });
-
     const config: znasm.Config = .{
         .title = "znASM Test",
         .mode = .{
@@ -28,21 +26,30 @@ pub fn main() !void {
             .native = .{},
             .emulation = .{},
         },
-        .segments = &.{},
+        .segments = &.{
+            .{
+                .name = "CODE",
+                .start = 0x808000,
+                .size = 0x8000,
+                .mode = .rom,
+            },
+        },
     };
 
     // Always a multiple of 4KiB (page size), so optimal allocator for the ROM
     const rom_allocator = std.heap.page_allocator;
 
-    const rom = try znasm.Rom.init(config);
+    // const rom = try znasm.Rom.init(config);
 
-    const rom_data = try rom.generate(rom_allocator);
-    defer rom_allocator.free(rom_data);
+    // const rom_data = try rom.generate(rom_allocator);
+    // defer rom_allocator.free(rom_data);
 
     var rom_file = try std.fs.cwd().createFile("Testbed.sfc", .{});
     defer rom_file.close();
 
-    try rom_file.writeAll(rom_data);
+    try znasm.compile(config, rom_allocator, rom_file.writer());
+
+    // try rom_file.writeAll(rom_data);
 
     // const testing_x = testing("x");
     // const s: std.builtin.Type.Struct = .{

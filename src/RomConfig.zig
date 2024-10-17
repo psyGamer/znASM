@@ -1,4 +1,6 @@
 const rom = @import("SnesRom.zig");
+const Builder = @import("Builder.zig");
+const Symbol = @import("Function.zig").Symbol;
 
 title: []const u8,
 mode: rom.Header.Mode,
@@ -10,17 +12,22 @@ version: u8,
 
 vectors: struct {
     native: struct {
-        cop: ?[]const u8 = null,
-        brk: ?[]const u8 = null,
-        nmi: ?[]const u8 = null,
-        irq: ?[]const u8 = null,
+        cop: Symbol = EmptyVector,
+        brk: Symbol = EmptyVector,
+        nmi: Symbol = EmptyVector,
+        irq: Symbol = EmptyVector,
     },
     emulation: struct {
-        cop: ?[]const u8 = null,
-        nmi: ?[]const u8 = null,
-        reset: ?[]const u8 = null,
-        irqbrl: ?[]const u8 = null,
+        cop: Symbol = EmptyVector,
+        nmi: Symbol = EmptyVector,
+        reset: Symbol = EmptyVector,
+        irqbrl: Symbol = EmptyVector,
     },
 },
 
 segments: []const rom.Segment,
+
+// Vectors must have a target function, so default to this stub
+fn EmptyVector(b: *Builder) void {
+    b.emit(.rti);
+}
