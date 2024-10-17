@@ -1,10 +1,10 @@
 const std = @import("std");
 const Symbol = @import("Function.zig").Symbol;
+const SymbolPtr = @import("Function.zig").SymbolPtr;
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
 
 const Builder = @This();
-const SymbolPtr = *const fn (b: *Builder) void;
 
 build_system: *BuildSystem,
 
@@ -24,9 +24,8 @@ pub fn build(b: *Builder) void {
     b.symbol(b);
 }
 
-// NOTE: This API intentionally doesn't expose OutOfMemory errors to keep the API simpler
+// NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
 pub fn emit(b: *Builder, instr: Instruction) void {
     instr.write_data(b.instruction_data.writer(b.build_system.allocator)) catch @panic("Out of memory");
-    std.log.debug("    {}", .{b.instruction_data.items.len});
 }

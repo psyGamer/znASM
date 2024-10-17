@@ -26,14 +26,6 @@ pub fn main() !void {
             .native = .{},
             .emulation = .{},
         },
-        .segments = &.{
-            .{
-                .name = "CODE",
-                .start = 0x808000,
-                .size = 0x8000,
-                .mode = .rom,
-            },
-        },
     };
 
     // Always a multiple of 4KiB (page size), so optimal allocator for the ROM

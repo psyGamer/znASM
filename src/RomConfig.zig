@@ -1,4 +1,4 @@
-const rom = @import("SnesRom.zig");
+const rom = @import("Rom.zig");
 const Builder = @import("Builder.zig");
 const Symbol = @import("Function.zig").Symbol;
 
@@ -21,13 +21,13 @@ vectors: struct {
         cop: Symbol = EmptyVector,
         nmi: Symbol = EmptyVector,
         reset: Symbol = EmptyVector,
-        irqbrl: Symbol = EmptyVector,
+        irqbrk: Symbol = EmptyVector,
     },
 },
 
-segments: []const rom.Segment,
+// segments: []const rom.Segment,
 
 // Vectors must have a target function, so default to this stub
-fn EmptyVector(b: *Builder) void {
+pub fn EmptyVector(b: *Builder) void {
     b.emit(.rti);
 }
