@@ -11,8 +11,13 @@ pub const Label = u32;
 
 /// Metadata information about an instruction
 pub const InstructionInfo = struct {
+    const IndexMode = enum { @"8bit", @"16bit" };
+
     instr: Instruction,
     offset: u16,
+    index_mode: IndexMode,
+
+    caller_file: ?[]const u8,
     caller_line: ?u64,
 };
 
@@ -24,7 +29,7 @@ instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
 // Debug data
 symbol_name: ?[]const u8 = null,
-file_path: ?[]const u8 = null,
+source_location: ?std.builtin.SourceLocation = null,
 
 pub fn init(sys: *BuildSystem, sym: Symbol) Builder {
     return .{
@@ -40,7 +45,7 @@ pub fn build(b: *Builder) void {
 
 pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type: type, overwrite_symbol_name: ?[]const u8) void {
     b.symbol_name = overwrite_symbol_name orelse std.fmt.allocPrint(b.build_system.allocator, "{s}@{s}", .{ @typeName(declaring_type), src.fn_name }) catch @panic("Out of memory");
-    b.file_path = src.file;
+    b.source_location = src;
 }
 
 pub fn define_label(b: Builder) Label {
@@ -51,11 +56,18 @@ pub fn define_label(b: Builder) Label {
 // NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
 pub fn emit(b: *Builder, instr: Instruction) void {
+    const caller_file, const caller_line = b.resolve_caller_src(@returnAddress()) orelse .{ null, null };
+    std.log.debug("File {?s}", .{caller_file});
+
     b.instruction_info.append(b.build_system.allocator, .{
         .instr = instr,
         .offset = @intCast(b.instruction_data.items.len),
-        .caller_line = b.resolve_current_caller_line(@returnAddress()),
+        .index_mode = .@"8bit",
+
+        .caller_file = caller_file,
+        .caller_line = caller_line,
     }) catch @panic("Out of memory");
+
     instr.write_data(b.instruction_data.writer(b.build_system.allocator)) catch @panic("Out of memory");
 }
 
@@ -71,8 +83,8 @@ pub fn emit_bra(b: *Builder, target: Label) void {
 }
 
 /// Unwinds the stack to find the line number of the calling function
-fn resolve_current_caller_line(b: Builder, start_addr: usize) ?u64 {
-    if (b.file_path == null) {
+fn resolve_caller_src(b: Builder, start_addr: usize) ?struct { []const u8, u64 } {
+    if (b.source_location == null) {
         return null;
     }
 
@@ -95,8 +107,11 @@ fn resolve_current_caller_line(b: Builder, start_addr: usize) ?u64 {
         const srcloc = symbol.source_location orelse continue;
 
         // TODO: Handle windows stupid \
-        if (std.mem.endsWith(u8, srcloc.file_name, b.file_path.?)) {
-            return srcloc.line;
+        if (std.mem.endsWith(u8, srcloc.file_name, b.source_location.?.file)) {
+            return .{
+                b.build_system.allocator.dupe(u8, srcloc.file_name) catch return null,
+                srcloc.line,
+            };
         }
     }
 

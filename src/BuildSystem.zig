@@ -42,21 +42,13 @@ pub fn generate_function(sys: *BuildSystem, sym: Function.Symbol) !void {
         .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
         .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
         .symbol_name = builder.symbol_name,
+        .source = builder.source_location,
     };
+
     try sys.functions.put(sys.allocator, sym, function);
 }
 
 pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype, cdl_writer: anytype) !void {
-    // Write symbol data
-    for (sys.functions.values()) |func| {
-        if (func.symbol_name == null) {
-            continue;
-        }
-
-        try mlb_writer.print("SnesPrgRom:{x}:{s}\n", .{ func.offset, func.symbol_name.? });
-    }
-
-    // Mark ROM regions
     const CdlFlags = packed struct(u8) {
         // Global CDL flags
         code: bool = false,
@@ -75,8 +67,106 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 
     @memset(cdl_data, .{}); // Mark everything as unknown initially
 
+    // Write symbol data / mark regions
     for (sys.functions.values()) |func| {
         @memset(cdl_data[func.offset..(func.offset + func.code.len)], .{ .code = true });
+
+        cdl_data[func.offset].sub_entry_point = true;
+
+        // Set instruction specific flags
+        for (func.code_info) |info| {
+            const instr_region = cdl_data[(func.offset + info.offset)..(func.offset + info.offset + info.instr.size())];
+
+            if (info.instr == .ora or info.instr == .@"and" or info.instr == .eor or info.instr == .adc or
+                info.instr == .bit or info.instr == .lda or info.instr == .cmp or info.instr == .sbc)
+            {
+                @memset(instr_region, .{ .memory_mode_8 = true });
+            } else if (info.instr == .ldy or info.instr == .ldx or info.instr == .cpy or info.instr == .cpx) {
+                @memset(instr_region, .{ .index_mode_8 = true });
+            }
+
+            // TODO: Jump targets
+        }
+
+        if (func.symbol_name == null) {
+            continue;
+        }
+
+        // Try collecting comments
+        var comments: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{};
+        defer comments.deinit(sys.allocator);
+
+        b: {
+            const file_path = find_file: {
+                for (func.code_info) |info| {
+                    if (info.caller_file) |file| {
+                        break :find_file file;
+                    }
+                }
+                break :b;
+            };
+
+            var src_file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+                std.log.err("Failed collecting comments for function '{s}': '{s}' {}", .{ func.symbol_name.?, file_path, err });
+                break :b;
+            };
+            defer src_file.close();
+
+            const src_reader = src_file.reader();
+
+            // Go to function start
+            for (1..func.source.?.line) |_| {
+                src_reader.skipUntilDelimiterOrEof('\n') catch break :b;
+            }
+
+            var line_buffer: std.ArrayListUnmanaged(u8) = .{};
+            defer line_buffer.deinit(sys.allocator);
+
+            var src_line = func.source.?.line;
+            const last_line = func.code_info[func.code_info.len - 1].caller_line orelse break :b;
+
+            while (src_line <= last_line) : (src_line += 1) {
+                line_buffer.clearRetainingCapacity();
+                src_reader.streamUntilDelimiter(line_buffer.writer(sys.allocator), '\n', null) catch break :b;
+
+                const line = std.mem.trim(u8, line_buffer.items, " \t\n\r");
+                if (std.mem.startsWith(u8, line, "///")) {
+                    try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line["///".len..]));
+                } else if (std.mem.startsWith(u8, line, "//")) {
+                    try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line["//".len..]));
+                }
+            }
+        }
+
+        // Write symbols
+        var comment_line: u32 = 0;
+        var comment_buffer: std.ArrayListUnmanaged(u8) = .{};
+        defer comment_buffer.deinit(sys.allocator);
+
+        for (func.code_info) |info| {
+            comment_buffer.clearRetainingCapacity();
+            if (info.caller_line) |caller_line| {
+                while (comment_line < caller_line) : (comment_line += 1) {
+                    if (comments.get(comment_line)) |comment| {
+                        if (comment_buffer.items.len != 0) {
+                            try comment_buffer.appendSlice(sys.allocator, "\\n");
+                        }
+                        try comment_buffer.appendSlice(sys.allocator, comment);
+                    }
+                }
+            }
+
+            const label = if (info.offset == 0)
+                func.symbol_name orelse ""
+            else
+                "";
+
+            if (comment_buffer.items.len == 0 and label.len == 0) {
+                continue;
+            }
+
+            try mlb_writer.print("SnesPrgRom:{x}:{s}:{s}\n", .{ func.offset + info.offset, label, comment_buffer.items });
+        }
     }
 
     // Specific hash algorithm used by Mesen2 (See https://github.com/SourMesen/Mesen2/blob/master/Utilities/CRC32.cpp)

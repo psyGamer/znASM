@@ -85,9 +85,8 @@ pub fn main() !void {
 fn Reset(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
     const loop = b.define_label();
-    // for (0..100) |_| {
     b.emit(.nop);
-    // }
+    // Infinite loop
     b.emit_bra(loop);
 }
 
@@ -106,6 +105,7 @@ fn Reset(b: *znasm.Builder) void {
 
 fn myCoolFunc(b: *znasm.FunctionBuilder) void {
     const my_label = b.defineLabel();
+    // This NOP is very important
     b.emitNop();
     b.emitBra(my_label);
 

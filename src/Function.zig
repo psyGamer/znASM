@@ -1,3 +1,4 @@
+const std = @import("std");
 const Builder = @import("Builder.zig");
 
 /// Unique comptime identifier for a function
@@ -16,3 +17,6 @@ offset: u24 = undefined,
 
 /// Debug symbol name of this function
 symbol_name: ?[]const u8,
+
+/// Source location of the function definition
+source: ?std.builtin.SourceLocation,
