@@ -70,10 +70,26 @@ pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
             const target_addr = sys.symbol_location(reloc.target_sym) + reloc.target_offset;
 
             switch (reloc.type) {
-                .absolute => {
-                    const operand: *[2]u8 = rom[(func.offset + info.offset + 1)..][0..2];
+                .rel8 => {
+                    const current_addr = sys.function_location(func) + info.offset;
+                    const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
+                    std.log.debug("Target {} from {}", .{ target_addr, current_addr });
+                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(rel_offset);
+                },
+                .addr8 => {
+                    const short_addr: u8 = @truncate(target_addr);
+                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(short_addr);
+                },
+                .addr16 => {
                     const absolute_addr: u16 = @truncate(target_addr);
+                    const operand: *[2]u8 = rom[(func.offset + info.offset + 1)..][0..2];
                     operand.* = @bitCast(absolute_addr);
+                },
+                .addr24 => {
+                    const operand: *[3]u8 = rom[(func.offset + info.offset + 1)..][0..3];
+                    operand.* = @bitCast(target_addr);
                 },
             }
         }
@@ -120,6 +136,7 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
                 const target_func = sys.functions.get(reloc.target_sym) orelse @panic("Relocation to unknown symbol");
                 const target_instr = b: {
                     for (target_func.code_info) |target_info| {
+                        std.log.debug("Reloc {} vs {}", .{ reloc.target_offset, target_info.offset });
                         if (reloc.target_offset <= target_info.offset) {
                             break :b target_info;
                         }
@@ -238,21 +255,25 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 /// Calculates the real (non-mirrored) memory-mapped address of a symbol
 pub fn symbol_location(sys: BuildSystem, sym: Function.SymbolPtr) u24 {
     if (sys.functions.get(sym)) |func| {
-        switch (sys.mapping_mode) {
-            .lorom => {
-                const bank: u8 = @intCast(func.offset / 0x8000 + 0x80);
-                const addr: u16 = @intCast(func.offset % 0x8000 + 0x8000);
-                return @as(u24, bank) << 16 | addr;
-            },
-            .hirom => {
-                @panic("TODO: HiROM");
-            },
-            .exhirom => {
-                @panic("TODO: ExHiROM");
-            },
-        }
-        return func.offset;
+        return sys.function_location(func);
     } else {
         std.debug.panic("Tried to get offset of unknown symbol", .{});
+    }
+}
+
+/// Calculates the real (non-mirrored) memory-mapped address of a function
+pub fn function_location(sys: BuildSystem, func: Function) u24 {
+    switch (sys.mapping_mode) {
+        .lorom => {
+            const bank: u8 = @intCast(func.offset / 0x8000 + 0x80);
+            const addr: u16 = @intCast(func.offset % 0x8000 + 0x8000);
+            return @as(u24, bank) << 16 | addr;
+        },
+        .hirom => {
+            @panic("TODO: HiROM");
+        },
+        .exhirom => {
+            @panic("TODO: ExHiROM");
+        },
     }
 }

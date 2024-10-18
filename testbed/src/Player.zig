@@ -16,4 +16,6 @@ pub fn init(b: *znasm.Builder) void {
 
 pub fn update(b: *znasm.Builder, times: znasm.Param(u16)) void {
     b.emitNop();
+
+    b.e
 }

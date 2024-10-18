@@ -44,6 +44,25 @@ pub const Instruction = union(InstructionType) {
     /// Compare Index Register Y with Memory
     cpy: Imm816,
 
+    /// Set Carry Flag
+    sec: void,
+    /// Set Interrupt Disable Flag
+    sei: void,
+    /// Set Decimal Flag
+    sed: void,
+
+    /// Clear Carry Flag
+    clc: void,
+    /// Clear Interrupt Disable Flag
+    cli: void,
+    /// Clear Decimal Flag
+    cld: void,
+    /// Clear Overflow Flag
+    clv: void,
+
+    /// Exchange Carry and Emulation Bits
+    xce: void,
+
     /// No Operation
     nop: void,
 
@@ -136,6 +155,17 @@ pub const InstructionType = enum(u8) {
     cmp = 0xC9,
     cpx = 0xE0,
     cpy = 0xC0,
+
+    sec = 0x38,
+    sei = 0x78,
+    sed = 0xF8,
+
+    clc = 0x18,
+    cli = 0x58,
+    cld = 0xD8,
+    clv = 0xB8,
+
+    xce = 0xFB,
 
     nop = 0xEA,
 

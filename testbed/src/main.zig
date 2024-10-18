@@ -2,6 +2,7 @@ const std = @import("std");
 const logging = @import("logging.zig");
 
 const znasm = @import("znasm");
+const snes = @import("snes");
 
 pub const std_options: std.Options = .{
     .logFn = logging.logFn,
@@ -25,7 +26,7 @@ pub fn main() !void {
         .vectors = .{
             .native = .{},
             .emulation = .{
-                .reset = Reset,
+                .reset = snes.Init.Reset,
             },
         },
     };

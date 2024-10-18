@@ -20,10 +20,11 @@ pub const Label = struct {
 const BranchRelocation = struct {
     pub const Type = enum {
         always,
+        jump_long,
     };
 
     offset: u16,
-    target: *const Label,
+    target: *Label,
     type: Type,
 };
 
@@ -34,7 +35,7 @@ pub const InstructionInfo = struct {
     /// A relocatoion indicates that this instruction has an operand to another symbol,
     /// which needs to be fixed after emitting the data into ROM
     const Relocation = struct {
-        type: enum { absolute },
+        type: enum { rel8, addr8, addr16, addr24 },
         target_sym: SymbolPtr,
         target_offset: u16,
     };
@@ -121,20 +122,40 @@ pub fn call(b: *Builder, target: Symbol) void {
     b.build_system.enqueue_function(target) catch @panic("Out of memory");
 
     b.emit_extra(.{ .jsr = undefined }, .{
-        .type = .absolute,
+        .type = .addr16,
         .target_sym = target,
         .target_offset = 0,
     });
 }
 
 /// Always branch to the target label
-pub fn branch_always(b: *Builder, target: *const Label) void {
+pub fn branch_always(b: *Builder, target: *Label) void {
     b.branch_relocs.append(b.build_system.allocator, .{
         .offset = @intCast(b.instruction_data.items.len),
         .target = target,
         .type = .always,
     }) catch @panic("Out of memory");
     b.emit(.nop);
+}
+
+/// Jumps Long to the target symbol or label
+pub fn jump_long(b: *Builder, target: anytype) void {
+    if (@TypeOf(target) == *Label) {
+        b.branch_relocs.append(b.build_system.allocator, .{
+            .offset = @intCast(b.instruction_data.items.len),
+            .target = target,
+            .type = .jump_long,
+        }) catch @panic("Out of memory");
+        b.emit(.nop);
+    } else if (@TypeOf(target) == Symbol or @TypeOf(target) == SymbolPtr) {
+        b.emit_extra(.{ .jml = undefined }, .{
+            .type = .addr24,
+            .target_sym = target,
+            .target_offset = 0,
+        });
+    } else {
+        @compileError(std.fmt.comptimePrint("Unsupported target type '{s}'", .{@typeName(@TypeOf(target))}));
+    }
 }
 
 /// Invokes the generator function associated with this builder
@@ -147,9 +168,13 @@ fn resolve_branch_relocs(b: *Builder) !void {
     // New instructions are emitted in the middle, causing other relocs to shift down
     var byte_offset: u16 = 0;
 
-    const short_size = 2; // All branch instructions are 2 bytes
+    const short_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
+        .always = comptime Instruction.bra.size(),
+        .jump_long = comptime Instruction.jml.size(),
+    });
     const long_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
         .always = comptime Instruction.jmp.size(),
+        .jump_long = comptime Instruction.jml.size(),
     });
 
     var data_buffer: [16]u8 = undefined;
@@ -157,8 +182,6 @@ fn resolve_branch_relocs(b: *Builder) !void {
     const data_allocator = data_fba.allocator();
 
     for (b.branch_relocs.items) |reloc| {
-        std.debug.assert(reloc.target.offset != null);
-
         // Assume all branches use the long for to simply the calculation
         var relative_offset: i32 = @as(i32, @intCast(reloc.target.offset.?)) - (@as(i32, @intCast(reloc.offset)));
         for (b.branch_relocs.items) |other_reloc| {
@@ -169,43 +192,62 @@ fn resolve_branch_relocs(b: *Builder) !void {
             relative_offset += long_sizes.get(other_reloc.type);
         }
 
-        const use_short = relative_offset + short_size >= std.math.minInt(i8) and relative_offset + short_size <= std.math.maxInt(i8);
-        if (use_short) {
-            relative_offset -= short_size;
-        } else {
-            relative_offset -= long_sizes.get(reloc.type);
+        const use_short =
+            relative_offset + short_sizes.get(reloc.type) >= std.math.minInt(i8) and
+            relative_offset + short_sizes.get(reloc.type) <= std.math.maxInt(i8);
+
+        const size = if (use_short)
+            short_sizes.get(reloc.type)
+        else
+            long_sizes.get(reloc.type);
+
+        // Shift later targets (including ourselves)
+        for (b.branch_relocs.items) |*later_reloc| {
+            if (later_reloc.offset >= reloc.offset and later_reloc.target.offset.? > reloc.offset + byte_offset) {
+                later_reloc.target.offset = later_reloc.target.offset.? + size - comptime Instruction.nop.size();
+            }
         }
 
         const insert_offset = reloc.offset + byte_offset;
+        const target_offset = reloc.target.offset.?;
 
         switch (reloc.type) {
             .always => {
                 if (use_short) {
                     try b.insert_branch_instructions(insert_offset, data_allocator, &.{
-                        .{ .bra = @intCast(relative_offset) },
-                    }, null);
+                        .{ .bra = undefined },
+                    }, &.{.{
+                        .type = .rel8,
+                        .target_sym = b.symbol,
+                        .target_offset = target_offset - comptime Instruction.bra.size(),
+                    }});
                 } else {
                     try b.insert_branch_instructions(insert_offset, data_allocator, &.{
-                        .{ .jmp = @intCast(reloc.target.offset.? + byte_offset) },
-                    }, .{
-                        .type = .absolute,
+                        .{ .jmp = undefined },
+                    }, &.{.{
+                        .type = .addr16,
                         .target_sym = b.symbol,
-                        .target_offset = reloc.target.offset.?,
-                    });
+                        .target_offset = target_offset,
+                    }});
                 }
+            },
+            .jump_long => {
+                try b.insert_branch_instructions(insert_offset, data_allocator, &.{
+                    .{ .jml = undefined },
+                }, &.{.{
+                    .type = .addr24,
+                    .target_sym = b.symbol,
+                    .target_offset = target_offset,
+                }});
             },
         }
 
-        if (use_short) {
-            byte_offset += short_size;
-        } else {
-            byte_offset += long_sizes.get(reloc.type);
-        }
+        byte_offset += size - comptime Instruction.nop.size();
     }
 }
 
 /// Replaces a branch NOP with the actual instructions
-fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.Allocator, instrs: []const Instruction, reloc: ?InstructionInfo.Relocation) !void {
+fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.Allocator, instrs: []const Instruction, relocs: []const ?InstructionInfo.Relocation) !void {
     const index = b: {
         for (b.instruction_info.items, 0..) |info, i| {
             if (offset <= info.offset) {
@@ -231,7 +273,7 @@ fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.
 
     var old_info = b.instruction_info.items[index];
     std.mem.copyBackwards(InstructionInfo, b.instruction_info.items[(index + instrs.len)..], b.instruction_info.items[(index + 1)..old_instr_info_len]);
-    for (b.instruction_info.items[index..(index + instrs.len)], instrs) |*info, instr| {
+    for (b.instruction_info.items[index..(index + instrs.len)], instrs, relocs) |*info, instr, reloc| {
         info.* = .{
             .instr = instr,
             .offset = old_info.offset,
@@ -251,9 +293,6 @@ fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.
 
         info.offset += @intCast(instr_data.len - 1);
     }
-
-    // try b.instruction_data.insertSlice(b.build_system.allocator, offset, try Instruction.to_data(instrs, data_allocator));
-    // try b.instruction_info.insertSlice(b.build_system.allocator, index, infos);
 }
 
 /// Unwinds the stack to find the line number of the calling function

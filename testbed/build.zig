@@ -15,7 +15,9 @@ pub fn build(b: *std.Build) void {
     exe.use_llvm = use_llvm;
     exe.use_lld = use_llvm;
 
-    exe.root_module.addImport("znasm", b.dependency("znasm", .{}).module("znASM"));
+    const znasm_dep = b.dependency("znasm", .{});
+    exe.root_module.addImport("znasm", znasm_dep.module("znasm"));
+    exe.root_module.addImport("snes", znasm_dep.module("snes"));
 
     b.installArtifact(exe);
 
