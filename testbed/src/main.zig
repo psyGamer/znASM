@@ -84,10 +84,17 @@ pub fn main() !void {
 
 fn Reset(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
+
     const loop = b.define_label();
-    b.emit(.nop);
+
+    for (0..255) |_| {
+        b.emit(.nop);
+    }
+
+    b.call(my_cool_func);
+
     // Infinite loop
-    b.emit_bra(loop);
+    b.branch_always(loop);
 }
 
 // fn testing(comptime str: []const u8) fn () void {
@@ -103,11 +110,15 @@ fn Reset(b: *znasm.Builder) void {
 //     y: u16,
 // };
 
-fn myCoolFunc(b: *znasm.FunctionBuilder) void {
-    const my_label = b.defineLabel();
+fn my_cool_func(b: *znasm.Builder) void {
+    // const my_label = b.defineLabel();
     // This NOP is very important
-    b.emitNop();
-    b.emitBra(my_label);
+    // b.emitNop();
+    // b.emitBra(my_label);
+    b.setup_debug(@src(), @This(), null);
+
+    b.emit(.nop);
+    b.emit(.rts);
 
     // const my_local = b.defineLocal(Player);
     // // b.write(my_local, "x", )

@@ -1,28 +1,49 @@
 const std = @import("std");
 
 pub const Instruction = union(InstructionType) {
+    /// Some instructions support either 8bit or 16bit immediate values,
+    /// depending on the current register mode
+    const Imm816 = packed union { imm8: u8, imm16: u16 };
+
     // TODO
     ora: void,
     @"and": void,
     eor: void,
     adc: void,
     bit: void,
-    lda: void,
-    cmp: void,
     sbc: void,
+
+    /// Branch Always
+    bra: i8,
+
+    /// Jump
+    jmp: u16,
+    /// Jump Long
+    jml: u24,
+    /// Jump to Subroutine
+    jsr: u16,
+    /// Jump Long to Subroutine
+    jsl: u24,
 
     /// Return from Interrupt
     rti: void,
-    /// Branch Always
-    bra: i8,
-    /// Load Index Y with Memory
-    ldy: packed union { imm8: u8, imm16: u16 },
-    /// Load Index X with Memory
-    ldx: packed union { imm8: u8, imm16: u16 },
-    /// Compare Memory and Index Y
-    cpy: packed union { imm8: u8, imm16: u16 },
-    /// Compare Memory and Index X
-    cpx: packed union { imm8: u8, imm16: u16 },
+    /// Return from Subroutine
+    rts: void,
+
+    /// Load Accumulator from Memory
+    lda: Imm816,
+    /// Load Index Register X from Memory
+    ldx: Imm816,
+    /// Load Index Register Y from Memory
+    ldy: Imm816,
+
+    /// Compare Accumulator with Memory
+    cmp: Imm816,
+    /// Compare Index Register X with Memory
+    cpx: Imm816,
+    /// Compare Index Register Y with Memory
+    cpy: Imm816,
+
     /// No Operation
     nop: void,
 
@@ -62,16 +83,26 @@ pub const InstructionType = enum(u8) {
     eor = 0x49,
     adc = 0x69,
     bit = 0x89,
-    lda = 0xA9,
-    cmp = 0xC9,
     sbc = 0xE9,
 
-    rti = 0x40,
     bra = 0x80,
-    ldy = 0xA0,
+
+    jmp = 0x4C,
+    jml = 0x5C,
+    jsr = 0x20,
+    jsl = 0x22,
+
+    rti = 0x40,
+    rts = 0x60,
+
+    lda = 0xA9,
     ldx = 0xA2,
-    cpy = 0xC0,
+    ldy = 0xA0,
+
+    cmp = 0xC9,
     cpx = 0xE0,
+    cpy = 0xC0,
+
     nop = 0xEA,
 
     /// Computes the size of opcode + operands

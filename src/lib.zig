@@ -57,6 +57,8 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
     const rom_data = try rom.generate(allocator);
     defer allocator.free(rom_data);
 
+    build_system.resolve_relocations(rom_data);
+
     try writer.writeAll(rom_data);
 
     // Write debug data

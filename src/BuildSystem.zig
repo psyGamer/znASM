@@ -10,12 +10,14 @@ const BuildSystem = @This();
 allocator: std.mem.Allocator,
 
 mapping_mode: MappingMode,
+
 functions: std.AutoArrayHashMapUnmanaged(Function.SymbolPtr, Function) = .{},
+/// List of functions which need to be analysed as a dependency of others
+function_queue: std.ArrayListUnmanaged(Function.SymbolPtr) = .{},
 
 pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSystem {
     return .{
         .allocator = allocator,
-
         .mapping_mode = mapping_mode,
     };
 }
@@ -26,28 +28,55 @@ pub fn generate_function(sys: *BuildSystem, sym: Function.Symbol) !void {
         @compileError("Currently, znASM only supports compiling for little-endian targets");
     }
 
-    if (sys.functions.contains(sym)) {
-        // Already generated
-        return;
+    try sys.enqueue_function(sym);
+
+    while (sys.function_queue.popOrNull()) |curr_sym| {
+        const gop = try sys.functions.getOrPut(sys.allocator, curr_sym);
+        if (gop.found_existing) {
+            // Already generated
+            continue;
+        }
+
+        // Build function body
+        var builder: Builder = .init(sys, curr_sym);
+        builder.build();
+
+        // Create function definiton
+        gop.value_ptr.* = .{
+            .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
+            .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
+            .symbol_name = builder.symbol_name,
+            .source = builder.source_location,
+        };
+
+        std.log.debug("Compiled function '{?s}'", .{gop.value_ptr.symbol_name});
     }
-
-    std.log.debug("Compiling function '{s}'...", .{get_function_name(sym)});
-
-    // Build function body
-    var builder: Builder = .init(sys, sym);
-    builder.build();
-
-    // Create function definiton
-    const function: Function = .{
-        .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
-        .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
-        .symbol_name = builder.symbol_name,
-        .source = builder.source_location,
-    };
-
-    try sys.functions.put(sys.allocator, sym, function);
 }
 
+/// Marks a function for generation
+pub fn enqueue_function(sys: *BuildSystem, sym: Function.Symbol) !void {
+    try sys.function_queue.append(sys.allocator, sym);
+}
+
+/// Fixes target addresses of jump / branch instructions
+pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
+    for (sys.functions.values()) |func| {
+        for (func.code_info) |info| {
+            const reloc = info.reloc orelse continue;
+            const target_addr = sys.symbol_location(reloc.target_sym) + reloc.target_offset;
+
+            switch (reloc.type) {
+                .absolute => {
+                    const operand: *[2]u8 = rom[(func.offset + info.offset + 1)..][0..2];
+                    const absolute_addr: u16 = @truncate(target_addr);
+                    operand.* = @bitCast(absolute_addr);
+                },
+            }
+        }
+    }
+}
+
+/// Writes debug data for Mesen2 in the MLB + CDL format
 pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype, cdl_writer: anytype) !void {
     const CdlFlags = packed struct(u8) {
         // Global CDL flags
@@ -71,8 +100,6 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
     for (sys.functions.values()) |func| {
         @memset(cdl_data[func.offset..(func.offset + func.code.len)], .{ .code = true });
 
-        cdl_data[func.offset].sub_entry_point = true;
-
         // Set instruction specific flags
         for (func.code_info) |info| {
             const instr_region = cdl_data[(func.offset + info.offset)..(func.offset + info.offset + info.instr.size())];
@@ -85,7 +112,30 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
                 @memset(instr_region, .{ .index_mode_8 = true });
             }
 
-            // TODO: Jump targets
+            if (info.reloc) |reloc| {
+                const target_func = sys.functions.get(reloc.target_sym) orelse @panic("Relocation to unknown symbol");
+                const target_instr = b: {
+                    for (target_func.code_info) |target_info| {
+                        if (reloc.target_offset <= target_info.offset) {
+                            break :b target_info;
+                        }
+                    }
+                    @panic("Relocation offset outside of bounds of function");
+                };
+
+                const target_region = cdl_data[(func.offset + target_instr.offset)..(func.offset + target_instr.offset + target_instr.instr.size())];
+                if (target_instr.instr == .jsr or target_instr.instr == .jsl) {
+                    for (target_region) |*data| {
+                        data.sub_entry_point = true;
+                    }
+                } else {
+                    for (target_region) |*data| {
+                        data.jump_target = true;
+                    }
+                }
+            }
+
+            // TODO: Branch targets
         }
 
         if (func.symbol_name == null) {
@@ -184,7 +234,7 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 }
 
 /// Calculates the real (non-mirrored) memory-mapped address of a symbol
-pub fn symbol_location(sys: BuildSystem, sym: Function.Symbol) u24 {
+pub fn symbol_location(sys: BuildSystem, sym: Function.SymbolPtr) u24 {
     if (sys.functions.get(sym)) |func| {
         switch (sys.mapping_mode) {
             .lorom => {
@@ -201,24 +251,6 @@ pub fn symbol_location(sys: BuildSystem, sym: Function.Symbol) u24 {
         }
         return func.offset;
     } else {
-        std.debug.panic("Tried to get offset of unknown symbol '{s}'", .{get_function_name(sym)});
+        std.debug.panic("Tried to get offset of unknown symbol", .{});
     }
-}
-
-// Slight hack to get the function name at comptime
-fn get_function_name(func: anytype) []const u8 {
-    const S = struct {
-        fn Dummy(f: anytype) type {
-            return struct {
-                fn warpper() void {
-                    f();
-                }
-            };
-        }
-    };
-
-    const name = @typeName(S.Dummy(func));
-    const start = (std.mem.indexOfScalar(u8, name, '\'') orelse unreachable) + 1;
-    const end = std.mem.indexOfScalarPos(u8, name, start, '\'') orelse unreachable;
-    return name[start..end];
 }

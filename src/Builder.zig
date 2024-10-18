@@ -7,14 +7,24 @@ const Instruction = @import("instruction.zig").Instruction;
 const Builder = @This();
 
 // Labels are just an index to the target instruction (in bytes)
-pub const Label = u32;
+pub const Label = u16;
 
 /// Metadata information about an instruction
 pub const InstructionInfo = struct {
     const IndexMode = enum { @"8bit", @"16bit" };
 
+    /// A relocatoion indicates that this instruction has an operand to another symbol,
+    /// which needs to be fixed after emitting the data into ROM
+    const Relocation = struct {
+        type: enum { absolute },
+        target_sym: SymbolPtr,
+        target_offset: u16,
+    };
+
     instr: Instruction,
     offset: u16,
+
+    reloc: ?Relocation,
     index_mode: IndexMode,
 
     caller_file: ?[]const u8,
@@ -31,10 +41,9 @@ instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 symbol_name: ?[]const u8 = null,
 source_location: ?std.builtin.SourceLocation = null,
 
-pub fn init(sys: *BuildSystem, sym: Symbol) Builder {
+pub fn init(sys: *BuildSystem, sym: SymbolPtr) Builder {
     return .{
         .build_system = sys,
-
         .symbol = sym,
     };
 }
@@ -56,12 +65,17 @@ pub fn define_label(b: Builder) Label {
 // NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
 pub fn emit(b: *Builder, instr: Instruction) void {
+    b.emit_extra(instr, null);
+}
+
+pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Relocation) void {
     const caller_file, const caller_line = b.resolve_caller_src(@returnAddress()) orelse .{ null, null };
-    std.log.debug("File {?s}", .{caller_file});
 
     b.instruction_info.append(b.build_system.allocator, .{
         .instr = instr,
         .offset = @intCast(b.instruction_data.items.len),
+
+        .reloc = reloc,
         .index_mode = .@"8bit",
 
         .caller_file = caller_file,
@@ -71,15 +85,31 @@ pub fn emit(b: *Builder, instr: Instruction) void {
     instr.write_data(b.instruction_data.writer(b.build_system.allocator)) catch @panic("Out of memory");
 }
 
-pub fn emit_bra(b: *Builder, target: Label) void {
+/// Calls the target method
+pub fn call(b: *Builder, target: Symbol) void {
+    b.build_system.enqueue_function(target) catch @panic("Out of memory");
+
+    b.emit_extra(.{ .jsr = undefined }, .{
+        .type = .absolute,
+        .target_sym = target,
+        .target_offset = 0,
+    });
+}
+
+/// Always branch to the target label
+pub fn branch_always(b: *Builder, target: Label) void {
     // The offset is relative to the next instruction
     const offset: i32 = @as(i32, @intCast(target)) - (@as(i32, @intCast(b.instruction_data.items.len)) + comptime Instruction.bra.size());
 
-    if (offset < std.math.minInt(i8) or offset > std.math.maxInt(i8)) {
-        std.debug.panic("Offset {} is out of range for BRA instruction (-128..127)", .{offset});
+    if (offset >= std.math.minInt(i8) and offset <= std.math.maxInt(i8)) {
+        b.emit(.{ .bra = @intCast(offset) });
+    } else {
+        b.emit_extra(.{ .jmp = undefined }, .{
+            .type = .absolute,
+            .target_sym = b.symbol,
+            .target_offset = target,
+        });
     }
-
-    b.emit(.{ .bra = @intCast(offset) });
 }
 
 /// Unwinds the stack to find the line number of the calling function
