@@ -29,5 +29,6 @@ vectors: struct {
 
 // Vectors must have a target function, so default to this stub
 pub fn EmptyVector(b: *Builder) void {
+    b.setup_debug(@src(), @This(), "EmptyVector");
     b.emit(.rti);
 }

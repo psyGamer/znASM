@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const MappingMode = @import("Rom.zig").Header.Mode.Map;
+const Rom = @import("Rom.zig");
+const MappingMode = Rom.Header.Mode.Map;
 const Function = @import("Function.zig");
 const Builder = @import("Builder.zig");
 
@@ -37,8 +38,59 @@ pub fn generate_function(sys: *BuildSystem, sym: Function.Symbol) !void {
     builder.build();
 
     // Create function definiton
-    const function: Function = .{ .code = try builder.instruction_data.toOwnedSlice(sys.allocator) };
+    const function: Function = .{
+        .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
+        .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
+        .symbol_name = builder.symbol_name,
+    };
     try sys.functions.put(sys.allocator, sym, function);
+}
+
+pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype, cdl_writer: anytype) !void {
+    // Write symbol data
+    for (sys.functions.values()) |func| {
+        if (func.symbol_name == null) {
+            continue;
+        }
+
+        try mlb_writer.print("SnesPrgRom:{x}:{s}\n", .{ func.offset, func.symbol_name.? });
+    }
+
+    // Mark ROM regions
+    const CdlFlags = packed struct(u8) {
+        // Global CDL flags
+        code: bool = false,
+        data: bool = false,
+        jump_target: bool = false,
+        sub_entry_point: bool = false,
+        // SNES specific flags
+        index_mode_8: bool = false,
+        memory_mode_8: bool = false,
+        gsu: bool = false,
+        cx4: bool = false,
+    };
+
+    const cdl_data = try sys.allocator.alloc(CdlFlags, rom.len);
+    defer sys.allocator.free(cdl_data);
+
+    @memset(cdl_data, .{}); // Mark everything as unknown initially
+
+    for (sys.functions.values()) |func| {
+        @memset(cdl_data[func.offset..(func.offset + func.code.len)], .{ .code = true });
+    }
+
+    // Specific hash algorithm used by Mesen2 (See https://github.com/SourMesen/Mesen2/blob/master/Utilities/CRC32.cpp)
+    const crc = std.hash.crc.Crc(u32, .{
+        .polynomial = 0x77073096,
+        .initial = 0x00000000,
+        .reflect_input = false,
+        .reflect_output = false,
+        .xor_output = 0x00000000,
+    });
+
+    try cdl_writer.writeAll("CDLv2");
+    try cdl_writer.writeInt(u32, crc.hash(rom), .little);
+    try cdl_writer.writeAll(@ptrCast(cdl_data));
 }
 
 /// Calculates the real (non-mirrored) memory-mapped address of a symbol

@@ -24,7 +24,9 @@ pub fn main() !void {
         .version = 0,
         .vectors = .{
             .native = .{},
-            .emulation = .{},
+            .emulation = .{
+                .reset = Reset,
+            },
         },
     };
 
@@ -39,7 +41,12 @@ pub fn main() !void {
     var rom_file = try std.fs.cwd().createFile("Testbed.sfc", .{});
     defer rom_file.close();
 
-    try znasm.compile(config, rom_allocator, rom_file.writer());
+    var mlb_file = try std.fs.cwd().createFile("Testbed.mlb", .{});
+    defer mlb_file.close();
+    var cdl_file = try std.fs.cwd().createFile("Testbed.cdl", .{});
+    defer cdl_file.close();
+
+    try znasm.compile(config, rom_allocator, rom_file.writer(), mlb_file.writer(), cdl_file.writer());
 
     // try rom_file.writeAll(rom_data);
 
@@ -73,6 +80,15 @@ pub fn main() !void {
     // const rom_data = try rom.generateROM(rom_allocator);
     // defer rom_allocator.free(rom_data);
 
+}
+
+fn Reset(b: *znasm.Builder) void {
+    b.setup_debug(@src(), @This(), null);
+    const loop = b.define_label();
+    // for (0..100) |_| {
+    b.emit(.nop);
+    // }
+    b.emit_bra(loop);
 }
 
 // fn testing(comptime str: []const u8) fn () void {

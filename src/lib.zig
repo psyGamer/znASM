@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype) !void {
+pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, mlb_writer: anytype, cdl_writer: anytype) !void {
     var build_system: BuildSystem = try .init(allocator, config.mode.map);
 
     // Generate vector functions
@@ -58,11 +58,17 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype) !v
     defer allocator.free(rom_data);
 
     try writer.writeAll(rom_data);
+
+    // Write debug data
+    if (@TypeOf(mlb_writer) != @TypeOf(null) and @TypeOf(cdl_writer) != @TypeOf(null)) {
+        try build_system.write_debug_data(rom_data, mlb_writer, cdl_writer);
+    }
 }
 
 // Types
 pub const Config = @import("RomConfig.zig");
 pub const Rom = @import("Rom.zig");
+pub const Builder = @import("Builder.zig");
 
 // Util
 pub const size = @import("util/size.zig");
