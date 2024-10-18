@@ -87,7 +87,7 @@ fn Reset(b: *znasm.Builder) void {
 
     const loop = b.define_label();
 
-    for (0..255) |_| {
+    for (0..150) |_| {
         b.emit(.nop);
     }
 
@@ -95,6 +95,8 @@ fn Reset(b: *znasm.Builder) void {
 
     // Infinite loop
     b.branch_always(loop);
+
+    b.emit(.rts);
 }
 
 // fn testing(comptime str: []const u8) fn () void {
@@ -117,7 +119,14 @@ fn my_cool_func(b: *znasm.Builder) void {
     // b.emitBra(my_label);
     b.setup_debug(@src(), @This(), null);
 
-    b.emit(.nop);
+    const skip = b.create_label();
+    b.branch_always(skip);
+    {
+        b.emit(.nop);
+        b.emit(.nop);
+        b.emit(.nop);
+    }
+    skip.define(b);
     b.emit(.rts);
 
     // const my_local = b.defineLocal(Player);

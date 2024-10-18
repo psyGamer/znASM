@@ -38,8 +38,12 @@ pub fn generate_function(sys: *BuildSystem, sym: Function.Symbol) !void {
         }
 
         // Build function body
-        var builder: Builder = .init(sys, curr_sym);
-        builder.build();
+        var builder: Builder = .{
+            .build_system = sys,
+            .symbol = curr_sym,
+        };
+        defer builder.deinit();
+        try builder.build();
 
         // Create function definiton
         gop.value_ptr.* = .{

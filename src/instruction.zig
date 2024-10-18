@@ -71,6 +71,40 @@ pub const Instruction = union(InstructionType) {
         unreachable;
     }
 
+    pub fn to_data(instrs: []const Instruction, allocator: std.mem.Allocator) ![]u8 {
+        var data_size: usize = 0;
+        for (instrs) |instr| {
+            data_size += instr.size();
+        }
+
+        const data = try allocator.alloc(u8, data_size);
+        var offset: usize = 0;
+
+        outer: for (instrs) |instr| {
+            // TODO: Handle 8/16bit instructions
+
+            // Opcode
+            data[offset] = @intFromEnum(instr);
+            offset += 1;
+
+            // Operands
+            inline for (@typeInfo(Instruction).@"union".fields) |field| {
+                if (std.mem.eql(u8, field.name, @tagName(instr))) {
+                    if (@bitSizeOf(field.type) == 0) {
+                        // No other data associated
+                        continue :outer;
+                    }
+
+                    const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
+                    @memcpy(data[offset..(offset + operand_data.len)], &operand_data);
+                    offset += operand_data.len;
+                }
+            }
+        }
+
+        return data;
+    }
+
     /// Computes the size of opcode + operands
     pub inline fn size(instr: Instruction) u8 {
         return @as(InstructionType, instr).size();

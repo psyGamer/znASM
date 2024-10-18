@@ -147,21 +147,21 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     }
 
     // Write header data
-    std.log.debug("== ROM Header ==", .{});
-    std.log.debug("  Title: '{s}'", .{rom.header.title});
-    std.log.debug("  Mode:", .{});
+    std.log.info("== ROM Header ==", .{});
+    std.log.info("  Title: '{s}'", .{rom.header.title});
+    std.log.info("  Mode:", .{});
     switch (rom.header.mode.map) {
-        .lorom => std.log.debug("    Map: LoROM", .{}),
-        .hirom => std.log.debug("    Map: HiROM", .{}),
-        .exhirom => std.log.debug("    Map: ExHiROM", .{}),
+        .lorom => std.log.info("    Map: LoROM", .{}),
+        .hirom => std.log.info("    Map: HiROM", .{}),
+        .exhirom => std.log.info("    Map: ExHiROM", .{}),
     }
     switch (rom.header.mode.speed) {
-        .slow => std.log.debug("    Speed: Slow (2.68MHz)", .{}),
-        .fast => std.log.debug("    Speed: Fast (3.58MHz)", .{}),
+        .slow => std.log.info("    Speed: Slow (2.68MHz)", .{}),
+        .fast => std.log.info("    Speed: Fast (3.58MHz)", .{}),
     }
-    std.log.debug("  ROM size: {}", .{std.fmt.fmtIntSizeBin(@as(usize, @intCast(1024)) << @intCast(rom.header.rom_size_log2_kb))});
+    std.log.info("  ROM size: {}", .{std.fmt.fmtIntSizeBin(@as(usize, @intCast(1024)) << @intCast(rom.header.rom_size_log2_kb))});
     // RAM size of 0 = No RAM
-    std.log.debug("  RAM size: {}", .{std.fmt.fmtIntSizeBin(if (rom.header.ram_size_log2_kb == 0) 0 else @as(usize, @intCast(1024)) << @intCast(rom.header.ram_size_log2_kb))});
+    std.log.info("  RAM size: {}", .{std.fmt.fmtIntSizeBin(if (rom.header.ram_size_log2_kb == 0) 0 else @as(usize, @intCast(1024)) << @intCast(rom.header.ram_size_log2_kb))});
 
     const rom_size = @as(usize, @intCast(1024)) << @intCast(rom.header.rom_size_log2_kb);
     const rom_data = try allocator.alloc(u8, rom_size);
@@ -172,10 +172,10 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     var writer = fbs.writer();
 
     // Write segments
-    std.log.debug("  Segments:", .{});
+    std.log.info("  Segments:", .{});
     for (rom.segments) |seg| {
         // TODO: Respect segment bank
-        std.log.debug("    - Bank 0x{x:0>2}, Size 0x{x:0>4}, Offset 0x{x:0>6}", .{ seg.bank, seg.size, fbs.pos });
+        std.log.info("    - Bank 0x{x:0>2}, Size 0x{x:0>4}, Offset 0x{x:0>6}", .{ seg.bank, seg.size, fbs.pos });
         try writer.writeAll(seg.data.items[0..seg.size]);
     }
 
@@ -202,7 +202,7 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     try writer.writeInt(u16, checksum, .little);
     try writer.writeInt(u16, checksum_complement, .little);
 
-    std.log.debug("  Checksum: 0x{x:0>4} | 0x{x:0>4}", .{ checksum, checksum_complement });
+    std.log.info("  Checksum: 0x{x:0>4} | 0x{x:0>4}", .{ checksum, checksum_complement });
 
     return rom_data;
 }
