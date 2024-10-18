@@ -3,6 +3,7 @@ const Symbol = @import("Function.zig").Symbol;
 const SymbolPtr = @import("Function.zig").SymbolPtr;
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
+const RegA = @import("register/A.zig");
 
 const Builder = @This();
 
@@ -56,8 +57,12 @@ symbol: SymbolPtr,
 instruction_data: std.ArrayListUnmanaged(u8) = .{},
 instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
+reg_a: ?RegA = null,
+
 labels: std.ArrayListUnmanaged(*const Label) = .{},
 branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
+
+id_prng: std.Random.DefaultPrng = .init(0),
 
 // Debug data
 symbol_name: ?[]const u8 = null,
@@ -72,6 +77,7 @@ pub fn deinit(b: *Builder) void {
     b.branch_relocs.deinit(b.build_system.allocator);
 }
 
+/// Provides debug information to znASM for proper labels
 pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type: type, overwrite_symbol_name: ?[]const u8) void {
     b.symbol_name = overwrite_symbol_name orelse std.fmt.allocPrint(b.build_system.allocator, "{s}@{s}", .{ @typeName(declaring_type), src.fn_name }) catch @panic("Out of memory");
     b.source_location = src;
@@ -91,6 +97,24 @@ pub fn define_label(b: *Builder) *Label {
     var label = b.create_label();
     label.define(b);
     return label;
+}
+
+/// Creates a new unique ID to mark the current good state of a register
+pub fn register_id(b: *Builder) u64 {
+    return b.id_prng.next();
+}
+
+/// Sets up the A register in 8-bit mode
+pub fn reg_a8(b: *Builder) RegA {
+    b.reg_a = .{
+        .mode = .@"8bit",
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_a.?.id = b.register_id();
+
+    return b.reg_a.?;
 }
 
 // Instrucion Emitting
@@ -114,7 +138,12 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
         .caller_line = caller_line,
     }) catch @panic("Out of memory");
 
-    instr.write_data(b.instruction_data.writer(b.build_system.allocator)) catch @panic("Out of memory");
+    const indexing_mode = switch (instr.target_register()) {
+        .none => .none,
+        .a => b.reg_a.?.mode,
+        .x, .y => unreachable,
+    };
+    instr.write_data(b.instruction_data.writer(b.build_system.allocator), indexing_mode) catch @panic("Out of memory");
 }
 
 /// Calls the target method

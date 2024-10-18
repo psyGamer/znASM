@@ -5,6 +5,13 @@ pub const Instruction = union(InstructionType) {
     /// depending on the current register mode
     const Imm816 = packed union { imm8: u8, imm16: u16 };
 
+    /// Defines which indexing mode to use for Imm816 instructions
+    /// Should always be none for non-Imm816 instructions
+    pub const IndexingMode = enum { none, @"8bit", @"16bit" };
+
+    /// Represents the register used by an instruction
+    pub const RegisterType = enum { none, a, x, y };
+
     // TODO
     ora: void,
     @"and": void,
@@ -37,6 +44,13 @@ pub const Instruction = union(InstructionType) {
     /// Load Index Register Y from Memory
     ldy: Imm816,
 
+    /// Store Accumulator to Memory (Direct Page)
+    sta_addr8: u8,
+    /// Store Accumulator to Memory (Absolute)
+    sta_addr16: u16,
+    /// Store Accumulator to Memory (Long)
+    sta_addr24: u24,
+
     /// Compare Accumulator with Memory
     cmp: Imm816,
     /// Compare Index Register X with Memory
@@ -67,7 +81,7 @@ pub const Instruction = union(InstructionType) {
     nop: void,
 
     /// Coverts the instruction into the assembly bytes for it
-    pub fn write_data(instr: Instruction, writer: anytype) !void {
+    pub fn write_data(instr: Instruction, writer: anytype, indexing: IndexingMode) !void {
         // TODO: Handle 8/16bit instructions
         // Opcode
         try writer.writeByte(@intFromEnum(instr));
@@ -80,8 +94,23 @@ pub const Instruction = union(InstructionType) {
                     return;
                 }
 
-                const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
-                try writer.writeAll(&operand_data);
+                // Handle 8-bit / 16-bit instructions
+                if (field.type == Imm816) {
+                    std.debug.assert(indexing != .none);
+
+                    if (indexing == .@"8bit") {
+                        const value = @field(instr, field.name).imm8;
+                        try writer.writeInt(u8, value, .little);
+                    } else {
+                        const value = @field(instr, field.name).imm16;
+                        try writer.writeInt(u16, value, .little);
+                    }
+                } else {
+                    std.debug.assert(indexing == .none);
+
+                    const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
+                    try writer.writeAll(&operand_data);
+                }
 
                 return;
             }
@@ -114,9 +143,16 @@ pub const Instruction = union(InstructionType) {
                         continue :outer;
                     }
 
-                    const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
-                    @memcpy(data[offset..(offset + operand_data.len)], &operand_data);
-                    offset += operand_data.len;
+                    // Handle 8-bit / 16-bit instructions
+                    if (field.type == Imm816) {
+                        @panic("8-bit / 16-bit instructions aren't supported");
+                    } else {
+                        const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
+                        @memcpy(data[offset..(offset + operand_data.len)], &operand_data);
+                        offset += operand_data.len;
+                    }
+
+                    continue :outer;
                 }
             }
         }
@@ -127,6 +163,11 @@ pub const Instruction = union(InstructionType) {
     /// Computes the size of opcode + operands
     pub inline fn size(instr: Instruction) u8 {
         return @as(InstructionType, instr).size();
+    }
+
+    /// Checks which register is used for this instruction
+    pub fn target_register(instr: Instruction) RegisterType {
+        return @as(InstructionType, instr).target_register();
     }
 };
 
@@ -151,6 +192,21 @@ pub const InstructionType = enum(u8) {
     lda = 0xA9,
     ldx = 0xA2,
     ldy = 0xA0,
+
+    sta_addr8 = 0x85,
+    sta_addr16 = 0x8D,
+    sta_addr24 = 0x8F,
+    // sta_dpind_addr16 = 0x92,
+    // sta_dpind_addr24 = 0x87,
+    // sta_addr8_idx_x = 0x95,
+    // sta_addr16_idx_x = 0x9D,
+    // sta_addr24_idx_X = 0x9F,
+    // sta_addr16_idx_y = 0x99,
+    // sta_dpind_idx_x_addr16 = 0x81,
+    // sta_dpind_addr16_idx_y = 0x91,
+    // sta_dpind_addr24_idx_y = 0x97,
+    // sta_stack = 0x83,
+    // sta_stackind_idx_y = 0x93,
 
     cmp = 0xC9,
     cpx = 0xE0,
@@ -182,5 +238,15 @@ pub const InstructionType = enum(u8) {
         }
 
         unreachable;
+    }
+
+    /// Checks which register is used for this instruction
+    pub fn target_register(instr: InstructionType) Instruction.RegisterType {
+        return switch (instr) {
+            .lda, .cmp => .a,
+            .ldx, .cpx => .x,
+            .ldy, .cpy => .y,
+            else => .none,
+        };
     }
 };

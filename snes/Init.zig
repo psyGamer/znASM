@@ -1,5 +1,7 @@
 const znasm = @import("znasm");
 
+const reg = @import("reg.zig");
+
 pub fn Reset(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
 
@@ -25,5 +27,9 @@ pub fn Reset(b: *znasm.Builder) void {
 
 pub fn CPU(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
+
+    var a = b.reg_a8();
+    a = .load_store(b, reg.MEMSEL, 0x01);
+
     b.emit(.rts);
 }
