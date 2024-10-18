@@ -87,11 +87,11 @@ fn Reset(b: *znasm.Builder) void {
 
     const loop = b.define_label();
 
-    for (0..150) |_| {
+    for (0..15) |_| {
         b.emit(.nop);
     }
 
-    b.call(my_cool_func);
+    b.call(my_cool_func); // hi comment 2
 
     // Infinite loop
     b.branch_always(loop);

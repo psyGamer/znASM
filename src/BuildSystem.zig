@@ -184,11 +184,9 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
                 src_reader.streamUntilDelimiter(line_buffer.writer(sys.allocator), '\n', null) catch break :b;
 
                 const line = std.mem.trim(u8, line_buffer.items, " \t\n\r");
-                if (std.mem.startsWith(u8, line, "///")) {
-                    try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line["///".len..]));
-                } else if (std.mem.startsWith(u8, line, "//")) {
-                    try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line["//".len..]));
-                }
+                const comment_start = std.mem.indexOf(u8, line, "//") orelse continue;
+
+                try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line[(comment_start + "//".len)..]));
             }
         }
 
@@ -200,7 +198,7 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
         for (func.code_info) |info| {
             comment_buffer.clearRetainingCapacity();
             if (info.caller_line) |caller_line| {
-                while (comment_line < caller_line) : (comment_line += 1) {
+                while (comment_line <= caller_line) : (comment_line += 1) {
                     if (comments.get(comment_line)) |comment| {
                         if (comment_buffer.items.len != 0) {
                             try comment_buffer.appendSlice(sys.allocator, "\\n");
