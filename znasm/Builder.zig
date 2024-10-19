@@ -1,6 +1,7 @@
 const std = @import("std");
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
+const InstructionType = @import("instruction.zig").InstructionType;
 const Symbol = @import("symbol.zig").Symbol;
 const CallConv = @import("Function.zig").CallingConvention;
 const RegA = @import("register.zig").Register(.a);
@@ -51,8 +52,7 @@ pub const InstructionInfo = struct {
     reloc: ?Relocation,
     index_mode: IndexMode,
 
-    caller_file: ?[]const u8,
-    caller_line: ?u64,
+    comments: []const []const u8,
 };
 
 /// A value which is either an input or output of this function
@@ -60,6 +60,21 @@ pub const CallValue = union(enum) {
     a: void,
     x: void,
     y: void,
+};
+
+const SourceLocation = struct {
+    file: []const u8,
+    function: []const u8,
+};
+const SourceLocationHashContext = struct {
+    pub fn hash(_: SourceLocationHashContext, key: SourceLocation) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHashStrat(&hasher, key, .Deep);
+        return @truncate(hasher.final());
+    }
+    pub fn eql(_: SourceLocationHashContext, a: SourceLocation, b: SourceLocation, _: usize) bool {
+        return std.mem.eql(u8, a.file, b.file) and std.mem.eql(u8, a.function, b.function);
+    }
 };
 
 build_system: *BuildSystem,
@@ -93,6 +108,9 @@ labels: std.ArrayListUnmanaged(*const Label) = .{},
 branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
 
 // Debug data
+curr_caller_lines: std.ArrayHashMapUnmanaged(SourceLocation, u64, SourceLocationHashContext, true) = .{},
+prev_caller_lines: std.ArrayHashMapUnmanaged(SourceLocation, u64, SourceLocationHashContext, true) = .{},
+
 symbol_name: ?[]const u8 = null,
 source_location: ?std.builtin.SourceLocation = null,
 
@@ -113,6 +131,13 @@ pub fn deinit(b: *Builder) void {
 pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type: type, overwrite_symbol_name: ?[]const u8) void {
     b.symbol_name = overwrite_symbol_name orelse std.fmt.allocPrint(b.build_system.allocator, "{s}@{s}", .{ @typeName(declaring_type), src.fn_name }) catch @panic("Out of memory");
     b.source_location = src;
+
+    // Start capturing comments
+    const comments = b.resolve_comments(@returnAddress()) catch &.{};
+    for (comments) |comment| {
+        b.build_system.allocator.free(comment);
+    }
+    b.build_system.allocator.free(comments);
 }
 
 // Labels
@@ -194,21 +219,29 @@ pub fn reg_xy16(b: *Builder) struct { RegX, RegY } {
 // Instrucion Emitting
 
 pub fn emit(b: *Builder, instr: Instruction) void {
-    b.emit_extra(instr, null);
+    b.emit_extra(instr, .{});
+}
+pub fn emit_reloc(b: *Builder, instr_type: InstructionType, reloc: InstructionInfo.Relocation) void {
+    const instr = switch (instr_type) {
+        inline else => |t| @unionInit(Instruction, @tagName(t), undefined),
+    };
+    b.emit_extra(instr, .{ .reloc = reloc });
 }
 
-pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Relocation) void {
-    const caller_file, const caller_line = b.resolve_caller_src(@returnAddress()) orelse .{ null, null };
+pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
+    reloc: ?InstructionInfo.Relocation = null,
+    comments: ?[]const []const u8 = null,
+}) void {
+    const comments = extra.comments orelse b.resolve_comments(@returnAddress()) catch @as([]const []const u8, &.{});
 
     b.instruction_info.append(b.build_system.allocator, .{
         .instr = instr,
         .offset = @intCast(b.instruction_data.items.len),
 
-        .reloc = reloc,
+        .reloc = extra.reloc,
         .index_mode = .@"8bit",
 
-        .caller_file = caller_file,
-        .caller_line = caller_line,
+        .comments = comments,
     }) catch @panic("Out of memory");
 
     const indexing_mode = switch (instr.target_register()) {
@@ -239,7 +272,7 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
 
 // Helpers
 
-/// Calls the target method, automatically respecting the calling convention
+/// Calls the target method, respecting the target calling convention
 pub fn call(b: *Builder, target: Symbol.Function) void {
     const target_func = b.build_system.register_function(target) catch @panic("Out of memory");
     if (target_func.code.len == 0) {
@@ -249,6 +282,7 @@ pub fn call(b: *Builder, target: Symbol.Function) void {
     b.call_with_convention(target, target_func.call_conv);
 }
 
+/// Calls the target method, respecting the specified calling convention
 pub fn call_with_convention(b: *Builder, target: Symbol.Function, call_conv: CallConv) void {
     var change: ChangeStatusRegister = .{};
     if (call_conv.start_a_size != .none) {
@@ -284,16 +318,16 @@ pub fn call_with_convention(b: *Builder, target: Symbol.Function, call_conv: Cal
     }
 
     b.change_status_flags(change);
-    b.emit_extra(.{ .jsr = undefined }, .{
+    b.emit_reloc(.jsr, .{
         .type = .addr16,
         .target_sym = .{ .function = target },
         .target_offset = 0,
     });
 }
 
-/// Jumps the target subroutine
+/// Jumps to the target subroutine, without respecting the calling convention
 pub fn jump_subroutine(b: *Builder, target: Symbol.Function) void {
-    b.emit_extra(.{ .jsr = undefined }, .{
+    b.emit_reloc(.jsr, .{
         .type = .addr16,
         .target_sym = .{ .function = target },
         .target_offset = 0,
@@ -321,13 +355,13 @@ pub fn jump_long(b: *Builder, target: anytype) void {
         b.emit(.nop);
     } else if (@TypeOf(target) == Symbol) {
         std.debug.assert(target == .function);
-        b.emit_extra(.{ .jml = undefined }, .{
+        b.emit_reloc(.jml, .{
             .type = .addr24,
             .target_sym = target,
             .target_offset = 0,
         });
     } else if (@TypeOf(target) == Symbol.Function) {
-        b.emit_extra(.{ .jml = undefined }, .{
+        b.emit_reloc(.jml, .{
             .type = .addr24,
             .target_sym = .{ .function = target },
             .target_offset = 0,
@@ -514,8 +548,7 @@ fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.
             .offset = old_info.offset,
             .reloc = reloc,
             .index_mode = old_info.index_mode,
-            .caller_file = old_info.caller_file,
-            .caller_line = old_info.caller_line,
+            .comments = old_info.comments,
         };
 
         old_info.offset += instr.size();
@@ -530,13 +563,13 @@ fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.
     }
 }
 
-/// Unwinds the stack to find the line number of the calling function
-fn resolve_caller_src(b: Builder, start_addr: usize) ?struct { []const u8, u64 } {
+/// Unwinds the stack to find the calling code and retrieve code comments
+fn resolve_comments(b: *Builder, start_addr: usize) ![]const []const u8 {
     if (b.source_location == null) {
-        return null;
+        return &.{};
     }
 
-    const debug_info = std.debug.getSelfDebugInfo() catch return null;
+    const debug_info = try std.debug.getSelfDebugInfo();
 
     var context: std.debug.ThreadContext = undefined;
     const has_context = std.debug.getContext(&context);
@@ -548,20 +581,76 @@ fn resolve_caller_src(b: Builder, start_addr: usize) ?struct { []const u8, u64 }
 
     while (it.next()) |return_address| {
         const addr = return_address -| 1;
-        const module = debug_info.getModuleForAddress(addr) catch return null;
-        const symbol = module.getSymbolAtAddress(b.build_system.allocator, addr) catch return null;
-        defer if (symbol.source_location) |sl| debug_info.allocator.free(sl.file_name);
+        const module = try debug_info.getModuleForAddress(addr);
+        const symbol = try module.getSymbolAtAddress(b.build_system.allocator, addr);
 
-        const srcloc = symbol.source_location orelse continue;
+        const srcloc = symbol.source_location orelse {
+            if (symbol.source_location) |sl| debug_info.allocator.free(sl.file_name);
+            continue;
+        };
 
-        // TODO: Handle windows stupid \
-        if (std.mem.endsWith(u8, srcloc.file_name, b.source_location.?.file)) {
-            return .{
-                b.build_system.allocator.dupe(u8, srcloc.file_name) catch return null,
-                srcloc.line,
-            };
-        }
+        try b.curr_caller_lines.put(b.build_system.allocator, .{ .file = srcloc.file_name, .function = symbol.name }, srcloc.line);
     }
 
-    return null;
+    // Find first movement (we dont want a different path in a macro to cause comments)
+    var comments: std.ArrayListUnmanaged([]const u8) = .{};
+    errdefer {
+        for (comments.items) |comment| {
+            b.build_system.allocator.free(comment);
+        }
+        comments.deinit(b.build_system.allocator);
+    }
+
+    var i: usize = b.curr_caller_lines.count() - 1;
+    while (true) {
+        const srcloc = b.curr_caller_lines.keys()[i];
+        const curr_line = b.curr_caller_lines.values()[i];
+        if (b.prev_caller_lines.get(srcloc)) |prev_line| {
+            if (curr_line > prev_line) {
+                // Found important code location
+
+                var src_file = try std.fs.cwd().openFile(srcloc.file, .{});
+                defer src_file.close();
+
+                var buf_reader = std.io.bufferedReader(src_file.reader());
+                const src_reader = buf_reader.reader();
+
+                // Go to previous line
+                for (1..prev_line) |_| {
+                    try src_reader.skipUntilDelimiterOrEof('\n');
+                }
+
+                // Read inbetween lines
+
+                var line_buffer: std.ArrayListUnmanaged(u8) = .{};
+                defer line_buffer.deinit(b.build_system.allocator);
+
+                for (prev_line..(curr_line + 1)) |_| {
+                    line_buffer.clearRetainingCapacity();
+                    try src_reader.streamUntilDelimiter(line_buffer.writer(b.build_system.allocator), '\n', null);
+
+                    const line = std.mem.trim(u8, line_buffer.items, " \t\n\r");
+                    const comment_start = std.mem.indexOf(u8, line, "//") orelse continue;
+
+                    try comments.append(b.build_system.allocator, try b.build_system.allocator.dupe(u8, line[(comment_start + "//".len)..]));
+                }
+
+                break;
+            }
+        }
+
+        if (i == 0) break;
+        i -= 1;
+    }
+
+    const prev = b.prev_caller_lines;
+    b.prev_caller_lines = b.curr_caller_lines;
+    b.curr_caller_lines = prev;
+
+    for (b.curr_caller_lines.keys()) |key| {
+        b.build_system.allocator.free(key.file);
+    }
+    b.curr_caller_lines.clearRetainingCapacity();
+
+    return comments.toOwnedSlice(b.build_system.allocator);
 }

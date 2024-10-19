@@ -174,78 +174,26 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
             continue;
         }
 
-        // Try collecting comments
-        var comments: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{};
-        defer comments.deinit(sys.allocator);
-
-        b: {
-            const file_path = find_file: {
-                for (func.code_info) |info| {
-                    if (info.caller_file) |file| {
-                        break :find_file file;
-                    }
-                }
-                break :b;
-            };
-
-            var src_file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-                std.log.err("Failed collecting comments for function '{s}': '{s}' {}", .{ func.symbol_name.?, file_path, err });
-                break :b;
-            };
-            defer src_file.close();
-
-            const src_reader = src_file.reader();
-
-            // Go to function start
-            for (1..func.source.?.line) |_| {
-                src_reader.skipUntilDelimiterOrEof('\n') catch break :b;
-            }
-
-            var line_buffer: std.ArrayListUnmanaged(u8) = .{};
-            defer line_buffer.deinit(sys.allocator);
-
-            var src_line = func.source.?.line;
-            const last_line = func.code_info[func.code_info.len - 1].caller_line orelse break :b;
-
-            while (src_line <= last_line) : (src_line += 1) {
-                line_buffer.clearRetainingCapacity();
-                src_reader.streamUntilDelimiter(line_buffer.writer(sys.allocator), '\n', null) catch break :b;
-
-                const line = std.mem.trim(u8, line_buffer.items, " \t\n\r");
-                const comment_start = std.mem.indexOf(u8, line, "//") orelse continue;
-
-                try comments.put(sys.allocator, src_line, try sys.allocator.dupe(u8, line[(comment_start + "//".len)..]));
-            }
-        }
-
-        // Write symbols
-        var comment_line: u32 = 0;
-        var comment_buffer: std.ArrayListUnmanaged(u8) = .{};
-        defer comment_buffer.deinit(sys.allocator);
-
+        // Write labels / comments
         for (func.code_info) |info| {
-            comment_buffer.clearRetainingCapacity();
-            if (info.caller_line) |caller_line| {
-                while (comment_line <= caller_line) : (comment_line += 1) {
-                    if (comments.get(comment_line)) |comment| {
-                        if (comment_buffer.items.len != 0) {
-                            try comment_buffer.appendSlice(sys.allocator, "\\n");
-                        }
-                        try comment_buffer.appendSlice(sys.allocator, comment);
-                    }
-                }
-            }
-
             const label = if (info.offset == 0)
                 func.symbol_name orelse ""
             else
                 "";
 
-            if (comment_buffer.items.len == 0 and label.len == 0) {
-                continue;
+            try mlb_writer.print("SnesPrgRom:{x}:{s}", .{ func.offset + info.offset, label });
+
+            for (info.comments, 0..) |comment, i| {
+                if (i == 0) {
+                    try mlb_writer.writeByte(':');
+                } else {
+                    try mlb_writer.writeAll("\\n");
+                }
+
+                try mlb_writer.writeAll(comment);
             }
 
-            try mlb_writer.print("SnesPrgRom:{x}:{s}:{s}\n", .{ func.offset + info.offset, label, comment_buffer.items });
+            try mlb_writer.writeByte('\n');
         }
     }
 

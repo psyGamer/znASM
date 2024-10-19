@@ -88,10 +88,10 @@ pub fn Register(comptime reg_type: enum { a, x, y }) type {
 
             if (@TypeOf(target) == FixedAddress) {
                 // TODO: Ensure target is in the same bank
-                reg.builder.emit_extra(switch (reg_type) {
-                    .a => .{ .sta_addr16 = undefined },
-                    .x => .{ .stx_addr16 = undefined },
-                    .y => .{ .sty_addr16 = undefined },
+                reg.builder.emit_reloc(switch (reg_type) {
+                    .a => .sta_addr16,
+                    .x => .stx_addr16,
+                    .y => .sty_addr16,
                 }, .{
                     .type = .addr16,
                     .target_sym = target.symbol(),

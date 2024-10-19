@@ -33,7 +33,7 @@ pub fn reset(b: *znasm.Builder) void {
     });
 
     // Initialize system
-    b.call(init_cpu);
+    init_cpu(b);
 
     var a = b.reg_a8();
     a = .load_store(b, MEMSEL, 0x12);
@@ -43,18 +43,8 @@ pub fn reset(b: *znasm.Builder) void {
     b.branch_always(loop);
 }
 
-pub fn init_cpu(b: *znasm.Builder) void {
-    b.setup_debug(@src(), @This(), null);
-
-    var a = b.reg_a16();
-    a = .load_store(b, MEMSEL, 0x0456);
-    a = .a16(b);
-    a = .load_store(b, MEMSEL, 0x0123);
-
-    var x = b.reg_x16();
-    x = .load_store(b, MEMSEL, 0x1234);
-    var y = b.reg_y16();
-    y = .load_store(b, MEMSEL, 0x5678);
-
-    b.emit(.rts);
+fn init_cpu(b: *znasm.Builder) void {
+    b.emit(.nop);
+    // hi
+    b.emit(.nop);
 }
