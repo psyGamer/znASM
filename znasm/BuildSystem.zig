@@ -4,6 +4,7 @@ const Rom = @import("Rom.zig");
 const MappingMode = Rom.Header.Mode.Map;
 const Function = @import("Function.zig");
 const Builder = @import("Builder.zig");
+const Symbol = @import("symbol.zig").Symbol;
 
 const BuildSystem = @This();
 
@@ -11,9 +12,8 @@ allocator: std.mem.Allocator,
 
 mapping_mode: MappingMode,
 
-functions: std.AutoArrayHashMapUnmanaged(Function.SymbolPtr, Function) = .{},
-/// List of functions which need to be analysed as a dependency of others
-function_queue: std.ArrayListUnmanaged(Function.SymbolPtr) = .{},
+/// Resolved function symbols
+functions: std.AutoArrayHashMapUnmanaged(Symbol.Function, Function) = .{},
 
 pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSystem {
     return .{
@@ -22,44 +22,40 @@ pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSyste
     };
 }
 
-/// Generates assembly for the symbol and marks it for inclusion in the ROM
-pub fn generate_function(sys: *BuildSystem, sym: Function.Symbol) !void {
-    if (comptime builtin.cpu.arch.endian() != .little) {
-        @compileError("Currently, znASM only supports compiling for little-endian targets");
-    }
-
-    try sys.enqueue_function(sym);
-
-    while (sys.function_queue.popOrNull()) |curr_sym| {
-        const gop = try sys.functions.getOrPut(sys.allocator, curr_sym);
-        if (gop.found_existing) {
-            // Already generated
-            continue;
+/// Registers the symbol to the build-system, causing it to be included in the ROM
+pub fn register_symbol(sys: *BuildSystem, sym: anytype) !void {
+    if (@TypeOf(sym) == Symbol) {
+        switch (sym) {
+            .function => |func_sym| try sys.register_function(func_sym),
         }
-
-        // Build function body
-        var builder: Builder = .{
-            .build_system = sys,
-            .symbol = curr_sym,
-        };
-        defer builder.deinit();
-        try builder.build();
-
-        // Create function definiton
-        gop.value_ptr.* = .{
-            .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
-            .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
-            .symbol_name = builder.symbol_name,
-            .source = builder.source_location,
-        };
-
-        std.log.debug("Compiled function '{?s}'", .{gop.value_ptr.symbol_name});
+    } else if (@TypeOf(sym) == Symbol.Function) {
+        try sys.register_function(sym);
     }
 }
 
-/// Marks a function for generation
-pub fn enqueue_function(sys: *BuildSystem, sym: Function.Symbol) !void {
-    try sys.function_queue.append(sys.allocator, sym);
+fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !void {
+    const gop = try sys.functions.getOrPut(sys.allocator, func_sym);
+    if (gop.found_existing) {
+        return; // Already generated
+    }
+
+    // Build function body
+    var builder: Builder = .{
+        .build_system = sys,
+        .symbol = func_sym,
+    };
+    defer builder.deinit();
+    try builder.build();
+
+    // Create function definiton
+    gop.value_ptr.* = .{
+        .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
+        .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
+        .symbol_name = builder.symbol_name,
+        .source = builder.source_location,
+    };
+
+    std.log.debug("Generated function '{s}'", .{gop.value_ptr.symbol_name orelse "<unknown>"});
 }
 
 /// Fixes target addresses of jump / branch instructions
@@ -71,7 +67,7 @@ pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
 
             switch (reloc.type) {
                 .rel8 => {
-                    const current_addr = sys.function_location(func) + info.offset;
+                    const current_addr = sys.offset_location(func.offset) + info.offset;
                     const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
                     std.log.debug("Target {} from {}", .{ target_addr, current_addr });
                     const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
@@ -133,7 +129,12 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
             }
 
             if (info.reloc) |reloc| {
-                const target_func = sys.functions.get(reloc.target_sym) orelse @panic("Relocation to unknown symbol");
+                const target_sym = if (reloc.target_sym == .function)
+                    reloc.target_sym.function
+                else
+                    continue;
+
+                const target_func = sys.functions.get(target_sym) orelse @panic("Relocation to unknown symbol");
                 const target_instr = b: {
                     for (target_func.code_info) |target_info| {
                         std.log.debug("Reloc {} vs {}", .{ reloc.target_offset, target_info.offset });
@@ -253,20 +254,22 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 }
 
 /// Calculates the real (non-mirrored) memory-mapped address of a symbol
-pub fn symbol_location(sys: BuildSystem, sym: Function.SymbolPtr) u24 {
-    if (sys.functions.get(sym)) |func| {
-        return sys.function_location(func);
-    } else {
-        std.debug.panic("Tried to get offset of unknown symbol", .{});
-    }
+pub fn symbol_location(sys: BuildSystem, sym: Symbol) u24 {
+    return switch (sym) {
+        .function => |func_sym| if (sys.functions.get(func_sym)) |func|
+            sys.offset_location(func.offset)
+        else
+            std.debug.panic("Tried to get offset of unknown symbol", .{}),
+        .register => |reg_sym| reg_sym,
+    };
 }
 
-/// Calculates the real (non-mirrored) memory-mapped address of a function
-pub fn function_location(sys: BuildSystem, func: Function) u24 {
+/// Calculates the real (non-mirrored) memory-mapped address of a offset into ROM
+pub fn offset_location(sys: BuildSystem, offset: u32) u24 {
     switch (sys.mapping_mode) {
         .lorom => {
-            const bank: u8 = @intCast(func.offset / 0x8000 + 0x80);
-            const addr: u16 = @intCast(func.offset % 0x8000 + 0x8000);
+            const bank: u8 = @intCast(offset / 0x8000 + 0x80);
+            const addr: u16 = @intCast(offset % 0x8000 + 0x8000);
             return @as(u24, bank) << 16 | addr;
         },
         .hirom => {

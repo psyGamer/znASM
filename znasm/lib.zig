@@ -1,18 +1,25 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+comptime {
+    if (builtin.cpu.arch.endian() != .little) {
+        @compileError("Currently, znASM only supports assemblying on little-endian host targets");
+    }
+}
 
 pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, mlb_writer: anytype, cdl_writer: anytype) !void {
     var build_system: BuildSystem = try .init(allocator, config.mode.map);
 
     // Generate vector functions
-    try build_system.generate_function(Config.EmptyVector);
-    try build_system.generate_function(config.vectors.native.cop);
-    try build_system.generate_function(config.vectors.native.brk);
-    try build_system.generate_function(config.vectors.native.nmi);
-    try build_system.generate_function(config.vectors.native.irq);
-    try build_system.generate_function(config.vectors.emulation.cop);
-    try build_system.generate_function(config.vectors.emulation.nmi);
-    try build_system.generate_function(config.vectors.emulation.reset);
-    try build_system.generate_function(config.vectors.emulation.irqbrk);
+    try build_system.register_symbol(Config.EmptyVector);
+    try build_system.register_symbol(config.vectors.native.cop);
+    try build_system.register_symbol(config.vectors.native.brk);
+    try build_system.register_symbol(config.vectors.native.nmi);
+    try build_system.register_symbol(config.vectors.native.irq);
+    try build_system.register_symbol(config.vectors.emulation.cop);
+    try build_system.register_symbol(config.vectors.emulation.nmi);
+    try build_system.register_symbol(config.vectors.emulation.reset);
+    try build_system.register_symbol(config.vectors.emulation.irqbrk);
 
     // Setup CODE segment
     var code_segment: Rom.Segment = .{
@@ -40,16 +47,16 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
     const rom: Rom = .{
         .header = try .init(config),
         .vectors = .{
-            .native_cop = @truncate(build_system.symbol_location(config.vectors.native.cop)),
-            .native_brk = @truncate(build_system.symbol_location(config.vectors.native.brk)),
-            .native_abort = @truncate(build_system.symbol_location(Config.EmptyVector)), // Unused
-            .native_nmi = @truncate(build_system.symbol_location(config.vectors.native.nmi)),
-            .native_irq = @truncate(build_system.symbol_location(config.vectors.native.irq)),
-            .emulation_cop = @truncate(build_system.symbol_location(config.vectors.emulation.cop)),
-            .emulation_abort = @truncate(build_system.symbol_location(Config.EmptyVector)), // Unused
-            .emulation_nmi = @truncate(build_system.symbol_location(config.vectors.emulation.nmi)),
-            .emulation_reset = @truncate(build_system.symbol_location(config.vectors.emulation.reset)),
-            .emulation_irqbrk = @truncate(build_system.symbol_location(config.vectors.emulation.irqbrk)),
+            .native_cop = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.cop })),
+            .native_brk = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.brk })),
+            .native_abort = @truncate(build_system.symbol_location(.{ .function = Config.EmptyVector })), // Unused
+            .native_nmi = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.nmi })),
+            .native_irq = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.irq })),
+            .emulation_cop = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.cop })),
+            .emulation_abort = @truncate(build_system.symbol_location(.{ .function = Config.EmptyVector })), // Unused
+            .emulation_nmi = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.nmi })),
+            .emulation_reset = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.reset })),
+            .emulation_irqbrk = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.irqbrk })),
         },
         .segments = &.{code_segment},
     };
@@ -71,6 +78,8 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
 pub const Config = @import("RomConfig.zig");
 pub const Rom = @import("Rom.zig");
 pub const Builder = @import("Builder.zig");
+
+pub const Register = @import("Register.zig");
 
 // Util
 pub const size = @import("util/size.zig");

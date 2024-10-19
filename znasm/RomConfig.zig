@@ -1,6 +1,6 @@
 const rom = @import("Rom.zig");
 const Builder = @import("Builder.zig");
-const Symbol = @import("Function.zig").Symbol;
+const FunctionSym = @import("symbol.zig").FunctionSym;
 
 title: []const u8,
 mode: rom.Header.Mode,
@@ -12,16 +12,16 @@ version: u8,
 
 vectors: struct {
     native: struct {
-        cop: Symbol = EmptyVector,
-        brk: Symbol = EmptyVector,
-        nmi: Symbol = EmptyVector,
-        irq: Symbol = EmptyVector,
+        cop: FunctionSym = EmptyVector,
+        brk: FunctionSym = EmptyVector,
+        nmi: FunctionSym = EmptyVector,
+        irq: FunctionSym = EmptyVector,
     },
     emulation: struct {
-        cop: Symbol = EmptyVector,
-        nmi: Symbol = EmptyVector,
-        reset: Symbol = EmptyVector,
-        irqbrk: Symbol = EmptyVector,
+        cop: FunctionSym = EmptyVector,
+        nmi: FunctionSym = EmptyVector,
+        reset: FunctionSym = EmptyVector,
+        irqbrk: FunctionSym = EmptyVector,
     },
 },
 

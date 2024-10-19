@@ -2,6 +2,7 @@
 const std = @import("std");
 const Builder = @import("../Builder.zig");
 const IndexingMode = @import("../instruction.zig").Instruction.IndexingMode;
+const Register = @import("../Register.zig");
 
 const RegA = @This();
 
@@ -49,13 +50,13 @@ pub fn store(reg: RegA, target: anytype) void {
         @panic("A Register is in an undefined state");
     }
 
-    // TODO: Wrap registers / memory address into some custom type
-    if (@TypeOf(target) == u8 or target >= 0 and target <= std.math.maxInt(u8)) {
-        reg.builder.emit(.{ .sta_addr8 = target });
-    } else if (@TypeOf(target) == u16 or target >= 0 and target <= std.math.maxInt(u16)) {
-        reg.builder.emit(.{ .sta_addr16 = target });
-    } else if (@TypeOf(target) == u24 or target >= 0 and target <= std.math.maxInt(u24)) {
-        reg.builder.emit(.{ .sta_addr24 = target });
+    if (@TypeOf(target) == Register) {
+        // TODO: Ensure target is in the same bank
+        reg.builder.emit_extra(.{ .sta_addr16 = undefined }, .{
+            .type = .addr16,
+            .target_sym = target.symbol(),
+            .target_offset = 0,
+        });
     } else {
         @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));
     }

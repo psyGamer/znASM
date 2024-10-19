@@ -1,8 +1,7 @@
 const std = @import("std");
-const Symbol = @import("Function.zig").Symbol;
-const SymbolPtr = @import("Function.zig").SymbolPtr;
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
+const Symbol = @import("symbol.zig").Symbol;
 const RegA = @import("register/A.zig");
 
 const Builder = @This();
@@ -37,7 +36,7 @@ pub const InstructionInfo = struct {
     /// which needs to be fixed after emitting the data into ROM
     const Relocation = struct {
         type: enum { rel8, addr8, addr16, addr24 },
-        target_sym: SymbolPtr,
+        target_sym: Symbol,
         target_offset: u16,
     };
 
@@ -53,7 +52,7 @@ pub const InstructionInfo = struct {
 
 build_system: *BuildSystem,
 
-symbol: SymbolPtr,
+symbol: Symbol.Function,
 instruction_data: std.ArrayListUnmanaged(u8) = .{},
 instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
@@ -147,12 +146,12 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
 }
 
 /// Calls the target method
-pub fn call(b: *Builder, target: Symbol) void {
-    b.build_system.enqueue_function(target) catch @panic("Out of memory");
+pub fn call(b: *Builder, target: Symbol.Function) void {
+    b.build_system.register_symbol(target) catch @panic("Out of memory");
 
     b.emit_extra(.{ .jsr = undefined }, .{
         .type = .addr16,
-        .target_sym = target,
+        .target_sym = .{ .function = target },
         .target_offset = 0,
     });
 }
@@ -176,10 +175,17 @@ pub fn jump_long(b: *Builder, target: anytype) void {
             .type = .jump_long,
         }) catch @panic("Out of memory");
         b.emit(.nop);
-    } else if (@TypeOf(target) == Symbol or @TypeOf(target) == SymbolPtr) {
+    } else if (@TypeOf(target) == Symbol) {
+        std.debug.assert(target == .function);
         b.emit_extra(.{ .jml = undefined }, .{
             .type = .addr24,
             .target_sym = target,
+            .target_offset = 0,
+        });
+    } else if (@TypeOf(target) == Symbol.Function) {
+        b.emit_extra(.{ .jml = undefined }, .{
+            .type = .addr24,
+            .target_sym = .{ .function = target },
             .target_offset = 0,
         });
     } else {
@@ -247,7 +253,7 @@ fn resolve_branch_relocs(b: *Builder) !void {
                         .{ .bra = undefined },
                     }, &.{.{
                         .type = .rel8,
-                        .target_sym = b.symbol,
+                        .target_sym = .{ .function = b.symbol },
                         .target_offset = target_offset - comptime Instruction.bra.size(),
                     }});
                 } else {
@@ -255,7 +261,7 @@ fn resolve_branch_relocs(b: *Builder) !void {
                         .{ .jmp = undefined },
                     }, &.{.{
                         .type = .addr16,
-                        .target_sym = b.symbol,
+                        .target_sym = .{ .function = b.symbol },
                         .target_offset = target_offset,
                     }});
                 }
@@ -265,7 +271,7 @@ fn resolve_branch_relocs(b: *Builder) !void {
                     .{ .jml = undefined },
                 }, &.{.{
                     .type = .addr24,
-                    .target_sym = b.symbol,
+                    .target_sym = .{ .function = b.symbol },
                     .target_offset = target_offset,
                 }});
             },
