@@ -26,7 +26,7 @@ pub fn main() !void {
         .vectors = .{
             .native = .{},
             .emulation = .{
-                .reset = snes.Init.Reset,
+                .reset = snes.Init.reset,
             },
         },
     };

@@ -11,7 +11,7 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
     var build_system: BuildSystem = try .init(allocator, config.mode.map);
 
     // Generate vector functions
-    try build_system.register_symbol(Config.EmptyVector);
+    try build_system.register_symbol(Config.empty_vector);
     try build_system.register_symbol(config.vectors.native.cop);
     try build_system.register_symbol(config.vectors.native.brk);
     try build_system.register_symbol(config.vectors.native.nmi);
@@ -49,11 +49,11 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
         .vectors = .{
             .native_cop = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.cop })),
             .native_brk = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.brk })),
-            .native_abort = @truncate(build_system.symbol_location(.{ .function = Config.EmptyVector })), // Unused
+            .native_abort = @truncate(build_system.symbol_location(.{ .function = Config.empty_vector })), // Unused
             .native_nmi = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.nmi })),
             .native_irq = @truncate(build_system.symbol_location(.{ .function = config.vectors.native.irq })),
             .emulation_cop = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.cop })),
-            .emulation_abort = @truncate(build_system.symbol_location(.{ .function = Config.EmptyVector })), // Unused
+            .emulation_abort = @truncate(build_system.symbol_location(.{ .function = Config.empty_vector })), // Unused
             .emulation_nmi = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.nmi })),
             .emulation_reset = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.reset })),
             .emulation_irqbrk = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.irqbrk })),

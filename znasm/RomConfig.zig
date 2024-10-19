@@ -12,23 +12,23 @@ version: u8,
 
 vectors: struct {
     native: struct {
-        cop: FunctionSym = EmptyVector,
-        brk: FunctionSym = EmptyVector,
-        nmi: FunctionSym = EmptyVector,
-        irq: FunctionSym = EmptyVector,
+        cop: FunctionSym = empty_vector,
+        brk: FunctionSym = empty_vector,
+        nmi: FunctionSym = empty_vector,
+        irq: FunctionSym = empty_vector,
     },
     emulation: struct {
-        cop: FunctionSym = EmptyVector,
-        nmi: FunctionSym = EmptyVector,
-        reset: FunctionSym = EmptyVector,
-        irqbrk: FunctionSym = EmptyVector,
+        cop: FunctionSym = empty_vector,
+        nmi: FunctionSym = empty_vector,
+        reset: FunctionSym = empty_vector,
+        irqbrk: FunctionSym = empty_vector,
     },
 },
 
 // segments: []const rom.Segment,
 
 // Vectors must have a target function, so default to this stub
-pub fn EmptyVector(b: *Builder) void {
-    b.setup_debug(@src(), @This(), "EmptyVector");
+pub fn empty_vector(b: *Builder) void {
+    b.setup_debug(@src(), @This(), "empty_vector");
     b.emit(.rti);
 }

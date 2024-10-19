@@ -73,6 +73,12 @@ pub fn Register(comptime reg_type: enum { a, x, y }) type {
                 @compileError(std.fmt.comptimePrint("Unsupported value type '{s}'", .{@typeName(@TypeOf(value))}));
             }
 
+            b.clobbers.put(b.build_system.allocator, switch (reg_type) {
+                .a => .a,
+                .x => .x,
+                .y => .y,
+            }, {}) catch @panic("Out of memory");
+
             return .next(b);
         }
 

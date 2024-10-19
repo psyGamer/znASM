@@ -48,6 +48,8 @@ pub const Instruction = union(InstructionType) {
     rti: void,
     /// Return from Subroutine
     rts: void,
+    /// Return Long from Subroutine
+    rtl: void,
 
     /// Load Accumulator from Memory
     lda: Imm816,
@@ -219,6 +221,7 @@ pub const InstructionType = enum(u8) {
 
     rti = 0x40,
     rts = 0x60,
+    rtl = 0x6B,
 
     lda = 0xA9,
     ldx = 0xA2,

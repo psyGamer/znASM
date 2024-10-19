@@ -2,11 +2,14 @@ const std = @import("std");
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const Symbol = @import("symbol.zig").Symbol;
+const CallConv = @import("Function.zig").CallingConvention;
 const RegA = @import("register.zig").Register(.a);
 const RegX = @import("register.zig").Register(.x);
 const RegY = @import("register.zig").Register(.y);
 
 const Builder = @This();
+
+// NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
 /// Offset to target instruction from function start in bytes
 pub const Label = struct {
@@ -52,6 +55,13 @@ pub const InstructionInfo = struct {
     caller_line: ?u64,
 };
 
+/// A value which is either an input or output of this function
+pub const CallValue = union(enum) {
+    a: void,
+    x: void,
+    y: void,
+};
+
 build_system: *BuildSystem,
 
 symbol: Symbol.Function,
@@ -65,6 +75,19 @@ a_reg_id: ?u64 = null,
 x_reg_id: ?u64 = null,
 y_reg_id: ?u64 = null,
 
+// Calling convention
+start_a_size: Instruction.SizeMode = .none,
+start_xy_size: Instruction.SizeMode = .none,
+end_a_size: Instruction.SizeMode = .none,
+end_xy_size: Instruction.SizeMode = .none,
+
+/// Input values for this function
+inputs: std.AutoArrayHashMapUnmanaged(CallValue, void) = .{},
+/// Output values from this function
+outputs: std.AutoArrayHashMapUnmanaged(CallValue, void) = .{},
+/// Values which are modified by this function, potentially leaving them in an invalid state
+clobbers: std.AutoArrayHashMapUnmanaged(CallValue, void) = .{},
+
 // Branches
 labels: std.ArrayListUnmanaged(*const Label) = .{},
 branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
@@ -74,6 +97,10 @@ symbol_name: ?[]const u8 = null,
 source_location: ?std.builtin.SourceLocation = null,
 
 pub fn deinit(b: *Builder) void {
+    b.inputs.deinit(b.build_system.allocator);
+    b.outputs.deinit(b.build_system.allocator);
+    b.clobbers.deinit(b.build_system.allocator);
+
     for (b.labels.items) |label| {
         b.build_system.allocator.destroy(label);
     }
@@ -87,6 +114,8 @@ pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type:
     b.symbol_name = overwrite_symbol_name orelse std.fmt.allocPrint(b.build_system.allocator, "{s}@{s}", .{ @typeName(declaring_type), src.fn_name }) catch @panic("Out of memory");
     b.source_location = src;
 }
+
+// Labels
 
 /// Creates a new undefined label
 pub fn create_label(b: *Builder) *Label {
@@ -104,44 +133,65 @@ pub fn define_label(b: *Builder) *Label {
     return label;
 }
 
+// Registers
+
 /// Sets up the A register in 8-bit mode
 pub fn reg_a8(b: *Builder) RegA {
-    b.a_size = .@"8bit";
+    std.debug.assert(b.start_a_size != .@"16bit");
+    b.change_status_flags(.{ .a_8bit = true });
     return .next(b);
 }
 
 /// Sets up the A register in 16-bit mode
 pub fn reg_a16(b: *Builder) RegA {
-    b.a_size = .@"16bit";
+    std.debug.assert(b.start_a_size != .@"8bit");
+    b.change_status_flags(.{ .a_8bit = false });
     return .next(b);
 }
 
 /// Sets up the X register in 8-bit mode
 pub fn reg_x8(b: *Builder) RegX {
-    b.xy_size = .@"8bit";
+    std.debug.assert(b.start_xy_size != .@"16bit");
+    b.change_status_flags(.{ .xy_8bit = true });
     return .next(b);
 }
 
 /// Sets up the X register in 16-bit mode
 pub fn reg_x16(b: *Builder) RegX {
-    b.xy_size = .@"16bit";
+    std.debug.assert(b.start_xy_size != .@"8bit");
+    b.change_status_flags(.{ .xy_8bit = false });
     return .next(b);
 }
 
 /// Sets up the Y register in 8-bit mode
 pub fn reg_y8(b: *Builder) RegY {
-    b.xy_size = .@"8bit";
+    std.debug.assert(b.start_xy_size != .@"16bit");
+    b.change_status_flags(.{ .xy_8bit = true });
     return .next(b);
 }
 
 /// Sets up the Y register in 16-bit mode
 pub fn reg_y16(b: *Builder) RegY {
-    b.xy_size = .@"16bit";
+    std.debug.assert(b.start_xy_size != .@"8bit");
+    b.change_status_flags(.{ .xy_8bit = false });
     return .next(b);
 }
 
+/// Sets up the X and Y registers in 8-bit mode
+pub fn reg_xy8(b: *Builder) struct { RegX, RegY } {
+    std.debug.assert(b.start_xy_size != .@"16bit");
+    b.change_status_flags(.{ .xy_8bit = true });
+    return .{ .next(b), .next(b) };
+}
+
+/// Sets up the X and Y registers in 8-bit mode
+pub fn reg_xy16(b: *Builder) struct { RegX, RegY } {
+    std.debug.assert(b.start_xy_size != .@"8bit");
+    b.change_status_flags(.{ .xy_8bit = false });
+    return .{ .next(b), .next(b) };
+}
+
 // Instrucion Emitting
-// NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
 pub fn emit(b: *Builder, instr: Instruction) void {
     b.emit_extra(instr, null);
@@ -167,12 +217,82 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
         .x, .y => b.xy_size,
     };
     instr.write_data(b.instruction_data.writer(b.build_system.allocator), indexing_mode) catch @panic("Out of memory");
+
+    // Ensure every return leaves with the same register sizes
+    if (instr == .rts or instr == .rtl) {
+        if (b.a_size != .none) {
+            if (b.end_a_size == .none) {
+                b.end_a_size = b.a_size;
+            } else {
+                std.debug.assert(b.end_a_size == b.a_size);
+            }
+        }
+        if (b.xy_size != .none) {
+            if (b.end_xy_size == .none) {
+                b.end_xy_size = b.xy_size;
+            } else {
+                std.debug.assert(b.end_xy_size == b.xy_size);
+            }
+        }
+    }
 }
 
-/// Calls the target method
-pub fn call(b: *Builder, target: Symbol.Function) void {
-    b.build_system.register_symbol(target) catch @panic("Out of memory");
+// Helpers
 
+/// Calls the target method, automatically respecting the calling convention
+pub fn call(b: *Builder, target: Symbol.Function) void {
+    const target_func = b.build_system.register_function(target) catch @panic("Out of memory");
+    if (target_func.code.len == 0) {
+        @panic("Circular dependency detected: Target function isn't generated yet! Consider using call_with_convention() or jump_subroutine()");
+    }
+
+    b.call_with_convention(target, target_func.call_conv);
+}
+
+pub fn call_with_convention(b: *Builder, target: Symbol.Function, call_conv: CallConv) void {
+    var change: ChangeStatusRegister = .{};
+    if (call_conv.start_a_size != .none) {
+        if (b.start_a_size == .none) {
+            // Forward size
+            b.start_a_size = call_conv.start_a_size;
+        } else {
+            change.a_8bit = call_conv.start_a_size == .@"8bit";
+        }
+    }
+    if (call_conv.start_xy_size != .none) {
+        if (b.start_xy_size == .none) {
+            // Forward size
+            b.start_xy_size = call_conv.start_xy_size;
+        } else {
+            change.xy_8bit = call_conv.start_xy_size == .@"8bit";
+        }
+    }
+
+    if (call_conv.end_a_size != .none) {
+        b.a_size = call_conv.end_a_size;
+    }
+    if (call_conv.end_xy_size != .none) {
+        b.xy_size = call_conv.end_xy_size;
+    }
+
+    for (call_conv.clobbers) |clobber| {
+        switch (clobber) {
+            .a => _ = RegA.next(b),
+            .x => _ = RegX.next(b),
+            .y => _ = RegY.next(b),
+        }
+    }
+
+    b.change_status_flags(change);
+    b.emit_extra(.{ .jsr = undefined }, .{
+        .type = .addr16,
+        .target_sym = .{ .function = target },
+        .target_offset = 0,
+    });
+}
+
+/// Jumps the target subroutine
+pub fn jump_subroutine(b: *Builder, target: Symbol.Function) void {
     b.emit_extra(.{ .jsr = undefined }, .{
         .type = .addr16,
         .target_sym = .{ .function = target },
@@ -217,8 +337,7 @@ pub fn jump_long(b: *Builder, target: anytype) void {
     }
 }
 
-/// Changes non-null fields to the specfied value
-pub fn change_status_flags(b: *Builder, change: struct {
+const ChangeStatusRegister = struct {
     carry: ?bool = null,
     zero: ?bool = null,
     irq_disable: ?bool = null,
@@ -227,7 +346,10 @@ pub fn change_status_flags(b: *Builder, change: struct {
     a_8bit: ?bool = null,
     overflow: ?bool = null,
     negative: ?bool = null,
-}) void {
+};
+
+/// Changes non-null fields to the specfied value
+pub fn change_status_flags(b: *Builder, change: ChangeStatusRegister) void {
     var set: Instruction.StatusRegister = .{};
     var clear: Instruction.StatusRegister = .{};
 
@@ -243,12 +365,24 @@ pub fn change_status_flags(b: *Builder, change: struct {
 
     if (change.a_8bit) |value| {
         b.a_size = if (value) .@"8bit" else .@"16bit";
+        if (b.start_a_size == .none) {
+            b.start_a_size = b.a_size;
+        }
         _ = RegA.next(b);
     }
     if (change.xy_8bit) |value| {
         b.xy_size = if (value) .@"8bit" else .@"16bit";
+        if (b.start_xy_size == .none) {
+            b.start_xy_size = b.xy_size;
+        }
         _ = RegX.next(b);
         _ = RegY.next(b);
+
+        // Changing the index-register size from 16-bit to 8-bit clears the high-byte
+        if (b.xy_size == .@"8bit") {
+            b.clobbers.put(b.build_system.allocator, .x, {}) catch @panic("Out of memory");
+            b.clobbers.put(b.build_system.allocator, .y, {}) catch @panic("Out of memory");
+        }
     }
 
     if (set != @as(Instruction.StatusRegister, .{})) {

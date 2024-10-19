@@ -26,17 +26,18 @@ pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSyste
 pub fn register_symbol(sys: *BuildSystem, sym: anytype) !void {
     if (@TypeOf(sym) == Symbol) {
         switch (sym) {
-            .function => |func_sym| try sys.register_function(func_sym),
+            .function => |func_sym| _ = try sys.register_function(func_sym),
         }
     } else if (@TypeOf(sym) == Symbol.Function) {
-        try sys.register_function(sym);
+        _ = try sys.register_function(sym);
     }
 }
 
-fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !void {
+/// Registers and generates the specified function symbol
+pub fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !Function {
     const gop = try sys.functions.getOrPut(sys.allocator, func_sym);
     if (gop.found_existing) {
-        return; // Already generated
+        return gop.value_ptr.*; // Already generated
     }
 
     // Build function body
@@ -51,11 +52,22 @@ fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !void {
     gop.value_ptr.* = .{
         .code = try builder.instruction_data.toOwnedSlice(sys.allocator),
         .code_info = try builder.instruction_info.toOwnedSlice(sys.allocator),
+        .call_conv = .{
+            .start_a_size = builder.start_a_size,
+            .start_xy_size = builder.start_xy_size,
+            .end_a_size = builder.end_a_size,
+            .end_xy_size = builder.end_xy_size,
+
+            .inputs = try sys.allocator.dupe(Builder.CallValue, builder.inputs.keys()),
+            .outputs = try sys.allocator.dupe(Builder.CallValue, builder.outputs.keys()),
+            .clobbers = try sys.allocator.dupe(Builder.CallValue, builder.clobbers.keys()),
+        },
         .symbol_name = builder.symbol_name,
         .source = builder.source_location,
     };
 
     std.log.debug("Generated function '{s}'", .{gop.value_ptr.symbol_name orelse "<unknown>"});
+    return gop.value_ptr.*;
 }
 
 /// Fixes target addresses of jump / branch instructions

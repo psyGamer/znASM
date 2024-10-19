@@ -4,7 +4,11 @@ const reg = @import("reg.zig");
 
 const MEMSEL: znasm.FixedAddress = .init(0x420D, null);
 
-pub fn Reset(b: *znasm.Builder) void {
+pub fn reset(b: *znasm.Builder) void {
+    // Register sizes a 8-bits on reset
+    b.start_a_size = .@"8bit";
+    b.start_xy_size = .@"8bit";
+
     b.setup_debug(@src(), @This(), null);
 
     // Jump to fast mirror in bank 0x80
@@ -29,18 +33,21 @@ pub fn Reset(b: *znasm.Builder) void {
     });
 
     // Initialize system
-    b.call(CPU);
+    b.call(init_cpu);
+
+    var a = b.reg_a8();
+    a = .load_store(b, MEMSEL, 0x12);
 
     // Main loop
     const loop = b.define_label();
     b.branch_always(loop);
 }
 
-pub fn CPU(b: *znasm.Builder) void {
+pub fn init_cpu(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
 
-    var a = b.reg_a8();
-    a = .load_store(b, MEMSEL, 0x01);
+    var a = b.reg_a16();
+    a = .load_store(b, MEMSEL, 0x0456);
     a = .a16(b);
     a = .load_store(b, MEMSEL, 0x0123);
 
