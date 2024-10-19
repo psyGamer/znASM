@@ -79,7 +79,8 @@ pub const Config = @import("RomConfig.zig");
 pub const Rom = @import("Rom.zig");
 pub const Builder = @import("Builder.zig");
 
-pub const Register = @import("Register.zig");
+// Symbols
+pub const FixedAddress = @import("symbol/FixedAddress.zig");
 
 // Util
 pub const size = @import("util/size.zig");

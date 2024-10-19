@@ -2,9 +2,9 @@ const std = @import("std");
 const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const Symbol = @import("symbol.zig").Symbol;
-const RegA = @import("register/A.zig");
-const RegX = @import("register/X.zig");
-const RegY = @import("register/Y.zig");
+const RegA = @import("register.zig").Register(.a);
+const RegX = @import("register.zig").Register(.x);
+const RegY = @import("register.zig").Register(.y);
 
 const Builder = @This();
 
@@ -58,17 +58,16 @@ symbol: Symbol.Function,
 instruction_data: std.ArrayListUnmanaged(u8) = .{},
 instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
-reg_a: ?RegA = null,
-reg_x: ?RegX = null,
-reg_y: ?RegY = null,
+// Register State
+a_size: Instruction.SizeMode = .none,
+xy_size: Instruction.SizeMode = .none,
+a_reg_id: ?u64 = null,
+x_reg_id: ?u64 = null,
+y_reg_id: ?u64 = null,
 
-a_indexing: Instruction.IndexingMode = .none,
-xy_indexing: Instruction.IndexingMode = .none,
-
+// Branches
 labels: std.ArrayListUnmanaged(*const Label) = .{},
 branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
-
-id_prng: std.Random.DefaultPrng = .init(0),
 
 // Debug data
 symbol_name: ?[]const u8 = null,
@@ -83,7 +82,7 @@ pub fn deinit(b: *Builder) void {
     b.branch_relocs.deinit(b.build_system.allocator);
 }
 
-/// Provides debug information to znASM for proper labels
+/// Provides debug information for proper labels
 pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type: type, overwrite_symbol_name: ?[]const u8) void {
     b.symbol_name = overwrite_symbol_name orelse std.fmt.allocPrint(b.build_system.allocator, "{s}@{s}", .{ @typeName(declaring_type), src.fn_name }) catch @panic("Out of memory");
     b.source_location = src;
@@ -105,93 +104,40 @@ pub fn define_label(b: *Builder) *Label {
     return label;
 }
 
-/// Creates a new unique ID to mark the current good state of a register
-pub fn register_id(b: *Builder) u64 {
-    return b.id_prng.next();
-}
-
 /// Sets up the A register in 8-bit mode
 pub fn reg_a8(b: *Builder) RegA {
-    b.reg_a = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_a.?.id = b.register_id();
-
-    b.a_indexing = .@"8bit";
-
-    return b.reg_a.?;
+    b.a_size = .@"8bit";
+    return .next(b);
 }
 
 /// Sets up the A register in 16-bit mode
 pub fn reg_a16(b: *Builder) RegA {
-    b.reg_a = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_a.?.id = b.register_id();
-
-    b.a_indexing = .@"16bit";
-
-    return b.reg_a.?;
+    b.a_size = .@"16bit";
+    return .next(b);
 }
 
 /// Sets up the X register in 8-bit mode
 pub fn reg_x8(b: *Builder) RegX {
-    b.reg_x = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_x.?.id = b.register_id();
-
-    b.xy_indexing = .@"8bit";
-
-    return b.reg_x.?;
-}
-
-/// Sets up the A register in 8-bit mode
-pub fn reg_y8(b: *Builder) RegY {
-    b.reg_y = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_y.?.id = b.register_id();
-
-    b.xy_indexing = .@"8bit";
-
-    return b.reg_y.?;
+    b.xy_size = .@"8bit";
+    return .next(b);
 }
 
 /// Sets up the X register in 16-bit mode
 pub fn reg_x16(b: *Builder) RegX {
-    b.reg_x = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_x.?.id = b.register_id();
-
-    b.xy_indexing = .@"16bit";
-
-    return b.reg_x.?;
+    b.xy_size = .@"16bit";
+    return .next(b);
 }
 
-/// Sets up the A register in 16-bit mode
+/// Sets up the Y register in 8-bit mode
+pub fn reg_y8(b: *Builder) RegY {
+    b.xy_size = .@"8bit";
+    return .next(b);
+}
+
+/// Sets up the Y register in 16-bit mode
 pub fn reg_y16(b: *Builder) RegY {
-    b.reg_y = .{
-        .builder = b,
-        .id = 0,
-    };
-    // Define ID after returning, since it's undefiend initially
-    defer b.reg_y.?.id = b.register_id();
-
-    b.xy_indexing = .@"16bit";
-
-    return b.reg_y.?;
+    b.xy_size = .@"16bit";
+    return .next(b);
 }
 
 // Instrucion Emitting
@@ -217,8 +163,8 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
 
     const indexing_mode = switch (instr.target_register()) {
         .none => .none,
-        .a => b.a_indexing,
-        .x, .y => b.xy_indexing,
+        .a => b.a_size,
+        .x, .y => b.xy_size,
     };
     instr.write_data(b.instruction_data.writer(b.build_system.allocator), indexing_mode) catch @panic("Out of memory");
 }
@@ -268,6 +214,48 @@ pub fn jump_long(b: *Builder, target: anytype) void {
         });
     } else {
         @compileError(std.fmt.comptimePrint("Unsupported target type '{s}'", .{@typeName(@TypeOf(target))}));
+    }
+}
+
+/// Changes non-null fields to the specfied value
+pub fn change_status_flags(b: *Builder, change: struct {
+    carry: ?bool = null,
+    zero: ?bool = null,
+    irq_disable: ?bool = null,
+    decimal: ?bool = null,
+    xy_8bit: ?bool = null,
+    a_8bit: ?bool = null,
+    overflow: ?bool = null,
+    negative: ?bool = null,
+}) void {
+    var set: Instruction.StatusRegister = .{};
+    var clear: Instruction.StatusRegister = .{};
+
+    inline for (std.meta.fields(Instruction.StatusRegister)) |field| {
+        if (@field(change, field.name)) |value| {
+            if (value) {
+                @field(set, field.name) = true;
+            } else {
+                @field(clear, field.name) = true;
+            }
+        }
+    }
+
+    if (change.a_8bit) |value| {
+        b.a_size = if (value) .@"8bit" else .@"16bit";
+        _ = RegA.next(b);
+    }
+    if (change.xy_8bit) |value| {
+        b.xy_size = if (value) .@"8bit" else .@"16bit";
+        _ = RegX.next(b);
+        _ = RegY.next(b);
+    }
+
+    if (set != @as(Instruction.StatusRegister, .{})) {
+        b.emit(.{ .sep = set });
+    }
+    if (clear != @as(Instruction.StatusRegister, .{})) {
+        b.emit(.{ .rep = clear });
     }
 }
 

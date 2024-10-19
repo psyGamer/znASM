@@ -5,9 +5,21 @@ pub const Instruction = union(InstructionType) {
     /// depending on the current register mode
     const Imm816 = packed union { imm8: u8, imm16: u16 };
 
-    /// Defines which indexing mode to use for Imm816 instructions
+    /// State of the Status Flags Register
+    pub const StatusRegister = packed struct(u8) {
+        carry: bool = false,
+        zero: bool = false,
+        irq_disable: bool = false,
+        decimal: bool = false,
+        xy_8bit: bool = false,
+        a_8bit: bool = false,
+        overflow: bool = false,
+        negative: bool = false,
+    };
+
+    /// Defines which size to use for Imm816 instructions
     /// Should always be none for non-Imm816 instructions
-    pub const IndexingMode = enum { none, @"8bit", @"16bit" };
+    pub const SizeMode = enum { none, @"8bit", @"16bit" };
 
     /// Represents the register used by an instruction
     pub const RegisterType = enum { none, a, x, y };
@@ -88,6 +100,11 @@ pub const Instruction = union(InstructionType) {
     /// Clear Overflow Flag
     clv: void,
 
+    /// Set Status Bits
+    sep: StatusRegister,
+    /// Reset Status Bits
+    rep: StatusRegister,
+
     /// Exchange Carry and Emulation Bits
     xce: void,
 
@@ -95,7 +112,7 @@ pub const Instruction = union(InstructionType) {
     nop: void,
 
     /// Coverts the instruction into the assembly bytes for it
-    pub fn write_data(instr: Instruction, writer: anytype, indexing: IndexingMode) !void {
+    pub fn write_data(instr: Instruction, writer: anytype, indexing: SizeMode) !void {
         // TODO: Handle 8/16bit instructions
         // Opcode
         try writer.writeByte(@intFromEnum(instr));
@@ -242,6 +259,9 @@ pub const InstructionType = enum(u8) {
     cli = 0x58,
     cld = 0xD8,
     clv = 0xB8,
+
+    sep = 0xE2,
+    rep = 0xC2,
 
     xce = 0xFB,
 

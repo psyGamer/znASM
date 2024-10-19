@@ -2,22 +2,31 @@ const znasm = @import("znasm");
 
 const reg = @import("reg.zig");
 
-const MEMSEL: znasm.Register = .init(0x420D);
+const MEMSEL: znasm.FixedAddress = .init(0x420D, null);
 
 pub fn Reset(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
 
-    b.emit(.sei); // Disable interrupts
+    // Jump to fast mirror in bank 0x80
+    const fast = b.create_label();
+    b.jump_long(fast);
+    fast.define(b);
 
     // Enter native mode
     b.emit(.clc);
     b.emit(.xce);
 
-    // Jump to fast mirror in bank 0x80
-    const fast = b.create_label();
-    b.jump_long(fast);
-
-    fast.define(b);
+    // Setup stauts flags
+    b.change_status_flags(.{
+        .carry = false,
+        .zero = false,
+        .irq_disable = true,
+        .decimal = false,
+        .xy_8bit = false,
+        .a_8bit = true,
+        .overflow = false,
+        .negative = false,
+    });
 
     // Initialize system
     b.call(CPU);
@@ -32,6 +41,8 @@ pub fn CPU(b: *znasm.Builder) void {
 
     var a = b.reg_a8();
     a = .load_store(b, MEMSEL, 0x01);
+    a = .a16(b);
+    a = .load_store(b, MEMSEL, 0x0123);
 
     var x = b.reg_x16();
     x = .load_store(b, MEMSEL, 0x1234);
