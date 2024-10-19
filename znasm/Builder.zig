@@ -3,6 +3,8 @@ const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const Symbol = @import("symbol.zig").Symbol;
 const RegA = @import("register/A.zig");
+const RegX = @import("register/X.zig");
+const RegY = @import("register/Y.zig");
 
 const Builder = @This();
 
@@ -57,6 +59,11 @@ instruction_data: std.ArrayListUnmanaged(u8) = .{},
 instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
 reg_a: ?RegA = null,
+reg_x: ?RegX = null,
+reg_y: ?RegY = null,
+
+a_indexing: Instruction.IndexingMode = .none,
+xy_indexing: Instruction.IndexingMode = .none,
 
 labels: std.ArrayListUnmanaged(*const Label) = .{},
 branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
@@ -106,14 +113,85 @@ pub fn register_id(b: *Builder) u64 {
 /// Sets up the A register in 8-bit mode
 pub fn reg_a8(b: *Builder) RegA {
     b.reg_a = .{
-        .mode = .@"8bit",
         .builder = b,
         .id = 0,
     };
     // Define ID after returning, since it's undefiend initially
     defer b.reg_a.?.id = b.register_id();
 
+    b.a_indexing = .@"8bit";
+
     return b.reg_a.?;
+}
+
+/// Sets up the A register in 16-bit mode
+pub fn reg_a16(b: *Builder) RegA {
+    b.reg_a = .{
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_a.?.id = b.register_id();
+
+    b.a_indexing = .@"16bit";
+
+    return b.reg_a.?;
+}
+
+/// Sets up the X register in 8-bit mode
+pub fn reg_x8(b: *Builder) RegX {
+    b.reg_x = .{
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_x.?.id = b.register_id();
+
+    b.xy_indexing = .@"8bit";
+
+    return b.reg_x.?;
+}
+
+/// Sets up the A register in 8-bit mode
+pub fn reg_y8(b: *Builder) RegY {
+    b.reg_y = .{
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_y.?.id = b.register_id();
+
+    b.xy_indexing = .@"8bit";
+
+    return b.reg_y.?;
+}
+
+/// Sets up the X register in 16-bit mode
+pub fn reg_x16(b: *Builder) RegX {
+    b.reg_x = .{
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_x.?.id = b.register_id();
+
+    b.xy_indexing = .@"16bit";
+
+    return b.reg_x.?;
+}
+
+/// Sets up the A register in 16-bit mode
+pub fn reg_y16(b: *Builder) RegY {
+    b.reg_y = .{
+        .builder = b,
+        .id = 0,
+    };
+    // Define ID after returning, since it's undefiend initially
+    defer b.reg_y.?.id = b.register_id();
+
+    b.xy_indexing = .@"16bit";
+
+    return b.reg_y.?;
 }
 
 // Instrucion Emitting
@@ -139,8 +217,8 @@ pub fn emit_extra(b: *Builder, instr: Instruction, reloc: ?InstructionInfo.Reloc
 
     const indexing_mode = switch (instr.target_register()) {
         .none => .none,
-        .a => b.reg_a.?.mode,
-        .x, .y => unreachable,
+        .a => b.a_indexing,
+        .x, .y => b.xy_indexing,
     };
     instr.write_data(b.instruction_data.writer(b.build_system.allocator), indexing_mode) catch @panic("Out of memory");
 }

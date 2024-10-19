@@ -51,6 +51,20 @@ pub const Instruction = union(InstructionType) {
     /// Store Accumulator to Memory (Long)
     sta_addr24: u24,
 
+    /// Store Index Register X to Memory (Direct Page)
+    stx_addr8: u8,
+    /// Store Index Register X to Memory (Absolute)
+    stx_addr16: u16,
+    /// Store Index Register X to Memory (Direct Page, Y Indexed)
+    stx_addr8_idx_y: u8,
+
+    /// Store Index Register Y to Memory (Direct Page)
+    sty_addr8: u8,
+    /// Store Index Register Y to Memory (Absolute)
+    sty_addr16: u16,
+    /// Store Index Register Y to Memory (Direct Page, X Indexed)
+    sty_addr8_idx_x: u8,
+
     /// Compare Accumulator with Memory
     cmp: Imm816,
     /// Compare Index Register X with Memory
@@ -207,6 +221,14 @@ pub const InstructionType = enum(u8) {
     // sta_dpind_addr24_idx_y = 0x97,
     // sta_stack = 0x83,
     // sta_stackind_idx_y = 0x93,
+
+    stx_addr8 = 0x86,
+    stx_addr16 = 0x8E,
+    stx_addr8_idx_y = 0x96,
+
+    sty_addr8 = 0x84,
+    sty_addr16 = 0x8C,
+    sty_addr8_idx_x = 0x94,
 
     cmp = 0xC9,
     cpx = 0xE0,

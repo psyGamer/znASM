@@ -69,7 +69,6 @@ pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
                 .rel8 => {
                     const current_addr = sys.offset_location(func.offset) + info.offset;
                     const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
-                    std.log.debug("Target {} from {}", .{ target_addr, current_addr });
                     const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
                     operand.* = @bitCast(rel_offset);
                 },
@@ -137,7 +136,6 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
                 const target_func = sys.functions.get(target_sym) orelse @panic("Relocation to unknown symbol");
                 const target_instr = b: {
                     for (target_func.code_info) |target_info| {
-                        std.log.debug("Reloc {} vs {}", .{ reloc.target_offset, target_info.offset });
                         if (reloc.target_offset <= target_info.offset) {
                             break :b target_info;
                         }
@@ -271,6 +269,100 @@ pub fn offset_location(sys: BuildSystem, offset: u32) u24 {
             const bank: u8 = @intCast(offset / 0x8000 + 0x80);
             const addr: u16 = @intCast(offset % 0x8000 + 0x8000);
             return @as(u24, bank) << 16 | addr;
+        },
+        .hirom => {
+            @panic("TODO: HiROM");
+        },
+        .exhirom => {
+            @panic("TODO: ExHiROM");
+        },
+    }
+}
+
+/// Fills the buffer with all mirrors of the specified memory-mapped address
+pub fn find_location_mirrors(sys: BuildSystem, location: u24, buffer: [256]u24) []u24 {
+    const bank: u8 = (location & 0xFF0000) >> 16;
+    const addr: u16 = (location & 0x00FFFF);
+
+    switch (sys.mapping_mode) {
+        .lorom => {
+            // I/O
+            if (addr >= 0x2000 and addr <= 0x6000 and
+                (bank >= 0x00 and bank <= 0x3F or
+                bank >= 0x80 and bank <= 0xBF))
+            {
+                var i: usize = 0;
+
+                for (0x00..0x40) |mirror_bank| {
+                    if (mirror_bank != bank) {
+                        buffer[i] = mirror_bank << 16 | addr;
+                        i += 1;
+                    }
+                }
+                for (0x80..0xC0) |mirror_bank| {
+                    if (mirror_bank != bank) {
+                        buffer[i] = mirror_bank << 16 | addr;
+                        i += 1;
+                    }
+                }
+
+                return buffer[0..i];
+            }
+
+            // ROM
+            if (addr >= 0x0000 and addr >= 0x8000) {
+                if (bank >= 0x00 and bank <= 0x7D) {
+                    buffer[0] = (bank + 0x80) << 16 | addr;
+                    return buffer[0..1];
+                } else if (bank >= 0x80 and bank <= 0xFF) {
+                    buffer[0] = (bank - 0x80) << 16 | addr;
+                    return buffer[0..1];
+                }
+            }
+
+            // RAM
+            if (bank >= 0x7E and bank <= 0x7F) {
+                // Low RAM original
+                if (bank == 0x7E and addr >= 0x0000 and addr < 0x2000) {
+                    var i: usize = 0;
+
+                    for (0x00..0x40) |mirror_bank| {
+                        buffer[i] = mirror_bank << 16 | addr;
+                        i += 1;
+                    }
+                    for (0x80..0xC0) |mirror_bank| {
+                        buffer[i] = mirror_bank << 16 | addr;
+                        i += 1;
+                    }
+
+                    return buffer[0..i];
+                }
+                // Low RAM mirrors
+                if (addr >= 0x0000 and addr < 0x2000 and
+                    (bank >= 0x00 and bank <= 0x3F or
+                    bank >= 0x80 and bank <= 0xBF))
+                {
+                    var i: usize = 1;
+
+                    for (0x00..0x40) |mirror_bank| {
+                        if (mirror_bank != bank) {
+                            buffer[i] = mirror_bank << 16 | addr;
+                            i += 1;
+                        }
+                    }
+                    for (0x80..0xC0) |mirror_bank| {
+                        if (mirror_bank != bank) {
+                            buffer[i] = mirror_bank << 16 | addr;
+                            i += 1;
+                        }
+                    }
+
+                    buffer[i] = 0x7E << 16 | addr;
+                    i += 1;
+
+                    return buffer[0..i];
+                }
+            }
         },
         .hirom => {
             @panic("TODO: HiROM");

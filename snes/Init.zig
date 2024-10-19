@@ -33,5 +33,10 @@ pub fn CPU(b: *znasm.Builder) void {
     var a = b.reg_a8();
     a = .load_store(b, MEMSEL, 0x01);
 
+    var x = b.reg_x16();
+    x = .load_store(b, MEMSEL, 0x1234);
+    var y = b.reg_y16();
+    y = .load_store(b, MEMSEL, 0x5678);
+
     b.emit(.rts);
 }
