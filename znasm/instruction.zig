@@ -107,6 +107,31 @@ pub const Instruction = union(InstructionType) {
     /// Reset Status Bits
     rep: StatusRegister,
 
+    /// Transfer A to X
+    tax: void,
+    /// Transfer A to Y
+    tay: void,
+    /// Transfer X to A
+    txa: void,
+    /// Transfer Y to A
+    tya: void,
+    /// Transfer X to Y
+    txy: void,
+    /// Transfer Y to X
+    tyx: void,
+    /// Transfer 16-bit A to Direct Page
+    tcd: void,
+    /// Transfer 16-bit A to Stack Pointer
+    tcs: void,
+    /// Transfer Direct Page to 16-bit A
+    tdc: void,
+    /// Transfer Stack Pointer to 16-bit A
+    tsc: void,
+    /// Transfer 16-bit X to Stack Pointer
+    txs: void,
+    /// Transfer Stack Pointer to X
+    tsx: void,
+
     /// Exchange Carry and Emulation Bits
     xce: void,
 
@@ -264,6 +289,19 @@ pub const InstructionType = enum(u8) {
 
     sep = 0xE2,
     rep = 0xC2,
+
+    tax = 0xAA,
+    tay = 0xA8,
+    txa = 0x8A,
+    tya = 0x98,
+    txy = 0x9B,
+    tyx = 0xBB,
+    tcd = 0x5B,
+    tcs = 0x1B,
+    tdc = 0x7B,
+    tsc = 0x3B,
+    txs = 0x9A,
+    tsx = 0xBA,
 
     xce = 0xFB,
 

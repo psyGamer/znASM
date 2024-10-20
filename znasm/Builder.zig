@@ -4,9 +4,9 @@ const Instruction = @import("instruction.zig").Instruction;
 const InstructionType = @import("instruction.zig").InstructionType;
 const Symbol = @import("symbol.zig").Symbol;
 const CallConv = @import("Function.zig").CallingConvention;
-const RegA = @import("register.zig").Register(.a);
-const RegX = @import("register.zig").Register(.x);
-const RegY = @import("register.zig").Register(.y);
+const RegA = @import("register.zig").RegA;
+const RegX = @import("register.zig").RegX;
+const RegY = @import("register.zig").RegY;
 
 const Builder = @This();
 
@@ -158,56 +158,48 @@ pub fn define_label(b: *Builder) *Label {
 
 /// Sets up the A register in 8-bit mode
 pub fn reg_a8(b: *Builder) RegA {
-    std.debug.assert(b.start_a_size != .@"16bit");
     b.change_status_flags(.{ .a_8bit = true });
     return .next(b);
 }
 
 /// Sets up the A register in 16-bit mode
 pub fn reg_a16(b: *Builder) RegA {
-    std.debug.assert(b.start_a_size != .@"8bit");
     b.change_status_flags(.{ .a_8bit = false });
     return .next(b);
 }
 
 /// Sets up the X register in 8-bit mode
 pub fn reg_x8(b: *Builder) RegX {
-    std.debug.assert(b.start_xy_size != .@"16bit");
     b.change_status_flags(.{ .xy_8bit = true });
     return .next(b);
 }
 
 /// Sets up the X register in 16-bit mode
 pub fn reg_x16(b: *Builder) RegX {
-    std.debug.assert(b.start_xy_size != .@"8bit");
     b.change_status_flags(.{ .xy_8bit = false });
     return .next(b);
 }
 
 /// Sets up the Y register in 8-bit mode
 pub fn reg_y8(b: *Builder) RegY {
-    std.debug.assert(b.start_xy_size != .@"16bit");
     b.change_status_flags(.{ .xy_8bit = true });
     return .next(b);
 }
 
 /// Sets up the Y register in 16-bit mode
 pub fn reg_y16(b: *Builder) RegY {
-    std.debug.assert(b.start_xy_size != .@"8bit");
     b.change_status_flags(.{ .xy_8bit = false });
     return .next(b);
 }
 
 /// Sets up the X and Y registers in 8-bit mode
 pub fn reg_xy8(b: *Builder) struct { RegX, RegY } {
-    std.debug.assert(b.start_xy_size != .@"16bit");
     b.change_status_flags(.{ .xy_8bit = true });
     return .{ .next(b), .next(b) };
 }
 
 /// Sets up the X and Y registers in 8-bit mode
 pub fn reg_xy16(b: *Builder) struct { RegX, RegY } {
-    std.debug.assert(b.start_xy_size != .@"8bit");
     b.change_status_flags(.{ .xy_8bit = false });
     return .{ .next(b), .next(b) };
 }

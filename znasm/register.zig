@@ -4,9 +4,13 @@ const Builder = @import("Builder.zig");
 const SizeMode = @import("instruction.zig").Instruction.SizeMode;
 const FixedAddress = @import("symbol/FixedAddress.zig");
 
+pub const RegA = Register(.a);
+pub const RegX = Register(.x);
+pub const RegY = Register(.y);
+
 var register_id_prng: std.Random.DefaultPrng = .init(0x00);
 
-pub fn Register(comptime reg_type: enum { a, x, y }) type {
+fn Register(comptime reg_type: enum { a, x, y }) type {
     return struct {
         const Reg = @This();
         const name = switch (reg_type) {
@@ -107,6 +111,91 @@ pub fn Register(comptime reg_type: enum { a, x, y }) type {
             const reg = load(b, value);
             reg.store(target);
             return reg;
+        }
+
+        /// Transfers the current value into the target register
+        pub fn transfer_to(reg: Reg, target: enum { a, x, y, direct_page, stack_ptr }) void {
+            switch (reg_type) {
+                .a => {
+                    switch (target) {
+                        .a => return, // No-Op
+                        .x => {
+                            if (reg.builder.a_size != reg.builder.xy_size) {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.tax);
+                            _ = RegX.next(reg.builder);
+                        },
+                        .y => {
+                            if (reg.builder.a_size != reg.builder.xy_size) {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.tay);
+                            _ = RegY.next(reg.builder);
+                        },
+                        .direct_page => {
+                            if (reg.builder.a_size != .@"16bit") {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.tcd);
+                        },
+                        .stack_ptr => {
+                            if (reg.builder.a_size != .@"16bit") {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.tcs);
+                        },
+                    }
+                },
+                .x => {
+                    switch (target) {
+                        .a => {
+                            if (reg.builder.xy_size != reg.builder.a_size) {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.txa);
+                            _ = RegA.next(reg.builder);
+                        },
+                        .x => return, // No-Op
+                        .y => {
+                            reg.builder.emit(.txy);
+                            _ = RegY.next(reg.builder);
+                        },
+                        .direct_page => @panic("Unsupported register transfer"),
+                        .stack_ptr => {
+                            if (reg.builder.xy_size != .@"16bit") {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.txs);
+                        },
+                    }
+                },
+                .y => {
+                    switch (target) {
+                        .a => {
+                            if (reg.builder.xy_size != reg.builder.a_size) {
+                                @panic("Source and Target registers must have same bit-size");
+                            }
+
+                            reg.builder.emit(.tya);
+                            _ = RegA.next(reg.builder);
+                        },
+                        .x => {
+                            reg.builder.emit(.tyx);
+                            _ = RegX.next(reg.builder);
+                        },
+                        .y => return, // No-Op
+                        .direct_page => @panic("Unsupported register transfer"),
+                        .stack_ptr => @panic("Unsupported register transfer"),
+                    }
+                },
+            }
         }
 
         /// Ensures the register doesn't contained undefiend data
