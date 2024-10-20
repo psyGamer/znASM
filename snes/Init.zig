@@ -3,6 +3,7 @@ const znasm = @import("znasm");
 const cpu = @import("cpu.zig");
 const ppu = @import("ppu.zig");
 const dma = @import("dma.zig");
+const hdma = @import("hdma.zig");
 
 pub fn reset(b: *znasm.Builder) void {
     // Register sizes a 8-bits on reset
@@ -65,8 +66,12 @@ fn init_cpu(b: *znasm.Builder) void {
         .vblank_interrupt = false,
     });
     // Disable HDMA
-    dma.set_hdma_enabled(b, .disable_all);
+    hdma.set_enabled(b, .disable_all);
 
     // Disable screen
     ppu.set_screen(b, .force_blank);
+
+    // Fill Work-RAM with zeros using 2 DMAs
+    dma.workram_memset(b, 0, 0x00000, 0x10000, 0x00);
+    dma.workram_memset(b, 0, 0x10000, 0x10000, 0x00);
 }

@@ -54,17 +54,17 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
                 .x, .y => b.xy_size,
             };
 
-            if (@TypeOf(value) == u8 or value >= 0 and value <= std.math.maxInt(u8)) {
+            if (@TypeOf(value) == u8 or (value >= 0 and value <= std.math.maxInt(u8))) {
                 if (size_mode != .@"8bit") {
                     std.debug.panic("Trying to load 8-bit value while in 16-bit mode", .{});
                 }
 
                 b.emit(switch (reg_type) {
-                    .a => .{ .lda = .{ .imm8 = value } },
-                    .x => .{ .ldx = .{ .imm8 = value } },
-                    .y => .{ .ldy = .{ .imm8 = value } },
+                    .a => .{ .lda = .{ .imm8 = @intCast(value) } },
+                    .x => .{ .ldx = .{ .imm8 = @intCast(value) } },
+                    .y => .{ .ldy = .{ .imm8 = @intCast(value) } },
                 });
-            } else if (@TypeOf(value) == u16 or value >= 0 and value <= std.math.maxInt(u16)) {
+            } else if (@TypeOf(value) == u16 or (value >= 0 and value <= std.math.maxInt(u16))) {
                 if (size_mode != .@"16bit") {
                     std.debug.panic("Trying to load 16-bit value while in 8-bit mode", .{});
                 }
@@ -89,6 +89,11 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
 
         /// Stores the current value into the target
         pub fn store(reg: Reg, target: anytype) void {
+            reg.store_offset(target, 0x00);
+        }
+
+        /// Stores the current value into the target + offset
+        pub fn store_offset(reg: Reg, target: anytype, offset: u16) void {
             reg.ensure_valid();
 
             if (@TypeOf(target) == Symbol.Address) {
@@ -100,7 +105,7 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
                 }, .{
                     .type = .addr16,
                     .target_sym = .{ .address = target },
-                    .target_offset = 0,
+                    .target_offset = offset,
                 });
             } else {
                 @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));

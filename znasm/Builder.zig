@@ -261,14 +261,33 @@ pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
 // Helpers
 
 /// Stores zero into the target symbol
-pub fn store_zero(b: *Builder, target: anytype) void {
+pub fn store_zero(b: *Builder, comptime size: Instruction.SizeMode, target: anytype) void {
     if (@TypeOf(target) == Symbol.Address) {
         // TODO: Handle symbols in other banks
-        b.emit_reloc(.stz_addr16, .{
-            .type = .addr16,
-            .target_sym = .{ .address = target },
-            .target_offset = 0,
-        });
+        if (b.a_size == size) {
+            b.emit_reloc(.stz_addr16, .{
+                .type = .addr16,
+                .target_sym = .{ .address = target },
+                .target_offset = 0,
+            });
+        } else if (b.a_size == .@"8bit" and size == .@"16bit") {
+            // Double write to avoid changing size
+            b.emit_reloc(.stz_addr16, .{
+                .type = .addr16,
+                .target_sym = .{ .address = target },
+                .target_offset = 0,
+            });
+            b.emit_reloc(.stz_addr16, .{
+                .type = .addr16,
+                .target_sym = .{ .address = target },
+                .target_offset = 1,
+            });
+        } else {
+            // Temporarily change bitwidth if needed
+            const prev_a_size = b.a_size;
+            b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
+            defer if (prev_a_size != .none) b.change_status_flags(.{ .a_8bit = prev_a_size == .@"8bit" });
+        }
     } else {
         @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));
     }
@@ -278,7 +297,7 @@ pub fn store_zero(b: *Builder, target: anytype) void {
 /// For non-zero values, the A Register might be clobbered
 pub fn store_value(b: *Builder, comptime size: Instruction.SizeMode, target: anytype, value: if (size == .@"8bit") u8 else u16) void {
     if (value == 0) {
-        b.store_zero(target);
+        b.store_zero(size, target);
     } else {
         // Try using a free X/Y register if they have the correct size, or the other one isn't used as well
         if (b.x_reg_id == null and (b.xy_size == size or b.y_reg_id == null)) {
@@ -295,9 +314,24 @@ pub fn store_value(b: *Builder, comptime size: Instruction.SizeMode, target: any
         }
 
         // Otherwise use A register
-        b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
-        var a: RegA = .next(b);
-        a = .load_store(b, target, value);
+        if (b.a_size == size) {
+            var a: RegA = .next(b);
+            a = .load_store(b, target, value);
+            return;
+        }
+
+        if (size == .@"16bit" and b.a_size == .@"8bit") {
+            // Double write to avoid changing size
+            var a: RegA = .next(b);
+            a = .load(b, @as(u8, @truncate(value >> 0)));
+            a.store_offset(target, 0x00);
+            a = .load(b, @as(u8, @truncate(value >> 8)));
+            a.store_offset(target, 0x01);
+        } else {
+            b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
+            var a: RegA = .next(b);
+            a = .load_store(b, target, value);
+        }
     }
 }
 

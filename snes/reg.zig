@@ -1,164 +1,188 @@
-const znasm = @import("znasm");
-const Builder = znasm.Builder;
+//! Definitions for all Memory-Mapped I/O regsiters, using the official names
+const Addr = @import("znasm").Address;
 
 // General Registers
 
-pub const MEMSEL: znasm.Address = 0x420D;
+pub const MEMSEL: Addr = 0x420D;
 
 // Interrupt Registers
 
-pub const NMITIMEN: znasm.Address = 0x4200;
-pub const HVBJOY: znasm.Address = 0x4212;
+pub const NMITIMEN: Addr = 0x4200;
+pub const HVBJOY: Addr = 0x4212;
 
-pub const HTIMEL: znasm.Address = 0x4207;
-pub const HTIMEH: znasm.Address = 0x4208;
+pub const HTIMEL: Addr = 0x4207;
+pub const HTIMEH: Addr = 0x4208;
 
-pub const VTIMEL: znasm.Address = 0x4209;
-pub const VTIMEH: znasm.Address = 0x420A;
+pub const VTIMEL: Addr = 0x4209;
+pub const VTIMEH: Addr = 0x420A;
 
-pub const RDNMI: znasm.Address = 0x4210;
+pub const RDNMI: Addr = 0x4210;
 
-pub const TIMEUP: znasm.Address = 0x4211;
+pub const TIMEUP: Addr = 0x4211;
 
 // ALU Registers
 
-pub const MPYL: znasm.Address = 0x2134;
-pub const MPYM: znasm.Address = 0x2135;
-pub const MPYH: znasm.Address = 0x2136;
+pub const MPYL: Addr = 0x2134;
+pub const MPYM: Addr = 0x2135;
+pub const MPYH: Addr = 0x2136;
 
-pub const WRMPYA: znasm.Address = 0x4202;
-pub const WRMPYB: znasm.Address = 0x4203;
+pub const WRMPYA: Addr = 0x4202;
+pub const WRMPYB: Addr = 0x4203;
 
-pub const WRDIVL: znasm.Address = 0x4204;
-pub const WRDIVH: znasm.Address = 0x4205;
-pub const WRDIVB: znasm.Address = 0x4206;
+pub const WRDIVL: Addr = 0x4204;
+pub const WRDIVH: Addr = 0x4205;
+pub const WRDIVB: Addr = 0x4206;
 
-pub const RDDIVL: znasm.Address = 0x4214;
-pub const RDDIVH: znasm.Address = 0x4215;
+pub const RDDIVL: Addr = 0x4214;
+pub const RDDIVH: Addr = 0x4215;
 
-pub const RDMPYL: znasm.Address = 0x4216;
-pub const RDMPYH: znasm.Address = 0x4217;
+pub const RDMPYL: Addr = 0x4216;
+pub const RDMPYH: Addr = 0x4217;
 
 // PPU Registers
 
-pub const INIDISP: znasm.Address = 0x2100;
+pub const INIDISP: Addr = 0x2100;
 
-pub const OBJSEL: znasm.Address = 0x2101;
+pub const OBJSEL: Addr = 0x2101;
 
-pub const OAMADDL: znasm.Address = 0x2102;
-pub const OAMADDH: znasm.Address = 0x2103;
-pub const OAMDATA: znasm.Address = 0x2104;
+pub const OAMADDL: Addr = 0x2102;
+pub const OAMADDH: Addr = 0x2103;
+pub const OAMDATA: Addr = 0x2104;
 
-pub const BGMODE: znasm.Address = 0x2105;
+pub const BGMODE: Addr = 0x2105;
 
-pub const MOSAIC: znasm.Address = 0x2106;
+pub const MOSAIC: Addr = 0x2106;
 
-pub const BG1SC: znasm.Address = 0x2107;
-pub const BG2CC: znasm.Address = 0x2108;
-pub const BG3SC: znasm.Address = 0x2109;
-pub const BG4SC: znasm.Address = 0x210A;
+pub const BG1SC: Addr = 0x2107;
+pub const BG2CC: Addr = 0x2108;
+pub const BG3SC: Addr = 0x2109;
+pub const BG4SC: Addr = 0x210A;
 
-pub const BG12NBA: znasm.Address = 0x210B;
-pub const BG34NBA: znasm.Address = 0x210C;
+pub const BG12NBA: Addr = 0x210B;
+pub const BG34NBA: Addr = 0x210C;
 
-pub const BG1HOFS: znasm.Address = 0x210D;
-pub const BG1VOFS: znasm.Address = 0x210E;
-pub const BG2HOFS: znasm.Address = 0x210F;
-pub const BG2VOFS: znasm.Address = 0x2110;
-pub const BG3HOFS: znasm.Address = 0x2111;
-pub const BG3VOFS: znasm.Address = 0x2112;
-pub const BG4HOFS: znasm.Address = 0x2113;
-pub const BG4VOFS: znasm.Address = 0x2114;
+pub const BG1HOFS: Addr = 0x210D;
+pub const BG1VOFS: Addr = 0x210E;
+pub const BG2HOFS: Addr = 0x210F;
+pub const BG2VOFS: Addr = 0x2110;
+pub const BG3HOFS: Addr = 0x2111;
+pub const BG3VOFS: Addr = 0x2112;
+pub const BG4HOFS: Addr = 0x2113;
+pub const BG4VOFS: Addr = 0x2114;
 
-pub const M7HOFS: znasm.Address = 0x210D;
-pub const M7VOFS: znasm.Address = 0x210E;
+pub const M7HOFS: Addr = 0x210D;
+pub const M7VOFS: Addr = 0x210E;
 
-pub const VMAIN: znasm.Address = 0x2115;
-pub const VMADDL: znasm.Address = 0x2116;
-pub const VMADDH: znasm.Address = 0x2117;
-pub const VMDATAL: znasm.Address = 0x2118;
-pub const VMDATAH: znasm.Address = 0x2119;
+pub const VMAIN: Addr = 0x2115;
+pub const VMADDL: Addr = 0x2116;
+pub const VMADDH: Addr = 0x2117;
+pub const VMDATAL: Addr = 0x2118;
+pub const VMDATAH: Addr = 0x2119;
 
-pub const M7SEL: znasm.Address = 0x211A;
-pub const M7A: znasm.Address = 0x211B;
-pub const M7B: znasm.Address = 0x211C;
-pub const M7C: znasm.Address = 0x211D;
-pub const M7D: znasm.Address = 0x211E;
-pub const M7X: znasm.Address = 0x211F;
-pub const M7Y: znasm.Address = 0x2120;
+pub const M7SEL: Addr = 0x211A;
+pub const M7A: Addr = 0x211B;
+pub const M7B: Addr = 0x211C;
+pub const M7C: Addr = 0x211D;
+pub const M7D: Addr = 0x211E;
+pub const M7X: Addr = 0x211F;
+pub const M7Y: Addr = 0x2120;
 
-pub const CGADD: znasm.Address = 0x2121;
-pub const CGDATA: znasm.Address = 0x2122;
+pub const CGADD: Addr = 0x2121;
+pub const CGDATA: Addr = 0x2122;
 
-pub const W12SEL: znasm.Address = 0x2123;
-pub const W34SEL: znasm.Address = 0x2124;
-pub const WOBJSEL: znasm.Address = 0x2125;
+pub const W12SEL: Addr = 0x2123;
+pub const W34SEL: Addr = 0x2124;
+pub const WOBJSEL: Addr = 0x2125;
 
-pub const WH0: znasm.Address = 0x2126;
-pub const WH1: znasm.Address = 0x2127;
-pub const WH2: znasm.Address = 0x2128;
-pub const WH3: znasm.Address = 0x2129;
+pub const WH0: Addr = 0x2126;
+pub const WH1: Addr = 0x2127;
+pub const WH2: Addr = 0x2128;
+pub const WH3: Addr = 0x2129;
 
-pub const WBGLOG: znasm.Address = 0x212A;
-pub const WOBJLOG: znasm.Address = 0x212B;
+pub const WBGLOG: Addr = 0x212A;
+pub const WOBJLOG: Addr = 0x212B;
 
-pub const TM: znasm.Address = 0x212C;
-pub const TS: znasm.Address = 0x212D;
+pub const TM: Addr = 0x212C;
+pub const TS: Addr = 0x212D;
 
-pub const TMW: znasm.Address = 0x212E;
-pub const TSW: znasm.Address = 0x212F;
+pub const TMW: Addr = 0x212E;
+pub const TSW: Addr = 0x212F;
 
-pub const CGWSEL: znasm.Address = 0x2130;
-pub const CGADSUB: znasm.Address = 0x2131;
+pub const CGWSEL: Addr = 0x2130;
+pub const CGADSUB: Addr = 0x2131;
 
-pub const SETINI: znasm.Address = 0x2133;
+pub const SETINI: Addr = 0x2133;
 
-pub const SLHV: znasm.Address = 0x2137;
+pub const SLHV: Addr = 0x2137;
 
-pub const OAMDATAREAD: znasm.Address = 0x2138;
+pub const OAMDATAREAD: Addr = 0x2138;
 
-pub const VMDATALREAD: znasm.Address = 0x2139;
-pub const VMDATAHREAD: znasm.Address = 0x213A;
+pub const VMDATALREAD: Addr = 0x2139;
+pub const VMDATAHREAD: Addr = 0x213A;
 
-pub const CGMDATAREAD: znasm.Address = 0x213B;
+pub const CGMDATAREAD: Addr = 0x213B;
 
-pub const OPHCT: znasm.Address = 0x213C;
-pub const OPVCT: znasm.Address = 0x213D;
+pub const OPHCT: Addr = 0x213C;
+pub const OPVCT: Addr = 0x213D;
 
-pub const STAT77: znasm.Address = 0x213E;
-pub const STAT78: znasm.Address = 0x213F;
+pub const STAT77: Addr = 0x213E;
+pub const STAT78: Addr = 0x213F;
 
 // DMA Registers
 
-pub const WMDATA: znasm.Address = 0x2180;
+pub const WMDATA: Addr = 0x2180;
 
-pub const WMADDL: znasm.Address = 0x2181;
-pub const WMADDM: znasm.Address = 0x2182;
-pub const WMADDH: znasm.Address = 0x2183;
+pub const WMADDL: Addr = 0x2181;
+pub const WMADDM: Addr = 0x2182;
+pub const WMADDH: Addr = 0x2183;
 
-pub const MDMAEN: znasm.Address = 0x420B;
-pub const HDMAEN: znasm.Address = 0x420C;
+pub const MDMAEN: Addr = 0x420B;
+pub const HDMAEN: Addr = 0x420C;
 
-// TODO: Channel specific registers
+pub const channel_0 = 0x00;
+pub const channel_1 = 0x10;
+pub const channel_2 = 0x20;
+pub const channel_3 = 0x30;
+pub const channel_4 = 0x40;
+pub const channel_5 = 0x50;
+pub const channel_6 = 0x60;
+pub const channel_7 = 0x70;
+
+pub const DMAPn: Addr = 0x4300;
+
+pub const BBADn: Addr = 0x4301;
+
+pub const A1TnL: Addr = 0x4302;
+pub const A1TnH: Addr = 0x4303;
+pub const A1Bn: Addr = 0x4304;
+
+pub const DASnL: Addr = 0x4305;
+pub const DASnH: Addr = 0x4306;
+pub const DASBn: Addr = 0x4307;
+
+pub const A2AnL: Addr = 0x4308;
+pub const A2AnH: Addr = 0x4309;
+
+pub const NLTRn: Addr = 0x430A;
 
 // Joypad Registers
 
-pub const JOYOUT: znasm.Address = 0x4016;
+pub const JOYOUT: Addr = 0x4016;
 
-pub const JOYSER0: znasm.Address = 0x4016;
-pub const JOYSER1: znasm.Address = 0x4017;
+pub const JOYSER0: Addr = 0x4016;
+pub const JOYSER1: Addr = 0x4017;
 
-pub const WRIO: znasm.Address = 0x4201;
-pub const RDIO: znasm.Address = 0x4213;
+pub const WRIO: Addr = 0x4201;
+pub const RDIO: Addr = 0x4213;
 
-pub const JOY1L: znasm.Address = 0x4218;
-pub const JOY1H: znasm.Address = 0x4219;
+pub const JOY1L: Addr = 0x4218;
+pub const JOY1H: Addr = 0x4219;
 
-pub const JOY2L: znasm.Address = 0x421A;
-pub const JOY2H: znasm.Address = 0x421B;
+pub const JOY2L: Addr = 0x421A;
+pub const JOY2H: Addr = 0x421B;
 
-pub const JOY3L: znasm.Address = 0x421C;
-pub const JOY3H: znasm.Address = 0x421D;
+pub const JOY3L: Addr = 0x421C;
+pub const JOY3H: Addr = 0x421D;
 
-pub const JOY4L: znasm.Address = 0x421E;
-pub const JOY4H: znasm.Address = 0x421F;
+pub const JOY4L: Addr = 0x421E;
+pub const JOY4H: Addr = 0x421F;
