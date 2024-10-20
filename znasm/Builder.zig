@@ -260,6 +260,19 @@ pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
 
 // Helpers
 
+/// Stores
+pub fn store_zero(b: *Builder, target: anytype) void {
+    if (@TypeOf(target) == @import("symbol/FixedAddress.zig")) {
+        b.emit_reloc(.stz_addr16, .{
+            .type = .addr16,
+            .target_sym = target.symbol(),
+            .target_offset = 0,
+        });
+    } else {
+        @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));
+    }
+}
+
 /// Calls the target method, respecting the target calling convention
 pub fn call(b: *Builder, target: Symbol.Function) void {
     const target_func = b.build_system.register_function(target) catch @panic("Out of memory");
@@ -313,15 +326,6 @@ pub fn call_with_convention(b: *Builder, target: Symbol.Function, call_conv: Cal
     });
 }
 
-/// Jumps to the target subroutine, without respecting the calling convention
-pub fn jump_subroutine(b: *Builder, target: Symbol.Function) void {
-    b.emit_reloc(.jsr, .{
-        .type = .addr16,
-        .target_sym = .{ .function = target },
-        .target_offset = 0,
-    });
-}
-
 /// Always branch to the target label
 pub fn branch_always(b: *Builder, target: *Label) void {
     b.emit_branch_reloc(.{
@@ -355,6 +359,70 @@ pub fn jump_long(b: *Builder, target: anytype) void {
     }
 }
 
+/// Jumps to the target subroutine, without respecting the calling convention
+pub fn jump_subroutine(b: *Builder, target: Symbol.Function) void {
+    b.emit_reloc(.jsr, .{
+        .type = .addr16,
+        .target_sym = .{ .function = target },
+        .target_offset = 0,
+    });
+}
+
+const StackValue = union(enum) {
+    a: void,
+    x: void,
+    y: void,
+    data_bank: void,
+    direct_page: void,
+    program_bank: void,
+    processor_status: void,
+
+    /// Loads the immediate address value
+    addr16: u16,
+    /// Indirectly load the address at the specified offset into the Direct Page
+    dpind_addr16: u8,
+    /// Loads the address of the PC + the offset
+    pcrel_addr16: i16,
+};
+
+/// Pushes the specified value onto the stack
+pub fn push_stack(b: *Builder, value: StackValue) void {
+    b.emit(switch (value) {
+        .a => .pha,
+        .x => .phx,
+        .y => .phy,
+        .data_bank => .phb,
+        .direct_page => .phd,
+        .program_bank => .phk,
+        .processor_status => .php,
+        .addr16 => |addr16| .{ .pea = addr16 },
+        .dpind_addr16 => |addr8| .{ .pei = addr8 },
+        .pcrel_addr16 => |offset| .{ .per = offset },
+    });
+}
+
+/// Pulls the specified value from the stack
+pub fn pull_stack(b: *Builder, value: StackValue) void {
+    b.emit(switch (value) {
+        .a => .pla,
+        .x => .plx,
+        .y => .ply,
+        .data_bank => .plb,
+        .direct_page => .pld,
+        .processor_status => .plp,
+
+        .program_bank, .addr16, .dpind_addr16, .pcrel_addr16 => std.debug.panic("Cannot pull value {} from stack", .{value}),
+    });
+
+    // Invalidate registers
+    switch (value) {
+        .a => _ = RegA.next(b),
+        .x => _ = RegX.next(b),
+        .y => _ = RegY.next(b),
+        else => {},
+    }
+}
+
 const ChangeStatusRegister = struct {
     carry: ?bool = null,
     zero: ?bool = null,
@@ -367,7 +435,41 @@ const ChangeStatusRegister = struct {
 };
 
 /// Changes non-null fields to the specfied value
-pub fn change_status_flags(b: *Builder, change: ChangeStatusRegister) void {
+pub fn change_status_flags(b: *Builder, change_status: ChangeStatusRegister) void {
+    var change = change_status;
+
+    if (change.a_8bit) |value| {
+        const new_size: Instruction.SizeMode = if (value) .@"8bit" else .@"16bit";
+        if (b.a_size != new_size) {
+            b.a_size = new_size;
+            if (b.start_a_size == .none) {
+                b.start_a_size = b.a_size;
+            }
+            _ = RegA.next(b);
+        } else {
+            change.a_8bit = null;
+        }
+    }
+    if (change.xy_8bit) |value| {
+        const new_size: Instruction.SizeMode = if (value) .@"8bit" else .@"16bit";
+        if (b.xy_size != new_size) {
+            b.xy_size = if (value) .@"8bit" else .@"16bit";
+            if (b.start_xy_size == .none) {
+                b.start_xy_size = b.xy_size;
+            }
+            _ = RegX.next(b);
+            _ = RegY.next(b);
+
+            // Changing the index-register size from 16-bit to 8-bit clears the high-byte
+            if (b.xy_size == .@"8bit") {
+                b.clobbers.put(b.build_system.allocator, .x, {}) catch @panic("Out of memory");
+                b.clobbers.put(b.build_system.allocator, .y, {}) catch @panic("Out of memory");
+            }
+        } else {
+            change.a_8bit = null;
+        }
+    }
+
     var set: Instruction.StatusRegister = .{};
     var clear: Instruction.StatusRegister = .{};
 
@@ -378,28 +480,6 @@ pub fn change_status_flags(b: *Builder, change: ChangeStatusRegister) void {
             } else {
                 @field(clear, field.name) = true;
             }
-        }
-    }
-
-    if (change.a_8bit) |value| {
-        b.a_size = if (value) .@"8bit" else .@"16bit";
-        if (b.start_a_size == .none) {
-            b.start_a_size = b.a_size;
-        }
-        _ = RegA.next(b);
-    }
-    if (change.xy_8bit) |value| {
-        b.xy_size = if (value) .@"8bit" else .@"16bit";
-        if (b.start_xy_size == .none) {
-            b.start_xy_size = b.xy_size;
-        }
-        _ = RegX.next(b);
-        _ = RegY.next(b);
-
-        // Changing the index-register size from 16-bit to 8-bit clears the high-byte
-        if (b.xy_size == .@"8bit") {
-            b.clobbers.put(b.build_system.allocator, .x, {}) catch @panic("Out of memory");
-            b.clobbers.put(b.build_system.allocator, .y, {}) catch @panic("Out of memory");
         }
     }
 

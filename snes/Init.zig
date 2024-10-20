@@ -39,13 +39,32 @@ pub fn reset(b: *znasm.Builder) void {
 }
 
 fn init_cpu(b: *znasm.Builder) void {
-    var a = b.reg_a8();
     var x = b.reg_x16();
 
     // Set 3.58MHz access cycle
-    a = .load_store(b, reg.MEMSEL, reg.mem_358_mhz);
+    reg.set_rom_access_speed(b, .fast);
 
     // Setup stack pointer
     x = .load(b, 0x1fff);
     x.transfer_to(.stack_ptr);
+
+    // Reset Direct Page to 0x0000
+    b.push_stack(.{ .addr16 = 0x0000 });
+    b.pull_stack(.direct_page);
+
+    // Set Data Bank to Program Bank
+    b.push_stack(.program_bank);
+    b.pull_stack(.data_bank);
+
+    // Disable interrupts
+    reg.set_interrupt_config(b, .{
+        .joypad_autoread = false,
+        .screen_interrupt = .disabled,
+        .vblank_interrupt = false,
+    });
+    // Disable HDMA
+    reg.set_hdma_enabled(b, .disable_all);
+
+    // Disable screen
+    reg.set_screen_config(b, .force_blank);
 }

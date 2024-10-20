@@ -58,6 +58,15 @@ pub const Instruction = union(InstructionType) {
     /// Load Index Register Y from Memory
     ldy: Imm816,
 
+    /// Store Zero to Memory (Direct Page)
+    stz_dp: u8,
+    /// Store Zero to Memory (Absolute)
+    stz_addr16: u16,
+    /// Store Zero to Memory (Direct Page, X Indexed)
+    stz_dp_idx_x: u8,
+    /// Store Zero to Memory (Absolute, X Indexed)
+    stz_addr16_idx_x: u16,
+
     /// Store Accumulator to Memory (Direct Page)
     sta_addr8: u8,
     /// Store Accumulator to Memory (Absolute)
@@ -134,6 +143,40 @@ pub const Instruction = union(InstructionType) {
 
     /// Exchange Carry and Emulation Bits
     xce: void,
+
+    /// Push Accumulator to Stack
+    pha: void,
+    /// Push Index Register X to Stack
+    phx: void,
+    /// Push Index Register Y to Stack
+    phy: void,
+    /// Push Data Bank to Stack
+    phb: void,
+    /// Push Direct Page to Stack
+    phd: void,
+    /// Push Program Bank to Stack
+    phk: void,
+    /// Push Processor Status to Stack
+    php: void,
+    /// Push Effective Absolute Address to Stack
+    pea: u16,
+    /// Push Effective Indirect Address to Stack
+    pei: u8,
+    /// Push PC Relative Address to Stack
+    per: i16,
+
+    /// Pull Accumulator from Stack
+    pla: void,
+    /// Pull Index Register X from Stack
+    plx: void,
+    /// Pull Index Register Y from Stack
+    ply: void,
+    /// Pull Data Bank from Stack
+    plb: void,
+    /// Pull Direct Page from Stack
+    pld: void,
+    /// Pull Processor Status from Stack
+    plp: void,
 
     /// No Operation
     nop: void,
@@ -251,6 +294,11 @@ pub const InstructionType = enum(u8) {
     ldx = 0xA2,
     ldy = 0xA0,
 
+    stz_dp = 0x64,
+    stz_addr16 = 0x9C,
+    stz_dp_idx_x = 0x74,
+    stz_addr16_idx_x = 0x9E,
+
     sta_addr8 = 0x85,
     sta_addr16 = 0x8D,
     sta_addr24 = 0x8F,
@@ -304,6 +352,24 @@ pub const InstructionType = enum(u8) {
     tsx = 0xBA,
 
     xce = 0xFB,
+
+    pha = 0x48,
+    phx = 0xDA,
+    phy = 0x5A,
+    phb = 0x8B,
+    phd = 0x0B,
+    phk = 0x4B,
+    php = 0x08,
+    pea = 0xF4,
+    pei = 0xD4,
+    per = 0x62,
+
+    pla = 0x68,
+    plx = 0xFA,
+    ply = 0x7A,
+    plb = 0xAB,
+    pld = 0x2B,
+    plp = 0x28,
 
     nop = 0xEA,
 
