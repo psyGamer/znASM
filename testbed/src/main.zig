@@ -27,6 +27,7 @@ pub fn main() !void {
             .native = .{},
             .emulation = .{
                 .reset = snes.Init.reset,
+                // .reset = Reset,
             },
         },
     };
@@ -88,7 +89,7 @@ fn Reset(b: *znasm.Builder) void {
 
     const loop = b.define_label();
 
-    for (0..15) |_| {
+    for (0..1) |_| {
         b.emit(.nop);
     }
 
@@ -121,11 +122,10 @@ fn my_cool_func(b: *znasm.Builder) void {
     b.setup_debug(@src(), @This(), null);
 
     const skip = b.create_label();
-    b.branch_always(skip);
     {
-        b.emit(.nop);
-        b.emit(.nop);
-        b.emit(.nop);
+        for (0..125) |_| {
+            b.emit(.nop);
+        }
     }
     skip.define(b);
     b.emit(.rts);

@@ -12,32 +12,18 @@ const Builder = @This();
 
 // NOTE: This intentionally doesn't expose OutOfMemory errors, to keep the API simpler (they would crash the assembler anyway)
 
-/// Offset to target instruction from function start in bytes
+/// Index to a target instruction
 pub const Label = struct {
-    offset: ?u16,
+    index: ?u16,
 
     /// Defines the label to point to the next instruction
     pub fn define(label: *Label, b: *const Builder) void {
-        label.offset = @intCast(b.instruction_data.items.len);
+        label.index = @intCast(b.instruction_info.items.len);
     }
-};
-
-/// Branches need to be relocated to point to their label and use the short / long form
-const BranchRelocation = struct {
-    pub const Type = enum {
-        always,
-        jump_long,
-    };
-
-    offset: u16,
-    target: *Label,
-    type: Type,
 };
 
 /// Metadata information about an instruction
 pub const InstructionInfo = struct {
-    const IndexMode = enum { @"8bit", @"16bit" };
-
     /// A relocatoion indicates that this instruction has an operand to another symbol,
     /// which needs to be fixed after emitting the data into ROM
     const Relocation = struct {
@@ -45,12 +31,25 @@ pub const InstructionInfo = struct {
         target_sym: Symbol,
         target_offset: u16,
     };
+    /// Branches need to be relocated to point to their label and use the short / long form
+    const BranchRelocation = struct {
+        pub const Type = enum {
+            always,
+            jump_long,
+        };
+
+        type: Type,
+        target: *Label,
+    };
 
     instr: Instruction,
     offset: u16,
 
     reloc: ?Relocation,
-    index_mode: IndexMode,
+    branch_reloc: ?BranchRelocation,
+
+    a_size: Instruction.SizeMode,
+    xy_size: Instruction.SizeMode,
 
     comments: []const []const u8,
 };
@@ -83,6 +82,8 @@ symbol: Symbol.Function,
 instruction_data: std.ArrayListUnmanaged(u8) = .{},
 instruction_info: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
+labels: std.ArrayListUnmanaged(*const Label) = .{},
+
 // Register State
 a_size: Instruction.SizeMode = .none,
 xy_size: Instruction.SizeMode = .none,
@@ -103,10 +104,6 @@ outputs: std.AutoArrayHashMapUnmanaged(CallValue, void) = .{},
 /// Values which are modified by this function, potentially leaving them in an invalid state
 clobbers: std.AutoArrayHashMapUnmanaged(CallValue, void) = .{},
 
-// Branches
-labels: std.ArrayListUnmanaged(*const Label) = .{},
-branch_relocs: std.ArrayListUnmanaged(BranchRelocation) = .{},
-
 // Debug data
 curr_caller_lines: std.ArrayHashMapUnmanaged(SourceLocation, u64, SourceLocationHashContext, true) = .{},
 prev_caller_lines: std.ArrayHashMapUnmanaged(SourceLocation, u64, SourceLocationHashContext, true) = .{},
@@ -124,7 +121,6 @@ pub fn deinit(b: *Builder) void {
     }
 
     b.labels.deinit(b.build_system.allocator);
-    b.branch_relocs.deinit(b.build_system.allocator);
 }
 
 /// Provides debug information for proper labels
@@ -145,7 +141,7 @@ pub fn setup_debug(b: *Builder, src: std.builtin.SourceLocation, declaring_type:
 /// Creates a new undefined label
 pub fn create_label(b: *Builder) *Label {
     var label = b.build_system.allocator.create(Label) catch @panic("Out of memory");
-    label.offset = null;
+    label.index = null;
 
     b.labels.append(b.build_system.allocator, label) catch @panic("Out of memory");
     return label;
@@ -227,29 +223,29 @@ pub fn emit_reloc(b: *Builder, instr_type: InstructionType, reloc: InstructionIn
     };
     b.emit_extra(instr, .{ .reloc = reloc });
 }
+pub fn emit_branch_reloc(b: *Builder, branch_reloc: InstructionInfo.BranchRelocation) void {
+    b.emit_extra(.nop, .{ .branch_reloc = branch_reloc });
+}
 
 pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
     reloc: ?InstructionInfo.Relocation = null,
+    branch_reloc: ?InstructionInfo.BranchRelocation = null,
     comments: ?[]const []const u8 = null,
 }) void {
     const comments = extra.comments orelse b.resolve_comments(@returnAddress()) catch @as([]const []const u8, &.{});
 
     b.instruction_info.append(b.build_system.allocator, .{
         .instr = instr,
-        .offset = @intCast(b.instruction_data.items.len),
+        .offset = undefined,
 
         .reloc = extra.reloc,
-        .index_mode = .@"8bit",
+        .branch_reloc = extra.branch_reloc,
+
+        .a_size = b.a_size,
+        .xy_size = b.xy_size,
 
         .comments = comments,
     }) catch @panic("Out of memory");
-
-    const indexing_mode = switch (instr.target_register()) {
-        .none => .none,
-        .a => b.a_size,
-        .x, .y => b.xy_size,
-    };
-    instr.write_data(b.instruction_data.writer(b.build_system.allocator), indexing_mode) catch @panic("Out of memory");
 
     // Ensure every return leaves with the same register sizes
     if (instr == .rts or instr == .rtl) {
@@ -336,23 +332,19 @@ pub fn jump_subroutine(b: *Builder, target: Symbol.Function) void {
 
 /// Always branch to the target label
 pub fn branch_always(b: *Builder, target: *Label) void {
-    b.branch_relocs.append(b.build_system.allocator, .{
-        .offset = @intCast(b.instruction_data.items.len),
-        .target = target,
+    b.emit_branch_reloc(.{
         .type = .always,
-    }) catch @panic("Out of memory");
-    b.emit(.nop);
+        .target = target,
+    });
 }
 
 /// Jumps Long to the target symbol or label
 pub fn jump_long(b: *Builder, target: anytype) void {
     if (@TypeOf(target) == *Label) {
-        b.branch_relocs.append(b.build_system.allocator, .{
-            .offset = @intCast(b.instruction_data.items.len),
-            .target = target,
+        b.emit_branch_reloc(.{
             .type = .jump_long,
-        }) catch @panic("Out of memory");
-        b.emit(.nop);
+            .target = target,
+        });
     } else if (@TypeOf(target) == Symbol) {
         std.debug.assert(target == .function);
         b.emit_reloc(.jml, .{
@@ -430,136 +422,149 @@ pub fn change_status_flags(b: *Builder, change: ChangeStatusRegister) void {
 /// Invokes the generator function associated with this builder
 pub fn build(b: *Builder) !void {
     b.symbol(b);
+
     try b.resolve_branch_relocs();
+    try b.genereate_bytecode();
 }
 
 fn resolve_branch_relocs(b: *Builder) !void {
-    // New instructions are emitted in the middle, causing other relocs to shift down
-    var byte_offset: u16 = 0;
+    // Relative offsets to the target instruction to determine short- / long-form
+    var reloc_offsets: std.AutoArrayHashMapUnmanaged(usize, i32) = .{};
+    defer reloc_offsets.deinit(b.build_system.allocator);
 
-    const short_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
+    for (b.instruction_info.items, 0..) |info, i| {
+        if (info.branch_reloc != null) {
+            // Default to long-form, lower to short-form later
+            try reloc_offsets.put(b.build_system.allocator, i, std.math.maxInt(i32));
+        }
+    }
+
+    const short_sizes: std.EnumArray(InstructionInfo.BranchRelocation.Type, u8) = .init(.{
         .always = comptime Instruction.bra.size(),
         .jump_long = comptime Instruction.jml.size(),
     });
-    const long_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
+    const long_sizes: std.EnumArray(InstructionInfo.BranchRelocation.Type, u8) = .init(.{
         .always = comptime Instruction.jmp.size(),
         .jump_long = comptime Instruction.jml.size(),
     });
 
-    var data_buffer: [16]u8 = undefined;
-    var data_fba: std.heap.FixedBufferAllocator = .init(&data_buffer);
-    const data_allocator = data_fba.allocator();
+    // Interativly lower to short-form
+    var changed = true;
+    while (changed) {
+        changed = false;
 
-    for (b.branch_relocs.items) |reloc| {
-        // Assume all branches use the long for to simply the calculation
-        var relative_offset: i32 = @as(i32, @intCast(reloc.target.offset.?)) - (@as(i32, @intCast(reloc.offset)));
-        for (b.branch_relocs.items) |other_reloc| {
-            if (other_reloc.offset <= reloc.offset or other_reloc.offset >= reloc.target.offset.?) {
-                continue;
+        for (reloc_offsets.keys(), reloc_offsets.values()) |source_idx, *relative_offset| {
+            // If its's already short, don't mark this as a change, but still recalculate the offset
+            const already_short = relative_offset.* >= std.math.minInt(i8) and relative_offset.* <= std.math.maxInt(i8);
+
+            const reloc = b.instruction_info.items[source_idx].branch_reloc.?;
+
+            // Calculate offset to target
+            const min = @min(source_idx + 1, reloc.target.index.?);
+            const max = @max(source_idx + 1, reloc.target.index.?);
+
+            relative_offset.* = 0;
+            for (b.instruction_info.items[min..max], min..max) |info, i| {
+                if (info.branch_reloc) |other_reloc| {
+                    const other_offset = reloc_offsets.get(i).?;
+
+                    if (other_offset >= std.math.minInt(i8) and other_offset <= std.math.maxInt(i8)) {
+                        relative_offset.* += short_sizes.get(other_reloc.type);
+                    } else {
+                        relative_offset.* += long_sizes.get(other_reloc.type);
+                    }
+                } else {
+                    relative_offset.* += info.instr.size();
+                }
+            }
+            if (reloc.target.index.? <= source_idx) {
+                relative_offset.* = -relative_offset.*;
             }
 
-            relative_offset += long_sizes.get(other_reloc.type);
+            if (!already_short and relative_offset.* >= std.math.minInt(i8) and relative_offset.* <= std.math.maxInt(i8)) {
+                changed = true;
+            }
         }
+    }
 
-        const use_short =
-            relative_offset + short_sizes.get(reloc.type) >= std.math.minInt(i8) and
-            relative_offset + short_sizes.get(reloc.type) <= std.math.maxInt(i8);
+    // Calculate target offsets (for jumps)
+    var target_offsets: std.AutoArrayHashMapUnmanaged(usize, u16) = .{};
+    defer target_offsets.deinit(b.build_system.allocator);
 
-        const size = if (use_short)
-            short_sizes.get(reloc.type)
-        else
-            long_sizes.get(reloc.type);
+    for (reloc_offsets.keys()) |source_idx| {
+        const reloc = b.instruction_info.items[source_idx].branch_reloc.?;
 
-        // Shift later targets (including ourselves)
-        for (b.branch_relocs.items) |*later_reloc| {
-            if (later_reloc.offset >= reloc.offset and later_reloc.target.offset.? > reloc.offset + byte_offset) {
-                later_reloc.target.offset = later_reloc.target.offset.? + size - comptime Instruction.nop.size();
+        var offset: usize = 0;
+        for (b.instruction_info.items[0..reloc.target.index.?], 0..) |info, i| {
+            if (info.branch_reloc) |other_reloc| {
+                const other_offset = reloc_offsets.get(i).?;
+
+                if (other_offset >= std.math.minInt(i8) and other_offset <= std.math.maxInt(i8)) {
+                    offset += short_sizes.get(other_reloc.type);
+                } else {
+                    offset += long_sizes.get(other_reloc.type);
+                }
+            } else {
+                offset += info.instr.size();
             }
         }
 
-        const insert_offset = reloc.offset + byte_offset;
-        const target_offset = reloc.target.offset.?;
+        try target_offsets.put(b.build_system.allocator, source_idx, @intCast(offset));
+    }
+
+    // Insert instructions (reversed to avoid shifting following indices)
+    var it = std.mem.reverseIterator(reloc_offsets.keys());
+
+    while (it.next()) |source_idx| {
+        const info = &b.instruction_info.items[source_idx];
+        const reloc = info.branch_reloc.?;
+
+        const relative_offset = reloc_offsets.get(source_idx).?;
+        const target_offset = target_offsets.get(source_idx).?;
+
+        const use_short = relative_offset >= std.math.minInt(i8) and relative_offset <= std.math.maxInt(i8);
 
         switch (reloc.type) {
             .always => {
                 if (use_short) {
-                    try b.insert_branch_instructions(insert_offset, data_allocator, &.{
-                        .{ .bra = undefined },
-                    }, &.{.{
-                        .type = .rel8,
-                        .target_sym = .{ .function = b.symbol },
-                        .target_offset = target_offset - comptime Instruction.bra.size(),
-                    }});
+                    info.instr = .{ .bra = @intCast(relative_offset) };
                 } else {
-                    try b.insert_branch_instructions(insert_offset, data_allocator, &.{
-                        .{ .jmp = undefined },
-                    }, &.{.{
+                    info.instr = .{ .jmp = undefined };
+                    info.reloc = .{
                         .type = .addr16,
                         .target_sym = .{ .function = b.symbol },
                         .target_offset = target_offset,
-                    }});
+                    };
                 }
             },
             .jump_long => {
-                try b.insert_branch_instructions(insert_offset, data_allocator, &.{
-                    .{ .jml = undefined },
-                }, &.{.{
+                info.instr = .{ .jml = undefined };
+                info.reloc = .{
                     .type = .addr24,
                     .target_sym = .{ .function = b.symbol },
                     .target_offset = target_offset,
-                }});
+                };
             },
         }
-
-        byte_offset += size - comptime Instruction.nop.size();
     }
 }
 
-/// Replaces a branch NOP with the actual instructions
-fn insert_branch_instructions(b: *Builder, offset: u16, data_allocator: std.mem.Allocator, instrs: []const Instruction, relocs: []const ?InstructionInfo.Relocation) !void {
-    const index = b: {
-        for (b.instruction_info.items, 0..) |info, i| {
-            if (offset <= info.offset) {
-                break :b i;
-            }
-        }
-        @panic("Branch relocation offset outside of bounds of function");
-    };
-
-    const instr_data = try Instruction.to_data(instrs, data_allocator);
-
-    // Shift over existing instructions (replacing the current NOP)
-    try b.instruction_data.ensureUnusedCapacity(b.build_system.allocator, instr_data.len - comptime Instruction.nop.size());
-    const old_instr_data_len = b.instruction_data.items.len;
-    b.instruction_data.items.len += instr_data.len - comptime Instruction.nop.size();
-
-    std.mem.copyBackwards(u8, b.instruction_data.items[(offset + instr_data.len)..], b.instruction_data.items[(offset + comptime Instruction.nop.size())..old_instr_data_len]);
-    @memcpy(b.instruction_data.items[offset..(offset + instr_data.len)], instr_data);
-
-    try b.instruction_info.ensureUnusedCapacity(b.build_system.allocator, instrs.len - comptime Instruction.nop.size());
-    const old_instr_info_len = b.instruction_info.items.len;
-    b.instruction_info.items.len += instrs.len - 1;
-
-    var old_info = b.instruction_info.items[index];
-    std.mem.copyBackwards(InstructionInfo, b.instruction_info.items[(index + instrs.len)..], b.instruction_info.items[(index + 1)..old_instr_info_len]);
-    for (b.instruction_info.items[index..(index + instrs.len)], instrs, relocs) |*info, instr, reloc| {
-        info.* = .{
-            .instr = instr,
-            .offset = old_info.offset,
-            .reloc = reloc,
-            .index_mode = old_info.index_mode,
-            .comments = old_info.comments,
-        };
-
-        old_info.offset += instr.size();
-    }
-
+/// Generates the raw assembly bytes for all instructions
+fn genereate_bytecode(b: *Builder) !void {
+    b.instruction_data.clearRetainingCapacity();
     for (b.instruction_info.items) |*info| {
-        if (info.offset <= offset) {
-            continue;
+        const target_register = info.instr.target_register();
+        const register_size = switch (target_register) {
+            .none => .none,
+            .a => info.a_size,
+            .x, .y => info.xy_size,
+        };
+        if (target_register != .none) {
+            std.debug.assert(register_size != .none);
         }
 
-        info.offset += @intCast(instr_data.len - 1);
+        info.offset = @intCast(b.instruction_data.items.len);
+        info.instr.write_data(b.instruction_data.writer(b.build_system.allocator), register_size) catch @panic("Out of memory");
     }
 }
 

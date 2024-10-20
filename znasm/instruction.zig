@@ -114,8 +114,7 @@ pub const Instruction = union(InstructionType) {
     nop: void,
 
     /// Coverts the instruction into the assembly bytes for it
-    pub fn write_data(instr: Instruction, writer: anytype, indexing: SizeMode) !void {
-        // TODO: Handle 8/16bit instructions
+    pub fn write_data(instr: Instruction, writer: anytype, register_size: SizeMode) !void {
         // Opcode
         try writer.writeByte(@intFromEnum(instr));
 
@@ -129,9 +128,9 @@ pub const Instruction = union(InstructionType) {
 
                 // Handle 8-bit / 16-bit instructions
                 if (field.type == Imm816) {
-                    std.debug.assert(indexing != .none);
+                    std.debug.assert(register_size != .none);
 
-                    if (indexing == .@"8bit") {
+                    if (register_size == .@"8bit") {
                         const value = @field(instr, field.name).imm8;
                         try writer.writeInt(u8, value, .little);
                     } else {
@@ -139,7 +138,7 @@ pub const Instruction = union(InstructionType) {
                         try writer.writeInt(u16, value, .little);
                     }
                 } else {
-                    std.debug.assert(indexing == .none);
+                    std.debug.assert(register_size == .none);
 
                     const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
                     try writer.writeAll(&operand_data);
