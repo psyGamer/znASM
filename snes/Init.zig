@@ -1,6 +1,8 @@
 const znasm = @import("znasm");
 
-const reg = @import("reg.zig");
+const cpu = @import("cpu.zig");
+const ppu = @import("ppu.zig");
+const dma = @import("dma.zig");
 
 pub fn reset(b: *znasm.Builder) void {
     // Register sizes a 8-bits on reset
@@ -42,7 +44,7 @@ fn init_cpu(b: *znasm.Builder) void {
     var x = b.reg_x16();
 
     // Set 3.58MHz access cycle
-    reg.set_rom_access_speed(b, .fast);
+    cpu.set_rom_access_speed(b, .fast);
 
     // Setup stack pointer
     x = .load(b, 0x1fff);
@@ -57,14 +59,14 @@ fn init_cpu(b: *znasm.Builder) void {
     b.pull_stack(.data_bank);
 
     // Disable interrupts
-    reg.set_interrupt_config(b, .{
+    cpu.set_interrupt_config(b, .{
         .joypad_autoread = false,
         .screen_interrupt = .disabled,
         .vblank_interrupt = false,
     });
     // Disable HDMA
-    reg.set_hdma_enabled(b, .disable_all);
+    dma.set_hdma_enabled(b, .disable_all);
 
     // Disable screen
-    reg.set_screen_config(b, .force_blank);
+    ppu.set_screen(b, .force_blank);
 }

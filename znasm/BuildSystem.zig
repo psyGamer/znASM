@@ -26,6 +26,7 @@ pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSyste
 pub fn register_symbol(sys: *BuildSystem, sym: anytype) !void {
     if (@TypeOf(sym) == Symbol) {
         switch (sym) {
+            .address => {},
             .function => |func_sym| _ = try sys.register_function(func_sym),
         }
     } else if (@TypeOf(sym) == Symbol.Function) {
@@ -214,11 +215,11 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 /// Calculates the real (non-mirrored) memory-mapped address of a symbol
 pub fn symbol_location(sys: BuildSystem, sym: Symbol) u24 {
     return switch (sym) {
+        .address => |reg_sym| reg_sym,
         .function => |func_sym| if (sys.functions.get(func_sym)) |func|
             sys.offset_location(func.offset)
         else
             std.debug.panic("Tried to get offset of unknown symbol", .{}),
-        .register => |reg_sym| reg_sym,
     };
 }
 

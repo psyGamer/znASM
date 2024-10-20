@@ -260,16 +260,44 @@ pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
 
 // Helpers
 
-/// Stores
+/// Stores zero into the target symbol
 pub fn store_zero(b: *Builder, target: anytype) void {
-    if (@TypeOf(target) == @import("symbol/FixedAddress.zig")) {
+    if (@TypeOf(target) == Symbol.Address) {
+        // TODO: Handle symbols in other banks
         b.emit_reloc(.stz_addr16, .{
             .type = .addr16,
-            .target_sym = target.symbol(),
+            .target_sym = .{ .address = target },
             .target_offset = 0,
         });
     } else {
         @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));
+    }
+}
+
+/// Stores the specified value into the target symbol
+/// For non-zero values, the A Register might be clobbered
+pub fn store_value(b: *Builder, comptime size: Instruction.SizeMode, target: anytype, value: if (size == .@"8bit") u8 else u16) void {
+    if (value == 0) {
+        b.store_zero(target);
+    } else {
+        // Try using a free X/Y register if they have the correct size, or the other one isn't used as well
+        if (b.x_reg_id == null and (b.xy_size == size or b.y_reg_id == null)) {
+            b.change_status_flags(.{ .xy_8bit = size == .@"8bit" });
+            var x: RegX = .next(b);
+            x = .load_store(b, target, value);
+            return;
+        }
+        if (b.y_reg_id == null and (b.xy_size == size or b.x_reg_id == null)) {
+            b.change_status_flags(.{ .xy_8bit = size == .@"8bit" });
+            var y: RegY = .next(b);
+            y = .load_store(b, target, value);
+            return;
+        }
+
+        // Otherwise use A register
+        b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
+        var a: RegA = .next(b);
+        a = .load_store(b, target, value);
     }
 }
 

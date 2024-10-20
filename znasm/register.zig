@@ -1,8 +1,9 @@
 //! General representation for the A / X / Y registers
+
 const std = @import("std");
 const Builder = @import("Builder.zig");
+const Symbol = @import("symbol.zig").Symbol;
 const SizeMode = @import("instruction.zig").Instruction.SizeMode;
-const FixedAddress = @import("symbol/FixedAddress.zig");
 
 pub const RegA = Register(.a);
 pub const RegX = Register(.x);
@@ -90,15 +91,15 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
         pub fn store(reg: Reg, target: anytype) void {
             reg.ensure_valid();
 
-            if (@TypeOf(target) == FixedAddress) {
-                // TODO: Ensure target is in the same bank
+            if (@TypeOf(target) == Symbol.Address) {
+                // TODO: Handle symbols in other banks
                 reg.builder.emit_reloc(switch (reg_type) {
                     .a => .sta_addr16,
                     .x => .stx_addr16,
                     .y => .sty_addr16,
                 }, .{
                     .type = .addr16,
-                    .target_sym = target.symbol(),
+                    .target_sym = .{ .address = target },
                     .target_offset = 0,
                 });
             } else {

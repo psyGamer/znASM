@@ -80,7 +80,8 @@ pub const Rom = @import("Rom.zig");
 pub const Builder = @import("Builder.zig");
 
 // Symbols
-pub const FixedAddress = @import("symbol/FixedAddress.zig");
+const Symbol = @import("symbol.zig").Symbol;
+pub const Address = Symbol.Address;
 
 // Util
 pub const size = @import("util/size.zig");
