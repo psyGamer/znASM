@@ -87,6 +87,64 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
             return .next(b);
         }
 
+        /// Loads the value of the relocation into the register
+        pub fn load_reloc(b: *Builder, reloc: Builder.InstructionInfo.Relocation) Reg {
+            if (reg_type == .a) {
+                std.debug.assert(b.a_size != .none);
+            } else {
+                std.debug.assert(b.xy_size != .none);
+            }
+
+            const size_mode = switch (reg_type) {
+                .a => b.a_size,
+                .x, .y => b.xy_size,
+            };
+
+            const reloc_size: Builder.AddrSize = switch (reloc.type) {
+                .imm8, .rel8, .addr_l, .addr_h, .addr_bank => .@"8bit",
+                .imm16, .addr16 => .@"16bit",
+                .addr24 => @panic("Cannot load 24-bit value into register"),
+            };
+
+            if (reloc_size == .@"8bit") {
+                if (size_mode != .@"8bit") {
+                    std.debug.panic("Trying to load 8-bit value while in 16-bit mode", .{});
+                }
+
+                b.emit_reloc(switch (reloc.type) {
+                    .imm8, .rel8, .addr_l, .addr_h, .addr_bank => switch (reg_type) {
+                        .a => .lda,
+                        .x => .ldx,
+                        .y => .ldy,
+                    },
+                    .imm16, .addr16, .addr24 => unreachable,
+                }, reloc);
+            } else {
+                if (size_mode != .@"16bit") {
+                    std.debug.panic("Trying to load 16-bit value while in 8-bit mode", .{});
+                }
+
+                b.emit_reloc(switch (reloc.type) {
+                    .imm8, .rel8, .addr_l, .addr_h, .addr_bank => unreachable,
+                    .imm16 => switch (reg_type) {
+                        .a => .lda,
+                        .x => .ldx,
+                        .y => .ldy,
+                    },
+                    .addr16 => @panic("TODO"),
+                    .addr24 => unreachable,
+                }, reloc);
+            }
+
+            b.clobbers.put(b.build_system.allocator, switch (reg_type) {
+                .a => .a,
+                .x => .x,
+                .y => .y,
+            }, {}) catch @panic("Out of memory");
+
+            return .next(b);
+        }
+
         /// Stores the current value into the target
         pub fn store(reg: Reg, target: anytype) void {
             reg.store_offset(target, 0x00);

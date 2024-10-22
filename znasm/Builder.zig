@@ -26,8 +26,23 @@ pub const Label = struct {
 pub const InstructionInfo = struct {
     /// A relocatoion indicates that this instruction has an operand to another symbol,
     /// which needs to be fixed after emitting the data into ROM
-    const Relocation = struct {
-        type: enum { rel8, addr8, addr16, addr24 },
+    pub const Relocation = struct {
+        pub const Type = enum {
+            // Immediate relocations are just for convenience. They use the target_offset as the value
+            imm8,
+            imm16,
+
+            rel8,
+
+            addr16,
+            addr24,
+
+            addr_l,
+            addr_h,
+            addr_bank,
+        };
+
+        type: Type,
         target_sym: Symbol,
         target_offset: u16,
     };
@@ -260,33 +275,62 @@ pub fn emit_extra(b: *Builder, instr: Instruction, extra: struct {
 
 // Helpers
 
+pub const AddrSize = enum { @"8bit", @"16bit" };
+pub fn AddrSizeType(comptime size: AddrSize) type {
+    return switch (size) {
+        .@"8bit" => u8,
+        .@"16bit" => u16,
+    };
+}
+
+pub const Register = enum { a, x, y };
+pub fn RegisterType(comptime register: Register) type {
+    return switch (register) {
+        .a => RegA,
+        .x => RegX,
+        .y => RegY,
+    };
+}
+
 /// Stores zero into the target symbol
-pub fn store_zero(b: *Builder, comptime size: Instruction.SizeMode, target: anytype) void {
+pub fn store_zero(b: *Builder, size: AddrSize, target: anytype) void {
     if (@TypeOf(target) == Symbol.Address) {
         // TODO: Handle symbols in other banks
-        if (b.a_size == size) {
+        if (b.a_size == .@"8bit") {
             b.emit_reloc(.stz_addr16, .{
                 .type = .addr16,
                 .target_sym = .{ .address = target },
                 .target_offset = 0,
             });
-        } else if (b.a_size == .@"8bit" and size == .@"16bit") {
-            // Double write to avoid changing size
-            b.emit_reloc(.stz_addr16, .{
-                .type = .addr16,
-                .target_sym = .{ .address = target },
-                .target_offset = 0,
-            });
-            b.emit_reloc(.stz_addr16, .{
-                .type = .addr16,
-                .target_sym = .{ .address = target },
-                .target_offset = 1,
-            });
-        } else {
-            // Temporarily change bitwidth if needed
-            const prev_a_size = b.a_size;
-            b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
-            defer if (prev_a_size != .none) b.change_status_flags(.{ .a_8bit = prev_a_size == .@"8bit" });
+            return;
+        }
+
+        switch (size) {
+            .@"8bit" => {
+                // Temporarily change bitwidth
+                const prev_a_size = b.a_size;
+                b.change_status_flags(.{ .a_8bit = true });
+                defer if (prev_a_size != .none) b.change_status_flags(.{ .a_8bit = prev_a_size == .@"8bit" });
+
+                b.emit_reloc(.stz_addr16, .{
+                    .type = .addr16,
+                    .target_sym = .{ .address = target },
+                    .target_offset = 0,
+                });
+            },
+            .@"16bit" => {
+                // Double write to avoid changing size
+                b.emit_reloc(.stz_addr16, .{
+                    .type = .addr16,
+                    .target_sym = .{ .address = target },
+                    .target_offset = 0,
+                });
+                b.emit_reloc(.stz_addr16, .{
+                    .type = .addr16,
+                    .target_sym = .{ .address = target },
+                    .target_offset = 1,
+                });
+            },
         }
     } else {
         @compileError(std.fmt.comptimePrint("Unsupported target address'{s}'", .{@typeName(@TypeOf(target))}));
@@ -295,43 +339,108 @@ pub fn store_zero(b: *Builder, comptime size: Instruction.SizeMode, target: anyt
 
 /// Stores the specified value into the target symbol
 /// For non-zero values, the A Register might be clobbered
-pub fn store_value(b: *Builder, comptime size: Instruction.SizeMode, target: anytype, value: if (size == .@"8bit") u8 else u16) void {
-    if (value == 0) {
-        b.store_zero(size, target);
-    } else {
-        // Try using a free X/Y register if they have the correct size, or the other one isn't used as well
-        if (b.x_reg_id == null and (b.xy_size == size or b.y_reg_id == null)) {
-            b.change_status_flags(.{ .xy_8bit = size == .@"8bit" });
-            var x: RegX = .next(b);
-            x = .load_store(b, target, value);
-            return;
-        }
-        if (b.y_reg_id == null and (b.xy_size == size or b.x_reg_id == null)) {
-            b.change_status_flags(.{ .xy_8bit = size == .@"8bit" });
-            var y: RegY = .next(b);
-            y = .load_store(b, target, value);
-            return;
-        }
+pub fn store_value(b: *Builder, comptime size: AddrSize, register: Register, target: anytype, value: AddrSizeType(size)) void {
+    b.store_reloc(register, target, .{
+        .type = if (size == .@"8bit") .imm8 else .imm16,
+        .target_sym = undefined,
+        .target_offset = value,
+    });
+}
 
-        // Otherwise use A register
-        if (b.a_size == size) {
-            var a: RegA = .next(b);
-            a = .load_store(b, target, value);
-            return;
-        }
+/// Stores the specified reloc into the target symbol
+/// For non-zero values, the A Register might be clobbered
+pub fn store_reloc(b: *Builder, register: Register, target: anytype, reloc: InstructionInfo.Relocation) void {
+    if ((reloc.type == .imm8 or reloc.type == .imm16) and reloc.target_offset == 0) {
+        b.store_zero(if (reloc.type == .imm8) .@"8bit" else .@"16bit", target);
+        return;
+    }
 
-        if (size == .@"16bit" and b.a_size == .@"8bit") {
-            // Double write to avoid changing size
-            var a: RegA = .next(b);
-            a = .load(b, @as(u8, @truncate(value >> 0)));
-            a.store_offset(target, 0x00);
-            a = .load(b, @as(u8, @truncate(value >> 8)));
-            a.store_offset(target, 0x01);
-        } else {
-            b.change_status_flags(.{ .a_8bit = size == .@"8bit" });
-            var a: RegA = .next(b);
-            a = .load_store(b, target, value);
+    if (reloc.type != .imm8 and reloc.type != .imm16) {
+        b.build_system.register_symbol(reloc.target_sym) catch @panic("Out of memory");
+    }
+
+    const reloc_size: Builder.AddrSize = switch (reloc.type) {
+        .imm8, .rel8, .addr_l, .addr_h, .addr_bank => .@"8bit",
+        .imm16, .addr16 => .@"16bit",
+        .addr24 => @panic("Cannot load 24-bit value into register"),
+    };
+
+    const curr_size = switch (register) {
+        .a => b.a_size,
+        .x, .y => b.xy_size,
+    };
+
+    if (reloc_size == .@"8bit" and curr_size == .@"8bit" or
+        reloc_size == .@"16bit" and curr_size == .@"16bit")
+    {
+        switch (register) {
+            inline else => |reg_type| {
+                var reg: RegisterType(reg_type) = .next(b);
+                reg = .load_reloc(b, reloc);
+                reg.store(target);
+            },
         }
+        return;
+    }
+
+    // Only change bitwidth if required
+    if (curr_size == .none or reloc_size == .@"8bit") {
+        const prev_size = b.a_size;
+        b.change_status_flags(switch (register) {
+            .a => .{ .a_8bit = reloc_size == .@"8bit" },
+            .x, .y => .{ .xy_8bit = reloc_size == .@"8bit" },
+        });
+        defer if (prev_size != .none) b.change_status_flags(switch (register) {
+            .a => .{ .a_8bit = prev_size == .@"8bit" },
+            .x, .y => .{ .xy_8bit = prev_size == .@"8bit" },
+        });
+
+        switch (register) {
+            inline else => |reg_type| {
+                var reg: RegisterType(reg_type) = .next(b);
+                reg = .load_reloc(b, reloc);
+                reg.store(target);
+            },
+        }
+        return;
+    }
+
+    // Otherwise use a double-write
+    const low_reloc: InstructionInfo.Relocation = .{
+        .type = switch (reloc.type) {
+            .imm8, .rel8, .addr24, .addr_l, .addr_h, .addr_bank => unreachable,
+            .imm16 => .imm8,
+            .addr16 => .addr_l,
+        },
+        .target_sym = reloc.target_sym,
+        // The target_offset stores the value of immedate relocations
+        .target_offset = if (reloc.type == .imm16)
+            @as(u8, @truncate(reloc.target_offset >> 0))
+        else
+            reloc.target_offset,
+    };
+    const high_reloc: InstructionInfo.Relocation = .{
+        .type = switch (reloc.type) {
+            .imm8, .rel8, .addr24, .addr_l, .addr_h, .addr_bank => unreachable,
+            .imm16 => .imm8,
+            .addr16 => .addr_h,
+        },
+        .target_sym = reloc.target_sym,
+        // The target_offset stores the value of immedate relocations
+        .target_offset = if (reloc.type == .imm16)
+            @as(u8, @truncate(reloc.target_offset >> 8))
+        else
+            reloc.target_offset,
+    };
+
+    switch (register) {
+        inline else => |reg_type| {
+            var reg: RegisterType(reg_type) = .next(b);
+            reg = .load_reloc(b, low_reloc);
+            reg.store_offset(target, 0);
+            reg = .load_reloc(b, high_reloc);
+            reg.store_offset(target, 1);
+        },
     }
 }
 

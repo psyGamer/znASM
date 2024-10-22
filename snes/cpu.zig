@@ -15,8 +15,8 @@ pub const InterruptConfig = packed struct(u8) {
     _pad1: u1 = 0,
     vblank_interrupt: bool,
 };
-pub fn set_interrupt_config(b: *Builder, config: InterruptConfig) void {
-    b.store_value(.@"8bit", reg.NMITIMEN, @bitCast(config));
+pub fn set_interrupt_config(b: *Builder, register: Builder.Register, config: InterruptConfig) void {
+    b.store_value(.@"8bit", register, reg.NMITIMEN, @bitCast(config));
 }
 
 pub const RomSpeed = enum(u8) {
@@ -25,6 +25,6 @@ pub const RomSpeed = enum(u8) {
     /// 3.58 MHz ROM access cycle (6 cycles)
     fast = 0x01,
 };
-pub fn set_rom_access_speed(b: *Builder, speed: RomSpeed) void {
-    b.store_value(.@"8bit", reg.MEMSEL, @intFromEnum(speed));
+pub fn set_rom_access_speed(b: *Builder, register: Builder.Register, speed: RomSpeed) void {
+    b.store_value(.@"8bit", register, reg.MEMSEL, @intFromEnum(speed));
 }

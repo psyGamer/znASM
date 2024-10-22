@@ -45,7 +45,7 @@ fn init_cpu(b: *znasm.Builder) void {
     var x = b.reg_x16();
 
     // Set 3.58MHz access cycle
-    cpu.set_rom_access_speed(b, .fast);
+    cpu.set_rom_access_speed(b, .a, .fast);
 
     // Setup stack pointer
     x = .load(b, 0x1fff);
@@ -60,18 +60,18 @@ fn init_cpu(b: *znasm.Builder) void {
     b.pull_stack(.data_bank);
 
     // Disable interrupts
-    cpu.set_interrupt_config(b, .{
+    cpu.set_interrupt_config(b, .a, .{
         .joypad_autoread = false,
         .screen_interrupt = .disabled,
         .vblank_interrupt = false,
     });
     // Disable HDMA
-    hdma.set_enabled(b, .disable_all);
+    hdma.set_enabled(b, .a, .disable_all);
 
     // Disable screen
-    ppu.set_screen(b, .force_blank);
+    ppu.set_screen(b, .a, .force_blank);
 
     // Fill Work-RAM with zeros using 2 DMAs
-    dma.workram_memset(b, 0, 0x00000, 0x10000, 0x00);
-    dma.workram_memset(b, 0, 0x10000, 0x10000, 0x00);
+    dma.workram_memset(b, .a, 0, 0x00000, 0x10000, 0x00);
+    dma.workram_memset(b, .a, 0, 0x10000, 0x10000, 0x00);
 }

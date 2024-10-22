@@ -2,9 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Rom = @import("Rom.zig");
 const MappingMode = Rom.Header.Mode.Map;
-const Function = @import("Function.zig");
 const Builder = @import("Builder.zig");
 const Symbol = @import("symbol.zig").Symbol;
+const Function = @import("Function.zig");
+const Data = @import("Data.zig");
 
 const BuildSystem = @This();
 
@@ -12,6 +13,8 @@ allocator: std.mem.Allocator,
 
 mapping_mode: MappingMode,
 
+/// Resolved data symbols
+data: std.AutoArrayHashMapUnmanaged(Symbol.Data, Data) = .{},
 /// Resolved function symbols
 functions: std.AutoArrayHashMapUnmanaged(Symbol.Function, Function) = .{},
 
@@ -27,11 +30,30 @@ pub fn register_symbol(sys: *BuildSystem, sym: anytype) !void {
     if (@TypeOf(sym) == Symbol) {
         switch (sym) {
             .address => {},
+            .data => |data_sym| _ = try sys.register_data(data_sym),
             .function => |func_sym| _ = try sys.register_function(func_sym),
         }
+    } else if (@TypeOf(sym) == Symbol.Data) {
+        _ = try sys.register_data(sym);
     } else if (@TypeOf(sym) == Symbol.Function) {
         _ = try sys.register_function(sym);
     }
+}
+
+/// Includes the specified data symbol into the ROM
+pub fn register_data(sys: *BuildSystem, data_sym: Symbol.Data) !Data {
+    const gop = try sys.data.getOrPut(sys.allocator, data_sym);
+    if (gop.found_existing) {
+        return gop.value_ptr.*; // Already included
+    }
+
+    const byte_ptr: [*]const u8 = @ptrCast(&data_sym.value);
+
+    gop.value_ptr.* = .{
+        .data = byte_ptr[0..data_sym.data_size],
+    };
+
+    return gop.value_ptr.*;
 }
 
 /// Registers and generates the specified function symbol
@@ -76,20 +98,32 @@ pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
     for (sys.functions.values()) |func| {
         for (func.code_info) |info| {
             const reloc = info.reloc orelse continue;
+
+            // Immediate relocations store the value inside target_offset
+            if (reloc.type == .imm8) {
+                const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                operand.* = @bitCast(@as(u8, @intCast(reloc.target_offset)));
+
+                continue;
+            } else if (reloc.type == .imm16) {
+                const operand: *[2]u8 = rom[(func.offset + info.offset + 1)..][0..2];
+                operand.* = @bitCast(reloc.target_offset);
+
+                continue;
+            }
+
             const target_addr = sys.symbol_location(reloc.target_sym) + reloc.target_offset;
 
             switch (reloc.type) {
+                .imm8, .imm16 => unreachable,
+
                 .rel8 => {
                     const current_addr = sys.offset_location(func.offset) + info.offset;
                     const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
                     const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
                     operand.* = @bitCast(rel_offset);
                 },
-                .addr8 => {
-                    const short_addr: u8 = @truncate(target_addr);
-                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
-                    operand.* = @bitCast(short_addr);
-                },
+
                 .addr16 => {
                     const absolute_addr: u16 = @truncate(target_addr);
                     const operand: *[2]u8 = rom[(func.offset + info.offset + 1)..][0..2];
@@ -98,6 +132,22 @@ pub fn resolve_relocations(sys: *BuildSystem, rom: []u8) void {
                 .addr24 => {
                     const operand: *[3]u8 = rom[(func.offset + info.offset + 1)..][0..3];
                     operand.* = @bitCast(target_addr);
+                },
+
+                .addr_l => {
+                    const low_addr: u8 = @truncate(target_addr >> 0);
+                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(low_addr);
+                },
+                .addr_h => {
+                    const high_addr: u8 = @truncate(target_addr >> 8);
+                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(high_addr);
+                },
+                .addr_bank => {
+                    const bank_addr: u8 = @truncate(target_addr >> 16);
+                    const operand: *[1]u8 = rom[(func.offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(bank_addr);
                 },
             }
         }
@@ -216,10 +266,14 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 pub fn symbol_location(sys: BuildSystem, sym: Symbol) u24 {
     return switch (sym) {
         .address => |reg_sym| reg_sym,
+        .data => |data_sym| if (sys.data.get(data_sym)) |data|
+            sys.offset_location(data.offset)
+        else
+            std.debug.panic("Tried to get offset of unknown data symbol", .{}),
         .function => |func_sym| if (sys.functions.get(func_sym)) |func|
             sys.offset_location(func.offset)
         else
-            std.debug.panic("Tried to get offset of unknown symbol", .{}),
+            std.debug.panic("Tried to get offset of unknown function symbol", .{}),
     };
 }
 

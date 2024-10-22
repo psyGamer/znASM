@@ -15,6 +15,6 @@ pub const ScreenConfig = packed struct(u8) {
     _: u3 = 0,
     f_blank: bool,
 };
-pub fn set_screen(b: *Builder, config: ScreenConfig) void {
-    b.store_value(.@"8bit", reg.INIDISP, @bitCast(config));
+pub fn set_screen(b: *Builder, register: Builder.Register, config: ScreenConfig) void {
+    b.store_value(.@"8bit", register, reg.INIDISP, @bitCast(config));
 }

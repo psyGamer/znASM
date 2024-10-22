@@ -4,6 +4,7 @@ const Addr = znasm.Address;
 
 const reg = @import("reg.zig");
 
+/// Controls which HDMA channel are currently enabled
 pub const HDMA_ENABLE: Addr = reg.HDMAEN;
 
 pub const ChannelConfig = packed struct(u8) {
@@ -28,6 +29,6 @@ pub const ChannelConfig = packed struct(u8) {
 };
 
 /// Enalbes/Disables HDMA for the specified channels
-pub fn set_enabled(b: *Builder, config: ChannelConfig) void {
-    b.store_value(.@"8bit", HDMA_ENABLE, @bitCast(config));
+pub fn set_enabled(b: *Builder, register: Builder.Register, config: ChannelConfig) void {
+    b.store_value(.@"8bit", register, HDMA_ENABLE, @bitCast(config));
 }

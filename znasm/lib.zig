@@ -43,6 +43,29 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
         code_segment.data.appendSliceAssumeCapacity(func.code);
     }
 
+    // Setup DATA segment
+    // TODO: Setup DATA segments for intelligently
+    var data_segment: Rom.Segment = .{
+        .bank = switch (config.mode.map) {
+            .lorom => 0x80,
+            .hirom => 0xC0,
+            .exhirom => 0x40,
+        },
+        .size = 0,
+    };
+
+    for (build_system.data.values()) |data| {
+        data_segment.size += @intCast(data.data.len);
+    }
+
+    try data_segment.allocate(allocator);
+    defer data_segment.free(allocator);
+
+    for (build_system.data.values()) |*data| {
+        data.offset = @intCast(code_segment.size + data_segment.data.items.len);
+        data_segment.data.appendSliceAssumeCapacity(data.data);
+    }
+
     // Generate ROM
     const rom: Rom = .{
         .header = try .init(config),
@@ -58,7 +81,7 @@ pub fn compile(config: Config, allocator: std.mem.Allocator, writer: anytype, ml
             .emulation_reset = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.reset })),
             .emulation_irqbrk = @truncate(build_system.symbol_location(.{ .function = config.vectors.emulation.irqbrk })),
         },
-        .segments = &.{code_segment},
+        .segments = &.{ code_segment, data_segment },
     };
 
     const rom_data = try rom.generate(allocator);
@@ -82,6 +105,7 @@ pub const Builder = @import("Builder.zig");
 // Symbols
 const Symbol = @import("symbol.zig").Symbol;
 pub const Address = Symbol.Address;
+pub const Data = @import("symbol.zig").DataSymbol;
 
 // Util
 pub const size = @import("util/size.zig");

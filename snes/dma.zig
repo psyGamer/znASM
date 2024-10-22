@@ -3,36 +3,36 @@ const znasm = @import("znasm");
 const Builder = znasm.Builder;
 const Addr = znasm.Address;
 
-const reg = @import("reg.zig");
+const mmio = @import("reg.zig");
 
 /// Reads/Writes data to/from Work-RAM at WRAM_ADDR
 /// Increments WRAM_ADDR by 1
-pub const WRAM_DATA: Addr = reg.WMDATA;
+pub const WRAM_DATA: Addr = mmio.WMDATA;
 
 /// Work-RAM Address (Low) for WRAM_DATA
-pub const WRAM_ADDR_LOW: Addr = reg.WMADDL;
+pub const WRAM_ADDR_LOW: Addr = mmio.WMADDL;
 /// Work-RAM Address (Middle) for WRAM_DATA
-pub const WRAM_ADDR_MID: Addr = reg.WMADDM;
+pub const WRAM_ADDR_MID: Addr = mmio.WMADDM;
 /// Work-RAM Address (High) for WRAM_DATA
-pub const WRAM_ADDR_HIGH: Addr = reg.WMADDH;
+pub const WRAM_ADDR_HIGH: Addr = mmio.WMADDH;
 
 /// Controls which DMA channel are currently enabled
-pub const DMA_ENABLE: Addr = reg.MDMAEN;
+pub const DMA_ENABLE: Addr = mmio.MDMAEN;
 
 /// Parameters about the DMA operation
-pub const DMA_PARAMETER: Addr = reg.DMAPn;
+pub const DMA_PARAMETER: Addr = mmio.DMAPn;
 /// Source A-Bus address for the transfer (Low)
-pub const DMA_A_BUS_ADDR_LOW: Addr = reg.A1TnL;
+pub const DMA_A_BUS_ADDR_LOW: Addr = mmio.A1TnL;
 /// Source A-Bus address for the transfer (High)
-pub const DMA_A_BUS_ADDR_HIGH: Addr = reg.A1TnH;
+pub const DMA_A_BUS_ADDR_HIGH: Addr = mmio.A1TnH;
 /// Source A-Bus address for the transfer (Bank)
-pub const DMA_A_BUS_ADDR_BANK: Addr = reg.A1Bn;
+pub const DMA_A_BUS_ADDR_BANK: Addr = mmio.A1Bn;
 /// Target B-Bus register for the transfer
-pub const DMA_B_BUS_REGISTER: Addr = reg.BBADn;
+pub const DMA_B_BUS_REGISTER: Addr = mmio.BBADn;
 /// Byte-Counter for the transfer length (Low)
-pub const DMA_BYTE_COUNT_L: Addr = reg.DASnL;
+pub const DMA_BYTE_COUNT_L: Addr = mmio.DASnL;
 /// Byte-Counter for the transfer length (High)
-pub const DMA_BYTE_COUNT_H: Addr = reg.DASnH;
+pub const DMA_BYTE_COUNT_H: Addr = mmio.DASnH;
 
 pub const ChannelConfig = packed struct(u8) {
     pub const disable_all: ChannelConfig = .{};
@@ -56,13 +56,13 @@ pub const ChannelConfig = packed struct(u8) {
 };
 
 /// Enalbes/Disables DMA for the specified channels
-pub fn set_enabled(b: *Builder, config: ChannelConfig) void {
-    b.store_value(.@"8bit", DMA_ENABLE, @bitCast(config));
+pub fn set_enabled(b: *Builder, register: Builder.Register, config: ChannelConfig) void {
+    b.store_value(.@"8bit", register, DMA_ENABLE, @bitCast(config));
 }
 
 /// Enables DMA for the specified channel
-pub fn enable_channel(b: *Builder, channel: u3) void {
-    b.store_value(.@"8bit", DMA_ENABLE, @as(u8, 1) << channel);
+pub fn enable_channel(b: *Builder, register: Builder.Register, channel: u3) void {
+    b.store_value(.@"8bit", register, DMA_ENABLE, @as(u8, 1) << channel);
 }
 
 const DmaParameters = packed struct(u8) {
@@ -98,8 +98,8 @@ const DmaParameters = packed struct(u8) {
 };
 
 /// Configures parameters for a DMA operation on the specified channel
-pub fn set_parameters(b: *Builder, channel: u3, params: DmaParameters) void {
-    b.store_value(.@"8bit", @as(Addr, DMA_PARAMETER + channel_offset(channel)), @bitCast(params));
+pub fn set_parameters(b: *Builder, register: Builder.Register, channel: u3, params: DmaParameters) void {
+    b.store_value(.@"8bit", register, @as(Addr, DMA_PARAMETER + channel_offset(channel)), @bitCast(params));
 }
 
 const BBusRegister = enum(u8) {
@@ -107,54 +107,57 @@ const BBusRegister = enum(u8) {
 };
 
 /// Specifies the read/writer register, in the 0x2100 - 0x21ff range
-pub fn set_b_bus_register(b: *Builder, channel: u3, b_bus_reg: BBusRegister) void {
-    b.store_value(.@"8bit", @as(Addr, DMA_B_BUS_REGISTER + channel_offset(channel)), @intFromEnum(b_bus_reg));
+pub fn set_b_bus_register(b: *Builder, register: Builder.Register, channel: u3, b_bus_reg: BBusRegister) void {
+    b.store_value(.@"8bit", register, @as(Addr, DMA_B_BUS_REGISTER + channel_offset(channel)), @intFromEnum(b_bus_reg));
 }
 
 /// Specifies the amout of bytes to transfer
-fn set_byte_count(b: *Builder, channel: u3, count: u17) void {
+fn set_byte_count(b: *Builder, register: Builder.Register, channel: u3, count: u17) void {
     std.debug.assert(count <= 0x10000);
 
     // The count is decremented before being compared to 0, so there is an implicit +1
     const actual_count: u16 = @as(u16, @intCast(count % 0xFFFF)) -% 1;
-    b.store_value(.@"16bit", @as(Addr, DMA_BYTE_COUNT_L + channel_offset(channel)), actual_count);
+    b.store_value(.@"16bit", register, @as(Addr, DMA_BYTE_COUNT_L + channel_offset(channel)), actual_count);
 }
 
-pub fn workram_memset(b: *Builder, channel: u3, start_addr: u24, count: u17, value: u8) void {
+// const memset_source_bytes =
+const memset_source: znasm.Data(u8) = .init(0x69);
+
+pub fn workram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u24, count: u17, value: u8) void {
     _ = value; // autofix
     // Setup target address
     switch (b.a_size) {
         // Default to 8-bit, since that's more common
         .none, .@"8bit" => {
-            b.store_value(.@"8bit", WRAM_ADDR_LOW, @as(u8, @truncate(start_addr >> 0)));
-            b.store_value(.@"8bit", WRAM_ADDR_MID, @as(u8, @truncate(start_addr >> 8)));
-            b.store_value(.@"8bit", WRAM_ADDR_HIGH, @as(u8, @truncate(start_addr >> 16)));
+            b.store_value(.@"8bit", register, WRAM_ADDR_LOW, @as(u8, @truncate(start_addr >> 0)));
+            b.store_value(.@"8bit", register, WRAM_ADDR_MID, @as(u8, @truncate(start_addr >> 8)));
+            b.store_value(.@"8bit", register, WRAM_ADDR_HIGH, @as(u8, @truncate(start_addr >> 16)));
         },
         .@"16bit" => {
-            b.store_value(.@"16bit", WRAM_ADDR_LOW, @as(u16, @truncate(start_addr >> 0)));
-            b.store_value(.@"16bit", WRAM_ADDR_MID, @as(u16, @truncate(start_addr >> 8)));
+            b.store_value(.@"16bit", register, WRAM_ADDR_LOW, @as(u16, @truncate(start_addr >> 0)));
+            b.store_value(.@"16bit", register, WRAM_ADDR_MID, @as(u16, @truncate(start_addr >> 8)));
         },
     }
 
     // Setup DMA parametrs
-    set_parameters(b, channel, .{
+    set_parameters(b, register, channel, .{
         .transfer_pattern = .read1_write0,
         .address_adjust = .fixed,
         .direction = .a_to_b,
     });
     // Write to WRAM
-    set_b_bus_register(b, channel, .work_ram);
+    set_b_bus_register(b, register, channel, .work_ram);
 
     // Set source byte
     // TODO: Generate a byte in the ROM to read from
-    b.store_value(.@"16bit", DMA_A_BUS_ADDR_LOW, 0x8000);
-    b.store_value(.@"8bit", DMA_A_BUS_ADDR_BANK, 0x80);
+    b.store_reloc(register, DMA_A_BUS_ADDR_LOW, memset_source.reloc_addr16());
+    b.store_reloc(register, DMA_A_BUS_ADDR_BANK, memset_source.reloc_bank());
 
     // Set transfer size
-    set_byte_count(b, channel, count);
+    set_byte_count(b, register, channel, count);
 
     // Start transfer
-    enable_channel(b, channel);
+    enable_channel(b, register, channel);
 }
 
 fn channel_offset(channel: u3) u8 {
