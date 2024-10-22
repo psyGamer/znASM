@@ -103,9 +103,9 @@ pub const Rom = @import("Rom.zig");
 pub const Builder = @import("Builder.zig");
 
 // Symbols
-const Symbol = @import("symbol.zig").Symbol;
-pub const Address = Symbol.Address;
-pub const Data = @import("symbol.zig").DataSymbol;
+const symbol = @import("symbol.zig");
+pub const Address = symbol.Symbol.Address;
+pub const Data = symbol.DataSymbol;
 
 // Util
 pub const size = @import("util/size.zig");

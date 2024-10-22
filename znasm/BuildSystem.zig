@@ -4,8 +4,7 @@ const Rom = @import("Rom.zig");
 const MappingMode = Rom.Header.Mode.Map;
 const Builder = @import("Builder.zig");
 const Symbol = @import("symbol.zig").Symbol;
-const Function = @import("Function.zig");
-const Data = @import("Data.zig");
+const resolved_symbol = @import("resolved_symbol.zig");
 
 const BuildSystem = @This();
 
@@ -13,10 +12,10 @@ allocator: std.mem.Allocator,
 
 mapping_mode: MappingMode,
 
-/// Resolved data symbols
-data: std.AutoArrayHashMapUnmanaged(Symbol.Data, Data) = .{},
 /// Resolved function symbols
-functions: std.AutoArrayHashMapUnmanaged(Symbol.Function, Function) = .{},
+functions: std.AutoArrayHashMapUnmanaged(Symbol.Function, resolved_symbol.Function) = .{},
+/// Resolved data symbols
+data: std.AutoArrayHashMapUnmanaged(Symbol.Data, resolved_symbol.Data) = .{},
 
 pub fn init(allocator: std.mem.Allocator, mapping_mode: MappingMode) !BuildSystem {
     return .{
@@ -30,34 +29,20 @@ pub fn register_symbol(sys: *BuildSystem, sym: anytype) !void {
     if (@TypeOf(sym) == Symbol) {
         switch (sym) {
             .address => {},
-            .data => |data_sym| _ = try sys.register_data(data_sym),
             .function => |func_sym| _ = try sys.register_function(func_sym),
+            .data => |data_sym| _ = try sys.register_data(data_sym),
         }
+    } else if (@TypeOf(sym) == Symbol.Function or @TypeOf(sym) == fn (*Builder) void) {
+        _ = try sys.register_function(sym);
     } else if (@TypeOf(sym) == Symbol.Data) {
         _ = try sys.register_data(sym);
-    } else if (@TypeOf(sym) == Symbol.Function) {
-        _ = try sys.register_function(sym);
+    } else {
+        @compileError(std.fmt.comptimePrint("Unsupported symbol type '{s}'", .{@typeName(@TypeOf(sym))}));
     }
-}
-
-/// Includes the specified data symbol into the ROM
-pub fn register_data(sys: *BuildSystem, data_sym: Symbol.Data) !Data {
-    const gop = try sys.data.getOrPut(sys.allocator, data_sym);
-    if (gop.found_existing) {
-        return gop.value_ptr.*; // Already included
-    }
-
-    const byte_ptr: [*]const u8 = @ptrCast(&data_sym.value);
-
-    gop.value_ptr.* = .{
-        .data = byte_ptr[0..data_sym.data_size],
-    };
-
-    return gop.value_ptr.*;
 }
 
 /// Registers and generates the specified function symbol
-pub fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !Function {
+pub fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !resolved_symbol.Function {
     const gop = try sys.functions.getOrPut(sys.allocator, func_sym);
     if (gop.found_existing) {
         return gop.value_ptr.*; // Already generated
@@ -90,6 +75,21 @@ pub fn register_function(sys: *BuildSystem, func_sym: Symbol.Function) !Function
     };
 
     std.log.debug("Generated function '{s}'", .{gop.value_ptr.symbol_name orelse "<unknown>"});
+    return gop.value_ptr.*;
+}
+
+/// Includes the specified data symbol into the ROM
+pub fn register_data(sys: *BuildSystem, data_sym: Symbol.Data) !resolved_symbol.Data {
+    const gop = try sys.data.getOrPut(sys.allocator, data_sym);
+    if (gop.found_existing) {
+        return gop.value_ptr.*; // Already included
+    }
+
+    gop.value_ptr.* = .{
+        .data = data_sym.data,
+    };
+
+    std.log.debug("Registered data '{s}'", .{data_sym.name});
     return gop.value_ptr.*;
 }
 
@@ -266,14 +266,14 @@ pub fn write_debug_data(sys: *BuildSystem, rom: []const u8, mlb_writer: anytype,
 pub fn symbol_location(sys: BuildSystem, sym: Symbol) u24 {
     return switch (sym) {
         .address => |reg_sym| reg_sym,
-        .data => |data_sym| if (sys.data.get(data_sym)) |data|
-            sys.offset_location(data.offset)
-        else
-            std.debug.panic("Tried to get offset of unknown data symbol", .{}),
         .function => |func_sym| if (sys.functions.get(func_sym)) |func|
             sys.offset_location(func.offset)
         else
             std.debug.panic("Tried to get offset of unknown function symbol", .{}),
+        .data => |data_sym| if (sys.data.get(data_sym)) |data|
+            sys.offset_location(data.offset)
+        else
+            std.debug.panic("Tried to get offset of unknown data symbol", .{}),
     };
 }
 

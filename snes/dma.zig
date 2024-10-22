@@ -120,11 +120,16 @@ fn set_byte_count(b: *Builder, register: Builder.Register, channel: u3, count: u
     b.store_value(.@"16bit", register, @as(Addr, DMA_BYTE_COUNT_L + channel_offset(channel)), actual_count);
 }
 
-// const memset_source_bytes =
-const memset_source: znasm.Data(u8) = .init(0x69);
+/// DMA source data for memsets
+const memset_sources: [0xFF]znasm.Data(u8) = b: {
+    var sources: [0xFF]znasm.Data(u8) = undefined;
+    for (0..sources.len) |i| {
+        sources[i] = .init(i, std.fmt.comptimePrint("memset_source_0x{X:0>2}", .{i}), @This());
+    }
+    break :b sources;
+};
 
 pub fn workram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u24, count: u17, value: u8) void {
-    _ = value; // autofix
     // Setup target address
     switch (b.a_size) {
         // Default to 8-bit, since that's more common
@@ -149,9 +154,9 @@ pub fn workram_memset(b: *Builder, register: Builder.Register, channel: u3, star
     set_b_bus_register(b, register, channel, .work_ram);
 
     // Set source byte
-    // TODO: Generate a byte in the ROM to read from
-    b.store_reloc(register, DMA_A_BUS_ADDR_LOW, memset_source.reloc_addr16());
-    b.store_reloc(register, DMA_A_BUS_ADDR_BANK, memset_source.reloc_bank());
+    const source = memset_sources[value];
+    b.store_reloc(register, DMA_A_BUS_ADDR_LOW, source.reloc_addr16());
+    b.store_reloc(register, DMA_A_BUS_ADDR_BANK, source.reloc_bank());
 
     // Set transfer size
     set_byte_count(b, register, channel, count);

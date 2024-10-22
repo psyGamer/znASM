@@ -6,6 +6,7 @@ const snes = @import("snes");
 
 pub const std_options: std.Options = .{
     .logFn = logging.logFn,
+    .log_level = .debug,
 };
 
 pub fn main() !void {
@@ -33,7 +34,9 @@ pub fn main() !void {
     };
 
     // Always a multiple of 4KiB (page size), so optimal allocator for the ROM
-    const rom_allocator = std.heap.page_allocator;
+    // const rom_allocator = std.heap.page_allocator;
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    // defer std.debug.assert(gpa.deinit() == .ok);
 
     // const rom = try znasm.Rom.init(config);
 
@@ -48,7 +51,7 @@ pub fn main() !void {
     var cdl_file = try std.fs.cwd().createFile("Testbed.cdl", .{});
     defer cdl_file.close();
 
-    try znasm.compile(config, rom_allocator, rom_file.writer(), mlb_file.writer(), cdl_file.writer());
+    try znasm.compile(config, gpa.allocator(), rom_file.writer(), mlb_file.writer(), cdl_file.writer());
 
     // try rom_file.writeAll(rom_data);
 
