@@ -3,7 +3,7 @@ const BuildSystem = @import("BuildSystem.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const InstructionType = @import("instruction.zig").InstructionType;
 const Symbol = @import("symbol.zig").Symbol;
-const CallConv = @import("resolved_symbol.zig.").Function.CallingConvention;
+const CallConv = @import("resolved_symbol.zig").Function.CallingConvention;
 const RegA = @import("register.zig").RegA;
 const RegX = @import("register.zig").RegX;
 const RegY = @import("register.zig").RegY;
@@ -296,7 +296,9 @@ pub fn RegisterType(comptime register: Register) type {
 pub fn store_zero(b: *Builder, size: AddrSize, target: anytype) void {
     if (@TypeOf(target) == Symbol.Address) {
         // TODO: Handle symbols in other banks
-        if (b.a_size == .@"8bit") {
+        if (size == .@"8bit" and b.a_size == .@"8bit" or
+            size == .@"16bit" and b.a_size == .@"16bit")
+        {
             b.emit_reloc(.stz_addr16, .{
                 .type = .addr16,
                 .target_sym = .{ .address = target },
@@ -385,14 +387,9 @@ pub fn store_reloc(b: *Builder, register: Register, target: anytype, reloc: Inst
 
     // Only change bitwidth if required
     if (curr_size == .none or reloc_size == .@"8bit") {
-        const prev_size = b.a_size;
         b.change_status_flags(switch (register) {
             .a => .{ .a_8bit = reloc_size == .@"8bit" },
             .x, .y => .{ .xy_8bit = reloc_size == .@"8bit" },
-        });
-        defer if (prev_size != .none) b.change_status_flags(switch (register) {
-            .a => .{ .a_8bit = prev_size == .@"8bit" },
-            .x, .y => .{ .xy_8bit = prev_size == .@"8bit" },
         });
 
         switch (register) {
@@ -662,6 +659,13 @@ pub fn change_status_flags(b: *Builder, change_status: ChangeStatusRegister) voi
     }
 }
 
+/// Set the Direct Page to the specified value
+pub fn set_direct_page(b: *Builder, direct_page: u16) void {
+    var a = b.reg_a16();
+    a = .load(b, direct_page);
+    a.transfer_to(.direct_page);
+}
+
 /// Invokes the generator function associated with this builder
 pub fn build(b: *Builder) !void {
     b.symbol(b);
@@ -864,16 +868,15 @@ fn resolve_comments(b: *Builder, start_addr: usize) ![]const []const u8 {
                 const src_reader = buf_reader.reader();
 
                 // Go to previous line
-                for (1..prev_line) |_| {
+                for (0..prev_line) |_| {
                     try src_reader.skipUntilDelimiterOrEof('\n');
                 }
 
                 // Read inbetween lines
-
                 var line_buffer: std.ArrayListUnmanaged(u8) = .{};
                 defer line_buffer.deinit(b.build_system.allocator);
 
-                for (prev_line..(curr_line + 1)) |_| {
+                for ((prev_line + 1)..(curr_line + 1)) |_| {
                     line_buffer.clearRetainingCapacity();
                     try src_reader.streamUntilDelimiter(line_buffer.writer(b.build_system.allocator), '\n', null);
 

@@ -54,7 +54,7 @@ pub const BGMODE: Addr = 0x2105;
 pub const MOSAIC: Addr = 0x2106;
 
 pub const BG1SC: Addr = 0x2107;
-pub const BG2CC: Addr = 0x2108;
+pub const BG2SC: Addr = 0x2108;
 pub const BG3SC: Addr = 0x2109;
 pub const BG4SC: Addr = 0x210A;
 
@@ -110,6 +110,7 @@ pub const TSW: Addr = 0x212F;
 
 pub const CGWSEL: Addr = 0x2130;
 pub const CGADSUB: Addr = 0x2131;
+pub const COLDATA: Addr = 0x2132;
 
 pub const SETINI: Addr = 0x2133;
 

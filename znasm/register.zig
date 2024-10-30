@@ -43,39 +43,31 @@ fn Register(comptime reg_type: enum { a, x, y }) type {
 
         /// Loads the value into the register
         pub fn load(b: *Builder, value: anytype) Reg {
-            if (reg_type == .a) {
-                std.debug.assert(b.a_size != .none);
-            } else {
-                std.debug.assert(b.xy_size != .none);
-            }
-
             const size_mode = switch (reg_type) {
                 .a => b.a_size,
                 .x, .y => b.xy_size,
             };
 
-            if (@TypeOf(value) == u8 or (value >= 0 and value <= std.math.maxInt(u8))) {
-                if (size_mode != .@"8bit") {
-                    std.debug.panic("Trying to load 8-bit value while in 16-bit mode", .{});
-                }
+            switch (size_mode) {
+                .none => @panic("Cannot load without a defined register size"),
+                .@"8bit" => {
+                    if (value < std.math.minInt(u8) or value > std.math.maxInt(u8)) {
+                        @panic("Trying to load 16-bit value while in 8-bit mode");
+                    }
 
-                b.emit(switch (reg_type) {
-                    .a => .{ .lda = .{ .imm8 = @intCast(value) } },
-                    .x => .{ .ldx = .{ .imm8 = @intCast(value) } },
-                    .y => .{ .ldy = .{ .imm8 = @intCast(value) } },
-                });
-            } else if (@TypeOf(value) == u16 or (value >= 0 and value <= std.math.maxInt(u16))) {
-                if (size_mode != .@"16bit") {
-                    std.debug.panic("Trying to load 16-bit value while in 8-bit mode", .{});
-                }
-
-                b.emit(switch (reg_type) {
-                    .a => .{ .lda = .{ .imm16 = value } },
-                    .x => .{ .ldx = .{ .imm16 = value } },
-                    .y => .{ .ldy = .{ .imm16 = value } },
-                });
-            } else {
-                @compileError(std.fmt.comptimePrint("Unsupported value type '{s}'", .{@typeName(@TypeOf(value))}));
+                    b.emit(switch (reg_type) {
+                        .a => .{ .lda = .{ .imm8 = @intCast(value) } },
+                        .x => .{ .ldx = .{ .imm8 = @intCast(value) } },
+                        .y => .{ .ldy = .{ .imm8 = @intCast(value) } },
+                    });
+                },
+                .@"16bit" => {
+                    b.emit(switch (reg_type) {
+                        .a => .{ .lda = .{ .imm16 = value } },
+                        .x => .{ .ldx = .{ .imm16 = value } },
+                        .y => .{ .ldy = .{ .imm16 = value } },
+                    });
+                },
             }
 
             b.clobbers.put(b.build_system.allocator, switch (reg_type) {

@@ -16,6 +16,17 @@ pub const WRAM_ADDR_MID: Addr = mmio.WMADDM;
 /// Work-RAM Address (High) for WRAM_DATA
 pub const WRAM_ADDR_HIGH: Addr = mmio.WMADDH;
 
+/// Controls how a Video-RAM DMA transfer operates
+pub const VRAM_CONTROL: Addr = mmio.VMAIN;
+/// Reads/Writes data to/from Videop-RAM at VRAM_ADDR
+/// Increments VRAM_ADDR according to VRAM_CONTROL
+pub const VRAM_DATA: Addr = mmio.VMDATAL;
+
+/// Video-RAM Address (Low) for VRAM_DATA
+pub const VRAM_ADDR_LOW: Addr = mmio.VMADDL;
+/// Video-RAM Address (High) for VRAM_DATA
+pub const VRAM_ADDR_HIGH: Addr = mmio.VMADDL;
+
 /// Controls which DMA channel are currently enabled
 pub const DMA_ENABLE: Addr = mmio.MDMAEN;
 
@@ -104,6 +115,7 @@ pub fn set_parameters(b: *Builder, register: Builder.Register, channel: u3, para
 
 const BBusRegister = enum(u8) {
     work_ram = @truncate(WRAM_DATA),
+    video_ram = @truncate(VRAM_DATA),
 };
 
 /// Specifies the read/writer register, in the 0x2100 - 0x21ff range
@@ -120,6 +132,32 @@ fn set_byte_count(b: *Builder, register: Builder.Register, channel: u3, count: u
     b.store_value(.@"16bit", register, @as(Addr, DMA_BYTE_COUNT_L + channel_offset(channel)), actual_count);
 }
 
+const VramControlConfig = packed struct(u8) {
+    increment_amount: enum(u2) {
+        @"1_word" = 0b00,
+        @"32_words" = 0b01,
+        @"128_words" = 0b10,
+    },
+    remapping: enum(u2) {
+        none = 0b00,
+        /// Remap rrrrrrrr YYYccccc -> rrrrrrrr cccccYYY
+        @"2bpp" = 0b01,
+        /// Remap rrrrrrrY YYcccccP -> rrrrrrrc ccccPYYY
+        @"4bpp" = 0b10,
+        /// Remap rrrrrrYY YcccccPP -> rrrrrrcc cccPPYYY
+        @"8bpp" = 0b11,
+    },
+    _: u3 = 0,
+    increment_mode: enum(u1) {
+        after_low = 0b0,
+        after_high = 0b1,
+    },
+};
+
+pub fn set_vram_control(b: *Builder, register: Builder.Register, config: VramControlConfig) void {
+    b.store_value(.@"8bit", register, VRAM_CONTROL, @bitCast(config));
+}
+
 /// DMA source data for memsets
 const memset_sources: [0xFF]znasm.Data(u8) = b: {
     var sources: [0xFF]znasm.Data(u8) = undefined;
@@ -129,7 +167,78 @@ const memset_sources: [0xFF]znasm.Data(u8) = b: {
     break :b sources;
 };
 
-pub fn workram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u24, count: u17, value: u8) void {
+pub fn wram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u24, count: u17, value: u8) void {
+    const size_mode = switch (register) {
+        .a => b.a_size,
+        .x, .y => b.xy_size,
+    };
+
+    // Setup target address
+    switch (size_mode) {
+        // Default to 8-bit, since that's more common
+        .none, .@"8bit" => {
+            b.store_value(.@"8bit", register, WRAM_ADDR_LOW, @as(u8, @truncate(start_addr >> 0)));
+            b.store_value(.@"8bit", register, WRAM_ADDR_MID, @as(u8, @truncate(start_addr >> 8)));
+            b.store_value(.@"8bit", register, WRAM_ADDR_HIGH, @as(u8, @truncate(start_addr >> 16)));
+        },
+        .@"16bit" => {
+            b.store_value(.@"16bit", register, WRAM_ADDR_LOW, @as(u16, @truncate(start_addr >> 0)));
+            b.store_value(.@"16bit", register, WRAM_ADDR_MID, @as(u16, @truncate(start_addr >> 8)));
+        },
+    }
+
+    // Setup DMA parametrs
+    set_parameters(b, register, channel, .{
+        .transfer_pattern = .read1_write0,
+        .address_adjust = .fixed,
+        .direction = .a_to_b,
+    });
+    // Write to WRAM
+    set_b_bus_register(b, register, channel, .work_ram);
+
+    // Set source byte
+    const source = memset_sources[value];
+    b.store_reloc(register, DMA_A_BUS_ADDR_LOW, source.reloc_addr16());
+    b.store_reloc(register, DMA_A_BUS_ADDR_BANK, source.reloc_bank());
+
+    // Set transfer size
+    set_byte_count(b, register, channel, count);
+
+    // Start transfer
+    enable_channel(b, register, channel);
+}
+
+pub fn vram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u16, count: u17, value: u8) void {
+    b.store_value(.@"16bit", register, VRAM_ADDR_LOW, start_addr);
+
+    // Setup DMA parametrs
+    set_parameters(b, register, channel, .{
+        .transfer_pattern = .read2_write01,
+        .address_adjust = .fixed,
+        .direction = .a_to_b,
+    });
+    // Setup VRAM control
+    set_vram_control(b, register, .{
+        .increment_amount = .@"1_word",
+        .remapping = .none,
+        .increment_mode = .after_high,
+    });
+    // Write to VRAM
+    set_b_bus_register(b, register, channel, .video_ram);
+
+    // Set source byte
+    const source = memset_sources[value];
+    b.store_reloc(register, DMA_A_BUS_ADDR_LOW, source.reloc_addr16());
+    b.store_reloc(register, DMA_A_BUS_ADDR_BANK, source.reloc_bank());
+
+    // Set transfer size
+    set_byte_count(b, register, channel, count);
+
+    // Start transfer
+    enable_channel(b, register, channel);
+}
+
+pub fn cgram_memset(b: *Builder, register: Builder.Register, channel: u3, start_addr: u9, count: u10, value: u8) void {
     // Setup target address
     switch (b.a_size) {
         // Default to 8-bit, since that's more common
