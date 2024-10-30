@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const target_os = builtin.os.tag;
 
 const Lexer = @import("Lexer.zig");
+const Ast = @import("Ast.zig");
 
 // Required to execute tests
 comptime {
@@ -95,15 +96,17 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const
         const src_data = try src_file.readToEndAllocOptions(allocator, std.math.maxInt(usize), null, @alignOf(u8), 0);
         defer allocator.free(src_data);
 
-        std.log.debug("Lexing file '{s}'", .{src});
-        var lexer: Lexer = .{ .buffer = src_data };
+        const ast = try Ast.parse(allocator, src_data);
+        defer ast.deinit(allocator);
+        // std.log.debug("Lexing file '{s}'", .{src});
+        // var lexer: Lexer = .{ .buffer = src_data };
 
-        while (true) {
-            const token = lexer.next();
-            if (token.tag == .eof) {
-                break;
-            }
-            std.log.debug(" - {}", .{token});
-        }
+        // while (true) {
+        //     const token = lexer.next();
+        //     if (token.tag == .eof) {
+        //         break;
+        //     }
+        //     std.log.debug(" - {}", .{token});
+        // }
     }
 }

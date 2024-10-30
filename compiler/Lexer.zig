@@ -17,7 +17,6 @@ pub const Token = struct {
         rbrace,
 
         ident,
-        builtin_ident,
         int_literal,
 
         // keyword_namespace,
@@ -59,7 +58,6 @@ pub const Token = struct {
                 .invalid => "invalid bytes",
                 .int_literal => "a number literal",
                 .ident => "an identifier",
-                .builtin_ident => "a builtin identifier",
                 else => unreachable,
             };
         }
@@ -134,7 +132,7 @@ pub fn next(lexer: *Lexer) Token {
                     state = .ident;
                 },
                 '@' => {
-                    token.tag = .builtin_ident;
+                    token.tag = .ident;
                     state = .ident;
                 },
 
@@ -247,6 +245,11 @@ fn testLexer(src: [:0]const u8, expected_tokens: []const Token.Tag) !void {
 
 test "empty" {
     try testLexer("", &.{.eof});
+}
+
+test "identifier" {
+    try testLexer("my_ident", &.{.ident});
+    try testLexer("@my_builtin_ident", &.{.builtin_ident});
 }
 
 test "decimal literal" {
