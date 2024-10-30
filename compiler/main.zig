@@ -2,6 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const target_os = builtin.os.tag;
 
+const Lexer = @import("Lexer.zig");
+
+// Required to execute tests
+comptime {
+    _ = Lexer;
+}
+
 pub const std_options: std.Options = .{
     .logFn = @import("logging.zig").logFn,
     .log_level = .debug,
@@ -74,12 +81,29 @@ pub fn main() !u8 {
         return 1;
     }
 
-    try compile(rom_name.?, source_files.items);
+    try compile(allocator, rom_name.?, source_files.items);
 
     return 0;
 }
 
-fn compile(rom_name: [21]u8, source_files: []const []const u8) !void {
+fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const []const u8) !void {
     _ = rom_name; // autofix
-    _ = source_files; // autofix
+    for (source_files) |src| {
+        const src_file = try std.fs.cwd().openFile(src, .{});
+        defer src_file.close();
+
+        const src_data = try src_file.readToEndAllocOptions(allocator, std.math.maxInt(usize), null, @alignOf(u8), 0);
+        defer allocator.free(src_data);
+
+        std.log.debug("Lexing file '{s}'", .{src});
+        var lexer: Lexer = .{ .buffer = src_data };
+
+        while (true) {
+            const token = lexer.next();
+            if (token.tag == .eof) {
+                break;
+            }
+            std.log.debug(" - {}", .{token});
+        }
+    }
 }
