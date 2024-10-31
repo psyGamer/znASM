@@ -20,8 +20,6 @@ pub const Token = struct {
         int_literal,
 
         keyword_module,
-        // keyword_namespace,
-        // keyword_segment,
         keyword_pub,
         // keyword_var,
         // keyword_const,
@@ -46,8 +44,6 @@ pub const Token = struct {
                 .rbrace => "}",
 
                 .keyword_module => "module",
-                // .keyword_namespace => "namespace",
-                // .keyword_segment => "segment",
                 .keyword_pub => "pub",
                 // .keyword_var => "var",
                 // .keyword_const => "const",

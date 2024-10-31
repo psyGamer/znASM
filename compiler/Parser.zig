@@ -25,40 +25,23 @@ const null_node = Ast.null_node;
 
 /// Root <- (ModuleExpr / GlobalVarDecl / FnDef)*
 pub fn parseRoot(self: *Self) !void {
-    var root = self.nodes.items[0];
+    const root = 0;
 
     while (true) {
         const t = self.tokens[self.index];
         std.log.debug("tok {}", .{t});
 
-        switch (t.tag) {
+        sw: switch (t.tag) {
             .eof => break,
-            .keyword_module => try root.children.append(self.allocator, try self.parseModuleExpr()),
-            // .keyword_namespace => try root.children.append(self.allocator, try self.parseNamespaceExpr()),
-            // .keyword_segment => try root.children.append(self.allocator, try self.parseSegmentExpr()),
+            .keyword_module => try self.addChild(root, try self.parseModuleExpr()),
             .keyword_pub => {
                 // Skip KEYWORD_pub
                 self.index += 1;
-
-                // const global_var_decl = try self.parseGlobalVarDecl(true);
-                // if (global_var_decl != null_node) {
-                //     try root.children.append(self.allocator, global_var_decl);
-                //     continue;
-                // }
-
-                const fn_def = try self.parseFnDef(true);
-                std.log.debug("Fn {}", .{fn_def});
-                if (fn_def != null_node) {
-                    try root.children.append(self.allocator, fn_def);
-                    continue;
-                }
-
-                unreachable;
+                continue :sw .keyword_fn;
             },
             // .keyword_var,
             // .keyword_const,
             .keyword_fn,
-            // .keyword_inline,
             => {
                 // const global_var_decl = try self.parseGlobalVarDecl(false);
                 // if (global_var_decl != null_node) {
@@ -68,7 +51,7 @@ pub fn parseRoot(self: *Self) !void {
 
                 const fn_def = try self.parseFnDef(false);
                 if (fn_def != null_node) {
-                    try root.children.append(self.allocator, fn_def);
+                    try self.addChild(root, fn_def);
                     continue;
                 }
 
@@ -85,8 +68,6 @@ pub fn parseRoot(self: *Self) !void {
             },
         }
     }
-
-    self.nodes.items[0] = root;
 }
 
 /// ModuleExpr <- KEYWORD_module IDENTIFIER
@@ -100,24 +81,6 @@ fn parseModuleExpr(self: *Self) !NodeIndex {
         .tag = .{ .module = self.source[ident.loc.start..ident.loc.end] },
         .main_token = main_token,
     });
-}
-
-/// NamespaceExpr <- KEYWORD_namespace IDENTIFIER SEMICOLON
-fn parseNamespaceExpr(self: *Self) !NodeIndex {
-    _ = try self.expectToken(.keyword_namespace);
-    const ident = try self.expectToken(.ident);
-    _ = try self.expectToken(.semicolon);
-
-    return try self.addNode(.{ .tag = .{ .namespace = self.source[ident.loc.start..ident.loc.end] } });
-}
-
-/// SegmentExpr <- KEYWORD_segment IDENTIFIER SEMICOLON
-fn parseSegmentExpr(self: *Self) !NodeIndex {
-    _ = try self.expectToken(.keyword_segment);
-    const ident = try self.expectToken(.ident);
-    _ = try self.expectToken(.semicolon);
-
-    return try self.addNode(.{ .tag = .{ .segment = self.source[ident.loc.start..ident.loc.end] } });
 }
 
 /// GlobalVarDecl <- (KEYWORD_pub)? (KEYWORD_const / KEYWORD_var) IDENTIFIER COLON IDENTIFIER SEMICOLON
@@ -166,7 +129,7 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
         },
         .main_token = main_token,
     });
-    try self.nodes.items[node].children.append(self.allocator, try self.parseBlockExpr());
+    try self.addChild(node, try self.parseBlockExpr());
     return node;
 }
 
@@ -181,7 +144,7 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
             break;
         }
 
-        try self.nodes.items[node].children.append(self.allocator, try self.parseExpr());
+        try self.addChild(node, try self.parseExpr());
     }
     _ = try self.expectToken(.rbrace);
 
@@ -277,6 +240,9 @@ fn expectTokenIdx(self: *Self, tag: Token.Tag) !struct { Token, TokenIndex } {
 fn addNode(self: *Self, node: Node) !NodeIndex {
     try self.nodes.append(self.allocator, node);
     return @intCast(self.nodes.items.len - 1);
+}
+fn addChild(self: *Self, parent: NodeIndex, child: NodeIndex) !void {
+    self.nodes.items[child].parent = parent;
 }
 
 fn fail(self: *Self, err: Error) error{ ParseFailed, OutOfMemory } {

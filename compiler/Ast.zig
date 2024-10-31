@@ -7,8 +7,6 @@ pub const Node = struct {
         /// main_token is invalid
         root: void,
         module: []const u8,
-        // namespace: []const u8,
-        // segment: []const u8,
         /// main_token is the `keyword_var` or `keyword_const`
         global_var_decl: struct {
             name: []const u8,
@@ -33,7 +31,8 @@ pub const Node = struct {
 
     tag: Tag,
     main_token: TokenIndex,
-    children: std.ArrayListUnmanaged(NodeIndex) = .{},
+    /// The parent node of this node. Only the root-node doesn't have a parent
+    parent: TokenIndex = undefined,
 };
 
 pub const Error = struct {
@@ -122,14 +121,44 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8) !Self {
 }
 
 pub fn deinit(tree: Self, allocator: std.mem.Allocator) void {
-    for (tree.nodes) |node| {
-        var children = node.children;
-        children.deinit(allocator);
-    }
-
     allocator.free(tree.tokens);
     allocator.free(tree.nodes);
     allocator.free(tree.errors);
+}
+
+const ChildIterator = struct {
+    index: NodeIndex,
+    parent: NodeIndex,
+    nodes: []const Node,
+
+    pub fn next(iter: *ChildIterator) ?Node {
+        while (iter.index < iter.nodes.len) {
+            defer iter.index += 1;
+            if (iter.nodes[iter.index].parent == iter.parent) {
+                return iter.nodes[iter.index];
+            }
+        }
+
+        return null;
+    }
+    pub fn nextIndex(iter: *ChildIterator) ?NodeIndex {
+        while (iter.index < iter.nodes.len) {
+            defer iter.index += 1;
+            if (iter.nodes[iter.index].parent == iter.parent) {
+                return iter.index;
+            }
+        }
+
+        return null;
+    }
+};
+/// Iterates the children of the specified node
+pub fn iterChildren(tree: Self, parent: NodeIndex) ChildIterator {
+    return .{
+        .index = parent + 1,
+        .parent = parent,
+        .nodes = tree.nodes,
+    };
 }
 
 pub fn detectErrors(tree: Self, writer: std.fs.File.Writer, tty_config: std.io.tty.Config, src_file_path: []const u8, source_data: []const u8) !bool {
@@ -261,140 +290,4 @@ fn expectNodeEquals(ast: Self, expected: TestNode, actual: Node) !void {
     for (expected.children, actual.children.items) |expected_child, actual_child| {
         try expectNodeEquals(ast, expected_child, ast.nodes[actual_child]);
     }
-}
-
-test "segments in namespace" {
-    try testAst(
-        \\namespace Level;
-        \\segment ROM0;
-        \\segment ROM1;
-    , .{
-        .tag = .root,
-        .children = &.{
-            .{ .tag = .{ .namespace = "Level" } },
-            .{ .tag = .{ .segment = "ROM0" } },
-            .{ .tag = .{ .segment = "ROM1" } },
-        },
-    });
-
-    try testAst(
-        \\namespace Level;
-        \\segment ROM0;
-        \\segment ROM1;
-        \\namespace Level2;
-        \\segment ROM0;
-        \\segment ROM1;
-    , .{
-        .tag = .root,
-        .children = &.{
-            .{ .tag = .{ .namespace = "Level" } },
-            .{ .tag = .{ .segment = "ROM0" } },
-            .{ .tag = .{ .segment = "ROM1" } },
-            .{ .tag = .{ .namespace = "Level2" } },
-            .{ .tag = .{ .segment = "ROM0" } },
-            .{ .tag = .{ .segment = "ROM1" } },
-        },
-    });
-}
-
-test "global variables" {
-    try testAst(
-        \\namespace Level;
-        \\
-        \\segment ROM0;
-        \\
-        \\var my_counter1: u8;
-        \\const my_counter2: u16;
-        \\pub var my_counter3: u32;
-        \\pub const my_counter4: u64;
-    , .{
-        .tag = .root,
-        .children = &.{
-            .{ .tag = .{ .namespace = "Level" } },
-            .{ .tag = .{ .segment = "ROM0" } },
-            .{
-                .tag = .{
-                    .global_var_decl = .{
-                        .name = "my_counter1",
-                        .type = "u8",
-                        .is_const = false,
-                        .is_pub = false,
-                    },
-                },
-            },
-            .{
-                .tag = .{
-                    .global_var_decl = .{
-                        .name = "my_counter2",
-                        .type = "u16",
-                        .is_const = true,
-                        .is_pub = false,
-                    },
-                },
-            },
-            .{
-                .tag = .{
-                    .global_var_decl = .{
-                        .name = "my_counter3",
-                        .type = "u32",
-                        .is_const = false,
-                        .is_pub = true,
-                    },
-                },
-            },
-            .{
-                .tag = .{
-                    .global_var_decl = .{
-                        .name = "my_counter4",
-                        .type = "u64",
-                        .is_const = true,
-                        .is_pub = true,
-                    },
-                },
-            },
-        },
-    });
-}
-
-test "function definitions" {
-    try testAst(
-        \\namespace Level;
-        \\
-        \\segment ROM0;
-        \\
-        \\fn test1() void { }
-        \\pub inline fn test2() u32 { }
-    , .{
-        .tag = .root,
-        .children = &.{
-            .{ .tag = .{ .namespace = "Level" } },
-            .{ .tag = .{ .segment = "ROM0" } },
-            .{
-                .tag = .{
-                    .fn_def = .{
-                        .name = "test1",
-                        .return_type = "void",
-                        .is_inline = false,
-                        .is_pub = false,
-                    },
-                },
-                .children = &.{
-                    .{ .tag = .block_expr },
-                },
-            },
-            .{
-                .tag = .{
-                    .fn_def = .{
-                        .name = "test2",
-                        .return_type = "u32",
-                        .is_inline = true,
-                        .is_pub = true,
-                    },
-                },
-                .children = &.{
-                    .{ .tag = .block_expr },
-                },
-            },
-        },
-    });
 }

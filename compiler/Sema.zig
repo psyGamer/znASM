@@ -206,18 +206,18 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
 fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !void {
     const module = &sema.modules[module_idx];
     const nodes = module.ast.nodes;
+    _ = nodes; // autofix
+    const ast = module.ast;
 
-    const root = nodes[0];
-    std.debug.assert(root.tag == .root);
+    const root = 0;
 
     std.log.err("Nodes:", .{});
-    node_loop: for (root.children.items) |child_idx| {
-        const child = nodes[child_idx];
+    var child_iter = ast.iterChildren(root);
+    node_loop: while (child_iter.next()) |child| {
+        const child_idx = child_iter.index;
         std.log.err(" - {}", .{child});
         switch (child.tag) {
             .module => |module_name| module.name = module_name,
-            // .namespace => |namespace| current_namespace = namespace,
-            // .segment => |segment| current_segment = segment,
             .global_var_decl => |global_var_decl| {
                 const module_name = module.name orelse {
                     try sema.errors.append(allocator, .{

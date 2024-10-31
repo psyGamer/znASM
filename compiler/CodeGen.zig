@@ -1,6 +1,7 @@
 const std = @import("std");
 const Module = @import("Module.zig");
 const Node = @import("Ast.zig").Node;
+const NodeIndex = @import("Ast.zig").NodeIndex;
 const Symbol = @import("symbol.zig").Symbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const SymbolMap = @import("Sema.zig").SymbolMap;
@@ -132,31 +133,32 @@ const FunctionBuilder = struct {
     y_reg_id: ?u64 = null,
 
     pub fn build(b: *FunctionBuilder) !void {
-        const nodes = b.module.ast.nodes;
-
-        for (nodes[b.symbol.node].children.items) |expr_idx| {
-            try b.handleExpression(nodes[expr_idx]);
+        var child_iter = b.module.ast.iterChildren(b.symbol.node);
+        while (child_iter.nextIndex()) |expr_idx| {
+            try b.handleExpression(expr_idx);
         }
     }
 
     const Error = error{OutOfMemory};
 
     // Expression handling
-    fn handleExpression(b: *FunctionBuilder, node: Node) Error!void {
+    fn handleExpression(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+        const node = b.module.ast.nodes[node_idx];
         return switch (node.tag) {
             .root, .module, .global_var_decl, .fn_def => std.debug.panic("Unexpected expression node {}", .{node}),
 
-            .block_expr => b.handleBlock(node),
+            .block_expr => b.handleBlock(node_idx),
             .instruction => b.handleInstruction(node),
         };
     }
 
-    fn handleBlock(b: *FunctionBuilder, node: Node) Error!void {
+    fn handleBlock(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+        const node = b.module.ast.nodes[node_idx];
         std.debug.assert(node.tag == .block_expr);
-        const nodes = b.module.ast.nodes;
 
-        for (node.children.items) |expr_idx| {
-            try b.handleExpression(nodes[expr_idx]);
+        var child_iter = b.module.ast.iterChildren(node_idx);
+        while (child_iter.nextIndex()) |expr_idx| {
+            try b.handleExpression(expr_idx);
         }
     }
     fn handleInstruction(b: *FunctionBuilder, node: Node) Error!void {
