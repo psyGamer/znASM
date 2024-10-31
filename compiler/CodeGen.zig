@@ -16,7 +16,8 @@ symbols: SymbolMap,
 allocator: std.mem.Allocator,
 
 pub fn generate(gen: *CodeGen, module: Module) !void {
-    for (gen.symbols.get(module.name.?).?.values()) |*sym| {
+    const module_symbols = gen.symbols.get(module.name.?).?;
+    for (module_symbols.keys(), module_symbols.values()) |name, *sym| {
         if (sym.* != .function) {
             continue;
         }
@@ -25,16 +26,18 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
             .codegen = gen,
             .module = module,
             .symbol = sym.function,
+            .symbol_name = name,
         };
         try builder.build();
 
         sym.function.assembly_data = try builder.genereateAssemblyData();
+        try builder.fixLabelRelocs();
     }
 }
 
 /// Returns the memory-mapped location of a symbol
 pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
-    const symbol = gen.symbols.get(symbol_loc.module.?).?.get(symbol_loc.name).?;
+    const symbol = gen.symbols.get(symbol_loc.module).?.get(symbol_loc.name).?;
     return switch (symbol) {
         .variable => @panic("TODO"),
         .function => |func_sym| func_sym.address,
@@ -73,23 +76,19 @@ pub fn createBanks(gen: CodeGen) ![]const Rom.BankData {
     return bank_data;
 }
 
-/// Redefinable index to a target instruction
-pub const Label = struct {
-    index: ?u16,
-
-    /// Defines the label to point to the next instruction
-    pub fn define(label: *Label, b: *const FunctionBuilder) void {
-        label.index = @intCast(b.instructions.items.len);
-    }
-};
+/// Index to a target instruction
+pub const Label = u16;
 
 /// A relocatoion indicates that this instruction has an operand to another symbol,
 /// which needs to be fixed after emitting the data into ROM
 pub const Relocation = struct {
-    pub const Type = enum {};
+    pub const Type = enum {
+        /// 24-bit Long address of the symbol
+        addr24,
+    };
 
     type: Type,
-    target_sym: Symbol,
+    target_sym: SymbolLocation,
     target_offset: u16,
 };
 /// Branches need to be relocated to point to their label and use the short / long form
@@ -99,7 +98,7 @@ const BranchRelocation = struct {
     };
 
     type: Type,
-    target: *Label,
+    target: []const u8,
 };
 
 /// Metadata information about an instruction
@@ -120,35 +119,48 @@ pub const InstructionInfo = struct {
 /// Builds instruction information from the AST nodes of a function
 const FunctionBuilder = struct {
     codegen: *CodeGen,
+
     module: Module,
     symbol: Symbol.Function,
+    symbol_name: []const u8,
 
-    instructions: std.ArrayListUnmanaged(InstructionInfo) = .{},
+    instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
+    labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
     // Register State
-    a_size: Instruction.SizeMode = .@"8bit",
+    a_size: Instruction.SizeMode = .none,
     xy_size: Instruction.SizeMode = .none,
     a_reg_id: ?u64 = null,
     x_reg_id: ?u64 = null,
     y_reg_id: ?u64 = null,
 
     pub fn build(b: *FunctionBuilder) !void {
-        var child_iter = b.module.ast.iterChildren(b.symbol.node);
-        while (child_iter.nextIndex()) |expr_idx| {
-            try b.handleExpression(expr_idx);
-        }
+        try b.handleFnBlock(b.symbol.node);
     }
 
     const Error = error{OutOfMemory};
 
-    // Expression handling
+    // Node handling
+    fn handleFnBlock(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+        var child_iter = b.module.ast.iterChildren(node_idx);
+        while (child_iter.nextIndex()) |child_idx| {
+            const child = b.module.ast.nodes[child_idx];
+            switch (child.tag) {
+                .block_expr => try b.handleBlock(child_idx),
+
+                .instruction => try b.handleInstruction(child),
+                .label => try b.handleLabel(child),
+                else => std.debug.panic("Unexpected expression node {}", .{child}),
+            }
+        }
+    }
+
     fn handleExpression(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
         const node = b.module.ast.nodes[node_idx];
         return switch (node.tag) {
-            .root, .module, .global_var_decl, .fn_def => std.debug.panic("Unexpected expression node {}", .{node}),
+            else => std.debug.panic("Unexpected expression node {}", .{node}),
 
             .block_expr => b.handleBlock(node_idx),
-            .instruction => b.handleInstruction(node),
         };
     }
 
@@ -161,6 +173,7 @@ const FunctionBuilder = struct {
             try b.handleExpression(expr_idx);
         }
     }
+
     fn handleInstruction(b: *FunctionBuilder, node: Node) Error!void {
         const instr_node = node.tag.instruction;
         std.log.info("instruction {}", .{instr_node});
@@ -172,7 +185,22 @@ const FunctionBuilder = struct {
             .x, .y => b.xy_size,
         };
 
-        const instr = get_instr: switch (instr_node.operand) {
+        var info: InstructionInfo = .{
+            .instr = undefined,
+            .offset = undefined,
+
+            // TODO: Relocations
+            .reloc = null,
+            .branch_reloc = null,
+
+            .a_size = b.a_size,
+            .xy_size = b.xy_size,
+
+            // TODO: Comments
+            .comments = &.{},
+        };
+
+        compute_info: switch (instr_node.operand) {
             .none => {
                 switch (instr_node.opcode) {
                     inline else => |t| {
@@ -186,7 +214,8 @@ const FunctionBuilder = struct {
                         };
 
                         if (field.type == void) {
-                            break :get_instr @unionInit(Instruction, @tagName(t), {});
+                            info.instr = @unionInit(Instruction, @tagName(t), {});
+                            break :compute_info;
                         }
                     },
                 }
@@ -205,32 +234,41 @@ const FunctionBuilder = struct {
                         };
 
                         if (field.type == Instruction.Imm816) {
-                            break :get_instr @unionInit(Instruction, @tagName(t), switch (register_size) {
+                            info.instr = @unionInit(Instruction, @tagName(t), switch (register_size) {
                                 .@"8bit" => .{ .imm8 = @intCast(num) },
                                 .@"16bit" => .{ .imm16 = num },
                                 else => unreachable,
                             });
+                            break :compute_info;
                         }
                     },
                 }
                 unreachable;
             },
-        };
+            .identifier => |ident| {
+                const sym_loc = SymbolLocation.parse(ident, b.module.name.?);
 
-        try b.instructions.append(b.codegen.allocator, .{
-            .instr = instr,
-            .offset = undefined,
+                info.instr = switch (instr_node.opcode) {
+                    inline else => |t| @unionInit(Instruction, @tagName(t), undefined),
+                };
+                switch (instr_node.opcode) {
+                    .jml => {
+                        info.reloc = .{
+                            .type = .addr24,
+                            .target_sym = sym_loc,
+                            .target_offset = 0,
+                        };
+                    },
+                    else => unreachable,
+                }
+            },
+        }
 
-            // TODO: Relocations
-            .reloc = null,
-            .branch_reloc = null,
+        try b.instructions.append(b.codegen.allocator, info);
+    }
 
-            .a_size = b.a_size,
-            .xy_size = b.xy_size,
-
-            // TODO: Comments
-            .comments = &.{},
-        });
+    fn handleLabel(b: *FunctionBuilder, node: Node) Error!void {
+        try b.labels.put(b.codegen.allocator, node.tag.label, @intCast(b.instructions.items.len));
     }
 
     /// Generates the raw assembly bytes for all instructions
@@ -257,5 +295,23 @@ const FunctionBuilder = struct {
         }
 
         return data.toOwnedSlice(b.codegen.allocator);
+    }
+
+    /// By default labels point to local functions instead of the current one with an offset
+    fn fixLabelRelocs(b: *FunctionBuilder) !void {
+        for (b.instructions.items) |*info| {
+            const reloc = &(info.reloc orelse continue);
+            if (!std.mem.eql(u8, reloc.target_sym.module, b.module.name.?)) continue;
+
+            for (b.labels.keys(), b.labels.values()) |label, instr_index| {
+                if (std.mem.eql(u8, label, reloc.target_sym.name)) {
+                    reloc.target_sym.name = b.symbol_name;
+                    reloc.target_offset = if (instr_index == b.instructions.items.len)
+                        @intCast(b.symbol.assembly_data.len)
+                    else
+                        b.instructions.items[instr_index].offset;
+                }
+            }
+        }
     }
 };

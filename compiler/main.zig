@@ -159,7 +159,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Include builtin functions
-    const builtin_gop = try codegen.symbols.getOrPut(allocator, znasm_builtin.empty_vector_loc.module.?);
+    const builtin_gop = try codegen.symbols.getOrPut(allocator, znasm_builtin.empty_vector_loc.module);
     if (!builtin_gop.found_existing) {
         builtin_gop.value_ptr.* = .empty;
     }

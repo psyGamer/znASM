@@ -234,7 +234,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                     .name = global_var_decl.name,
                 };
 
-                if (sema.lookupSymbol(sym_loc, module_name) != null) {
+                if (sema.lookupSymbol(sym_loc) != null) {
                     try sema.errors.append(allocator, .{
                         .tag = .duplicate_symbol,
                         .type = .err,
@@ -246,7 +246,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
 
                 const sym: Symbol = .{
                     .variable = .{
-                        .type = .parse(global_var_decl.type),
+                        .type = .parse(global_var_decl.type, module_name),
                         .is_const = global_var_decl.is_const,
                         .is_pub = global_var_decl.is_pub,
 
@@ -280,7 +280,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                     .name = fn_def.name,
                 };
 
-                if (sema.lookupSymbol(sym_loc, module_name) != null) {
+                if (sema.lookupSymbol(sym_loc) != null) {
                     try sema.errors.append(allocator, .{
                         .tag = .duplicate_symbol,
                         .type = .err,
@@ -322,8 +322,8 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                             });
 
                             const existing_loc = @field(sema.interrupt_vectors, field.name).?;
-                            const existing_module = sema.symbols.getIndex(existing_loc.module.?);
-                            const existing_sym = sema.lookupSymbol(existing_loc, module_name).?;
+                            const existing_module = sema.symbols.getIndex(existing_loc.module);
+                            const existing_sym = sema.lookupSymbol(existing_loc).?;
                             try sema.errors.append(allocator, .{
                                 .tag = .existing_sym,
                                 .type = .note,
@@ -358,28 +358,8 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
     }
 }
 
-fn generateIR(sema: Sema, allocator: std.mem.Allocator, module: Module, func_sym: *Symbol.Function) !void {
-    _ = sema; // autofix
-
-    const nodes = module.ast.nodes;
-
-    const func = nodes[func_sym.node];
-    std.debug.assert(func.tag == .fn_def);
-    const block = nodes[func.children.items[0]];
-    std.debug.assert(block.tag == .block_expr);
-
-    for (block.children.items) |expr_idx| {
-        const expr = nodes[expr_idx];
-        _ = expr; // autofix
-        // TODO: :catplush:
-    }
-
-    // Insert explicit return at end
-    try func_sym.ir.append(allocator, .@"return");
-}
-
-fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation, current_module: []const u8) ?Symbol {
-    if (sema.symbols.get(sym_loc.module orelse current_module)) |module_symbols| {
+fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?Symbol {
+    if (sema.symbols.get(sym_loc.module)) |module_symbols| {
         if (module_symbols.get(sym_loc.name)) |sym| {
             return sym;
         }

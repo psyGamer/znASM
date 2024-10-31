@@ -4,12 +4,12 @@ const Ast = @import("Ast.zig");
 pub const SymbolLocation = struct {
     pub const separator = "::";
 
-    module: ?[]const u8,
+    module: []const u8,
     name: []const u8,
 
-    pub fn parse(sym_loc: []const u8) SymbolLocation {
+    pub fn parse(sym_loc: []const u8, current_module: []const u8) SymbolLocation {
         const separator_idx = std.mem.indexOf(u8, sym_loc, separator) orelse return .{
-            .module = null,
+            .module = current_module,
             .name = sym_loc,
         };
         return .{

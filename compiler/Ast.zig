@@ -20,6 +20,10 @@ pub const Node = struct {
             return_type: ?[]const u8,
             is_pub: bool,
         },
+
+        /// main_token is the `lbrace`
+        fn_block: void,
+
         /// main_token is the `lbrace`
         block_expr: void,
 
@@ -29,8 +33,12 @@ pub const Node = struct {
             operand: union(enum) {
                 none: void,
                 number: u16,
+                identifier: []const u8,
             },
         },
+
+        /// main_token is the `identifier` of the name
+        label: []const u8,
     };
 
     tag: Tag,
@@ -47,6 +55,7 @@ pub const Error = struct {
         expected_var_decl_or_fn,
         expected_expression,
         invalid_opcode,
+        expected_expr_instr_label,
         // Extra: expected_tag
         expected_token,
     };
@@ -245,6 +254,23 @@ pub fn renderError(tree: Self, writer: anytype, tty_config: std.io.tty.Config, e
             try tty_config.setColor(writer, .bold);
             try tty_config.setColor(writer, .bright_magenta);
             try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
+            try tty_config.setColor(writer, .reset);
+        },
+        .expected_expr_instr_label => {
+            try writer.writeAll("Expected ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll("expression");
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(", ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll("instruction");
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(", or ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll("label");
             try tty_config.setColor(writer, .reset);
         },
 

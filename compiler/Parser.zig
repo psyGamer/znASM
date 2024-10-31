@@ -19,12 +19,36 @@ allocator: std.mem.Allocator,
 nodes: std.ArrayListUnmanaged(Node) = .{},
 errors: std.ArrayListUnmanaged(Error) = .{},
 
+state_stack: std.ArrayListUnmanaged(struct {
+    index: u32,
+    nodes: usize,
+    errors: usize,
+}) = .empty,
+
 const null_node = Ast.null_node;
+
+/// Saves the current parser state, for use when trying multiple sub-items
+fn saveState(self: *Self) !void {
+    try self.state_stack.append(self.allocator, .{
+        .index = self.index,
+        .nodes = self.nodes.items.len,
+        .errors = self.errors.items.len,
+    });
+}
+/// Restores a previously saved parser state
+fn restoreState(self: *Self) void {
+    const state = self.state_stack.pop();
+    self.index = state.index;
+    self.nodes.items.len = state.nodes;
+    self.errors.items.len = state.errors;
+}
 
 // Grammer parsing
 
+const ParseError = error{ParseFailed} || std.mem.Allocator.Error;
+
 /// Root <- (ModuleExpr / GlobalVarDecl / FnDef)*
-pub fn parseRoot(self: *Self) !void {
+pub fn parseRoot(self: *Self) ParseError!void {
     const root = 0;
 
     while (true) {
@@ -37,7 +61,7 @@ pub fn parseRoot(self: *Self) !void {
                 continue;
             },
             .eof => break,
-            .keyword_module => try self.addChild(root, try self.parseModuleExpr()),
+            .keyword_module => self.addChild(root, try self.parseModuleExpr()),
             .keyword_pub => {
                 // Skip KEYWORD_pub
                 self.index += 1;
@@ -55,7 +79,7 @@ pub fn parseRoot(self: *Self) !void {
 
                 const fn_def = try self.parseFnDef(false);
                 if (fn_def != null_node) {
-                    try self.addChild(root, fn_def);
+                    self.addChild(root, fn_def);
                     continue;
                 }
 
@@ -75,7 +99,7 @@ pub fn parseRoot(self: *Self) !void {
 }
 
 /// ModuleExpr <- KEYWORD_module IDENTIFIER
-fn parseModuleExpr(self: *Self) !NodeIndex {
+fn parseModuleExpr(self: *Self) ParseError!NodeIndex {
     const main_token = self.index;
 
     _ = try self.expectToken(.keyword_module);
@@ -88,7 +112,7 @@ fn parseModuleExpr(self: *Self) !NodeIndex {
 }
 
 /// GlobalVarDecl <- (KEYWORD_pub)? (KEYWORD_const / KEYWORD_var) IDENTIFIER COLON IDENTIFIER SEMICOLON
-fn parseGlobalVarDecl(self: *Self, is_pub: bool) !NodeIndex {
+fn parseGlobalVarDecl(self: *Self, is_pub: bool) ParseError!NodeIndex {
     const mut =
         self.eatToken(.keyword_var) orelse
         self.eatToken(.keyword_const) orelse
@@ -111,8 +135,8 @@ fn parseGlobalVarDecl(self: *Self, is_pub: bool) !NodeIndex {
     });
 }
 
-/// FnDef <- (KEYWORD_pub)? KEYWORD_fn (IDENTIFIER BUILTIN_IDENTIFIER) LPAREN RPAREN IDENTIFIER BlockExpr
-fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
+/// FnDef <- (KEYWORD_pub)? KEYWORD_fn (IDENTIFIER BUILTIN_IDENTIFIER) LPAREN RPAREN IDENTIFIER FnBlock
+fn parseFnDef(self: *Self, is_pub: bool) ParseError!NodeIndex {
     const main_token = self.index;
     _ = try self.expectToken(.keyword_fn);
     const ident_name = try self.expectToken(.ident);
@@ -133,13 +157,13 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
         },
         .main_token = main_token,
     });
-    try self.addChild(node, try self.parseBlockExpr());
+    self.addChild(node, try self.parseFnBlock());
 
     return node;
 }
 
-/// BlockExpr <- LBRACE Expr* RBRACE
-fn parseBlockExpr(self: *Self) !NodeIndex {
+/// FnBlock <- LBRACE NEW_LINE (Expr | Instruction | Label)* RBRACE NEW_LINE
+fn parseFnBlock(self: *Self) ParseError!NodeIndex {
     const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
 
     _ = try self.expectToken(.lbrace);
@@ -150,7 +174,41 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
             break;
         }
 
-        try self.addChild(node, try self.parseExpr());
+        // Expression
+        const expr = self.parseExpr() catch |err| switch (err) {
+            error.ParseFailed => null_node,
+            else => |e| return e,
+        };
+        if (expr != null_node) {
+            self.addChild(node, expr);
+            continue;
+        }
+
+        // Instruction
+        const instr = self.parseInstruction() catch |err| switch (err) {
+            error.ParseFailed => null_node,
+            else => |e| return e,
+        };
+        if (instr != null_node) {
+            self.addChild(node, instr);
+            continue;
+        }
+
+        // Label
+        const label = self.parseLabel() catch |err| switch (err) {
+            error.ParseFailed => null_node,
+            else => |e| return e,
+        };
+        if (label != null_node) {
+            self.addChild(node, label);
+            continue;
+        }
+
+        return self.fail(.{
+            .tag = .expected_expr_instr_label,
+            .type = .err,
+            .token = self.index,
+        });
     }
     _ = try self.expectToken(.rbrace);
     _ = try self.expectToken(.new_line);
@@ -158,16 +216,19 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
     return node;
 }
 
-/// Expr <- Instrucrtion
-fn parseExpr(self: *Self) !NodeIndex {
+/// Expr <- BlockExpr
+fn parseExpr(self: *Self) ParseError!NodeIndex {
+    try self.saveState();
+    errdefer self.restoreState();
+
     const start_index = self.index;
 
-    const instr = self.parseInstruction() catch |err| switch (err) {
+    const block = self.parseBlockExpr() catch |err| switch (err) {
         error.ParseFailed => null_node,
         else => |e| return e,
     };
-    if (instr != null_node) {
-        return instr;
+    if (block != null_node) {
+        return block;
     }
 
     self.index = start_index;
@@ -179,8 +240,31 @@ fn parseExpr(self: *Self) !NodeIndex {
     });
 }
 
-/// Instruction <- IDENTIFIER
-fn parseInstruction(self: *Self) !NodeIndex {
+/// BlockExpr <- LBRACE NEW_LINE Expr* RBRACE NEW_LINE
+fn parseBlockExpr(self: *Self) ParseError!NodeIndex {
+    const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
+
+    _ = try self.expectToken(.lbrace);
+    _ = try self.expectToken(.new_line);
+    while (true) {
+        const t = self.tokens[self.index];
+        if (t.tag == .rbrace) {
+            break;
+        }
+
+        self.addChild(node, try self.parseExpr());
+    }
+    _ = try self.expectToken(.rbrace);
+    _ = try self.expectToken(.new_line);
+
+    return node;
+}
+
+/// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
+fn parseInstruction(self: *Self) ParseError!NodeIndex {
+    try self.saveState();
+    errdefer self.restoreState();
+
     const ident_opcode, const ident_opcode_idx = try self.expectTokenIdx(.ident);
 
     const opcode_name = self.source[ident_opcode.loc.start..ident_opcode.loc.end];
@@ -213,10 +297,29 @@ fn parseInstruction(self: *Self) !NodeIndex {
         const operand = std.fmt.parseInt(u16, operand_str[(if (number_base == 10) 0 else 1)..], number_base) catch unreachable;
         self.nodes.items[node].tag.instruction.operand = .{ .number = operand };
     }
+    if (self.eatToken(.ident)) |ident_operand| {
+        const operand_str = self.source[ident_operand.loc.start..ident_operand.loc.end];
+        self.nodes.items[node].tag.instruction.operand = .{ .identifier = operand_str };
+    }
 
     _ = try self.expectToken(.new_line);
 
     return node;
+}
+
+/// Label <- IDENTIFIER COLON NEW_LINE
+fn parseLabel(self: *Self) ParseError!NodeIndex {
+    try self.saveState();
+    errdefer self.restoreState();
+
+    const ident_name, const ident_name_idx = try self.expectTokenIdx(.ident);
+    _ = try self.expectToken(.colon);
+    _ = try self.expectToken(.new_line);
+
+    return try self.addNode(.{
+        .tag = .{ .label = self.source[ident_name.loc.start..ident_name.loc.end] },
+        .main_token = ident_name_idx,
+    });
 }
 
 // Helper functions
@@ -240,7 +343,7 @@ fn eatTokenIdx(self: *Self, tag: Token.Tag) ?struct { Token, TokenIndex } {
         null;
 }
 
-fn expectToken(self: *Self, tag: Token.Tag) !Token {
+fn expectToken(self: *Self, tag: Token.Tag) ParseError!Token {
     if (self.tokens[self.index].tag != tag) {
         return self.fail(.{
             .tag = .expected_token,
@@ -251,7 +354,7 @@ fn expectToken(self: *Self, tag: Token.Tag) !Token {
     }
     return self.nextToken();
 }
-fn expectTokenIdx(self: *Self, tag: Token.Tag) !struct { Token, TokenIndex } {
+fn expectTokenIdx(self: *Self, tag: Token.Tag) ParseError!struct { Token, TokenIndex } {
     if (self.tokens[self.index].tag != tag) {
         return self.fail(.{
             .tag = .expected_token,
@@ -267,11 +370,11 @@ fn addNode(self: *Self, node: Node) !NodeIndex {
     try self.nodes.append(self.allocator, node);
     return @intCast(self.nodes.items.len - 1);
 }
-fn addChild(self: *Self, parent: NodeIndex, child: NodeIndex) !void {
+fn addChild(self: *Self, parent: NodeIndex, child: NodeIndex) void {
     self.nodes.items[child].parent = parent;
 }
 
-fn fail(self: *Self, err: Error) error{ ParseFailed, OutOfMemory } {
+fn fail(self: *Self, err: Error) ParseError {
     try self.errors.append(self.allocator, err);
     return error.ParseFailed;
 }
