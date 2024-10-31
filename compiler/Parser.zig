@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Token = @import("Lexer.zig").Token;
 const Ast = @import("Ast.zig");
+const InstructionType = @import("instruction.zig").InstructionType;
 const Node = Ast.Node;
 const Error = Ast.Error;
 const TokenIndex = Ast.TokenIndex;
@@ -156,9 +157,10 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
     return node;
 }
 
-/// BlockExpr <- LBRACE RBRACE
+/// BlockExpr <- LBRACE Expr* RBRACE
 fn parseBlockExpr(self: *Self) !NodeIndex {
-    const main_token = self.index;
+    const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
+
     _ = try self.expectToken(.lbrace);
     while (true) {
         const t = self.tokens[self.index];
@@ -166,12 +168,60 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
             break;
         }
 
-        // Parse expression
-        self.index += 1;
+        try self.nodes.items[node].children.append(self.allocator, try self.parseExpr());
     }
     _ = try self.expectToken(.rbrace);
 
-    return try self.addNode(.{ .tag = .block_expr, .main_token = main_token });
+    return node;
+}
+
+/// Expr <- Instrucrtion
+fn parseExpr(self: *Self) !NodeIndex {
+    const start_index = self.index;
+
+    const instr = self.parseInstruction() catch |err| switch (err) {
+        error.ParseFailed => null_node,
+        else => |e| return e,
+    };
+    if (instr != null_node) {
+        return instr;
+    }
+
+    self.index = start_index;
+
+    return self.fail(.{
+        .tag = .expected_expression,
+        .type = .err,
+        .token = self.index,
+    });
+}
+
+/// Instruction <- IDENTIFIER
+fn parseInstruction(self: *Self) !NodeIndex {
+    const ident_opcode, const ident_opcode_idx = try self.expectTokenIdx(.ident);
+
+    const opcode_name = self.source[ident_opcode.loc.start..ident_opcode.loc.end];
+    const opcode: InstructionType = find_opcode: {
+        inline for (std.meta.fields(InstructionType)) |field| {
+            if (std.mem.eql(u8, field.name, opcode_name)) {
+                break :find_opcode @enumFromInt(field.value);
+            }
+        }
+
+        return error.ParseFailed;
+        // return self.fail(.{
+        //     .tag = .invalid_opcode,
+        //     .type = .err,
+        //     .token = ident_opcode_idx,
+        // });
+    };
+
+    return self.addNode(.{
+        .tag = .{ .instruction = .{
+            .opcode = opcode,
+        } },
+        .main_token = ident_opcode_idx,
+    });
 }
 
 // Helper functions
@@ -198,6 +248,17 @@ fn expectToken(self: *Self, tag: Token.Tag) !Token {
         });
     }
     return self.nextToken();
+}
+fn expectTokenIdx(self: *Self, tag: Token.Tag) !struct { Token, TokenIndex } {
+    if (self.tokens[self.index].tag != tag) {
+        return self.fail(.{
+            .tag = .expected_token,
+            .type = .err,
+            .token = self.index,
+            .extra = .{ .expected_tag = tag },
+        });
+    }
+    return .{ self.nextToken(), self.index - 1 };
 }
 
 fn addNode(self: *Self, node: Node) !NodeIndex {

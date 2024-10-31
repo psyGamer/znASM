@@ -133,6 +133,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
     // var current_segment: ?[]const u8 = null;
     var opt_current_module: ?[]const u8 = null;
     _ = &opt_current_module;
+    opt_current_module = "hi";
 
     const nodes = module.ast.nodes;
 

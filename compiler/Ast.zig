@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("logging.zig");
+const InstructionType = @import("instruction.zig").InstructionType;
 
 pub const Node = struct {
     pub const Tag = union(enum) {
@@ -22,6 +23,11 @@ pub const Node = struct {
         },
         /// main_token is the `lbrace`
         block_expr: void,
+
+        /// main_token is the `identifier` of the opcode
+        instruction: struct {
+            opcode: InstructionType,
+        },
     };
 
     tag: Tag,
@@ -35,7 +41,8 @@ pub const Error = struct {
         unexpected_eof,
         unexpected_token,
         expected_var_decl_or_fn,
-        expected_ident,
+        expected_expression,
+        invalid_opcode,
         // Extra: expected_tag
         expected_token,
     };
@@ -178,9 +185,30 @@ pub fn renderError(tree: Self, writer: anytype, tty_config: std.io.tty.Config, e
         .expected_var_decl_or_fn => return writer.print("Expected variable declaration or function definition, found {s}", .{
             tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
         }),
-        .expected_ident => return writer.print("Expected an identifier, found {s}", .{
-            tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
-        }),
+        .expected_expression => {
+            try writer.writeAll("Expected ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll("an expression");
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(", found ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
+            try tty_config.setColor(writer, .reset);
+        },
+        .invalid_opcode => {
+            try writer.writeAll("Expected ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll("opcode");
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(", found ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
+            try tty_config.setColor(writer, .reset);
+        },
 
         .expected_token => {
             try writer.writeAll("Expected ");
