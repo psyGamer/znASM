@@ -55,6 +55,7 @@ pub const Symbol = union(enum) {
         node: Ast.NodeIndex,
 
         assembly_data: []u8 = &.{},
+        offset: u16 = undefined,
         // ir: std.ArrayListUnmanaged(IR) = .{},
         // code: std.ArrayListUnmanaged(u8) = .{},
         // relocs: std.ArrayListUnmanaged(Reloc) = .{},

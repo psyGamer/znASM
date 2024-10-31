@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const log = @import("logging.zig");
 const target_os = builtin.os.tag;
 
+const znasm_builtin = @import("builtin.zig");
 const Lexer = @import("Lexer.zig");
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
@@ -147,10 +148,22 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Generate code
-    var codegen: CodeGen = .{ .symbols = sema.symbols, .allocator = allocator };
+    var codegen: CodeGen = .{
+        .mapping_mode = .lorom, // TODO: Configurable
+        .symbols = sema.symbols,
+        .allocator = allocator,
+    };
     for (modules.items) |mod| {
         try codegen.generate(mod);
     }
+
+    // Include builtin functions
+    const builtin_gop = try codegen.symbols.getOrPut(allocator, znasm_builtin.empty_vector_loc.module.?);
+    if (!builtin_gop.found_existing) {
+        builtin_gop.value_ptr.* = .empty;
+    }
+    try builtin_gop.value_ptr.put(allocator, znasm_builtin.empty_vector_loc.name, znasm_builtin.empty_vector_sym);
+
     const banks = try codegen.createBanks();
 
     // Generate ROM
@@ -160,7 +173,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .title = rom_name,
             // TODO: Configurable Mode / Chipset / Country / Version
             .mode = .{
-                .map = .lorom,
+                .map = codegen.mapping_mode,
                 .speed = .fast,
             },
             .chipset = .{
@@ -172,19 +185,18 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .country = .usa,
             .rom_version = 0,
         },
-        .vectors = undefined, // TODO
-        // .vectors = .{
-        //     .native_cop = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.cop })),
-        //     .native_brk = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.brk })),
-        //     .native_abort = @truncate(codegen.symbol_location(.{ .function = Config.empty_vector })), // Unused
-        //     .native_nmi = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.nmi })),
-        //     .native_irq = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.irq })),
-        //     .emulation_cop = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.cop })),
-        //     .emulation_abort = @truncate(codegen.symbol_location(.{ .function = Config.empty_vector })), // Unused
-        //     .emulation_nmi = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.nmi })),
-        //     .emulation_reset = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.reset })),
-        //     .emulation_irqbrk = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.irqbrk })),
-        // },
+        .vectors = .{
+            .native_cop = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .native_brk = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .native_abort = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)), // Unused
+            .native_nmi = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .native_irq = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .emulation_cop = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .emulation_abort = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)), // Unused
+            .emulation_nmi = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .emulation_reset = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .emulation_irqbrk = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+        },
         .banks = banks,
     };
     rom.computeRomSize();

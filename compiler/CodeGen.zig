@@ -2,11 +2,15 @@ const std = @import("std");
 const Module = @import("Module.zig");
 const Node = @import("Ast.zig").Node;
 const Symbol = @import("symbol.zig").Symbol;
+const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const SymbolMap = @import("Sema.zig").SymbolMap;
 const Instruction = @import("instruction.zig").Instruction;
 const Rom = @import("Rom.zig");
+const MappingMode = @import("Rom.zig").Header.Mode.Map;
+const memory_map = @import("memory_map.zig");
 const CodeGen = @This();
 
+mapping_mode: MappingMode,
 symbols: SymbolMap,
 allocator: std.mem.Allocator,
 
@@ -28,19 +32,37 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
     }
 }
 
+/// Returns the memory-mapped location of a symbol
+pub fn symbolLocation(gen: CodeGen, target: anytype) u24 {
+    const symbol = if (@TypeOf(target) == Symbol)
+        target
+    else if (@TypeOf(target) == SymbolLocation)
+        gen.symbols.get(target.module).?.get(target.name)
+    else
+        @compileError("Unsupported symbol type '" ++ @typeName(target) ++ "'");
+
+    return switch (symbol) {
+        .variable => @panic("TODO"),
+        // TODO: Support function bank
+        .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, func_sym.offset),
+    };
+}
+
+/// Generates byte data for the individual banks
 pub fn createBanks(gen: CodeGen) ![]const Rom.BankData {
     // TODO: Respect bank and addr min/max constraints
     var banks: std.AutoArrayHashMapUnmanaged(u8, std.ArrayListUnmanaged(u8)) = .empty;
     defer banks.deinit(gen.allocator);
 
     for (gen.symbols.values()) |module_symbols| {
-        for (module_symbols.values()) |symbol| {
-            if (symbol == .function) {
+        for (module_symbols.values()) |*symbol| {
+            if (symbol.* == .function) {
                 const gop = try banks.getOrPut(gen.allocator, 0x80);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .empty;
                 }
 
+                symbol.function.offset = @intCast(gop.value_ptr.items.len);
                 try gop.value_ptr.appendSlice(gen.allocator, symbol.function.assembly_data);
             }
         }
