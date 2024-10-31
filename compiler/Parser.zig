@@ -32,6 +32,10 @@ pub fn parseRoot(self: *Self) !void {
         std.log.debug("tok {}", .{t});
 
         sw: switch (t.tag) {
+            .new_line => {
+                self.index += 1;
+                continue;
+            },
             .eof => break,
             .keyword_module => try self.addChild(root, try self.parseModuleExpr()),
             .keyword_pub => {
@@ -130,6 +134,7 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
         .main_token = main_token,
     });
     try self.addChild(node, try self.parseBlockExpr());
+
     return node;
 }
 
@@ -138,6 +143,7 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
     const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
 
     _ = try self.expectToken(.lbrace);
+    _ = try self.expectToken(.new_line);
     while (true) {
         const t = self.tokens[self.index];
         if (t.tag == .rbrace) {
@@ -147,6 +153,7 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
         try self.addChild(node, try self.parseExpr());
     }
     _ = try self.expectToken(.rbrace);
+    _ = try self.expectToken(.new_line);
 
     return node;
 }
@@ -185,19 +192,31 @@ fn parseInstruction(self: *Self) !NodeIndex {
         }
 
         return error.ParseFailed;
-        // return self.fail(.{
-        //     .tag = .invalid_opcode,
-        //     .type = .err,
-        //     .token = ident_opcode_idx,
-        // });
     };
 
-    return self.addNode(.{
+    const node = try self.addNode(.{
         .tag = .{ .instruction = .{
             .opcode = opcode,
+            .operand = .none,
         } },
         .main_token = ident_opcode_idx,
     });
+
+    if (self.eatToken(.int_literal)) |ident_operand| {
+        const operand_str = self.source[ident_operand.loc.start..ident_operand.loc.end];
+        const number_base: u8 = switch (operand_str[0]) {
+            '$' => 16,
+            '%' => 2,
+            '0'...'9' => 10,
+            else => unreachable,
+        };
+        const operand = std.fmt.parseInt(u16, operand_str[(if (number_base == 10) 0 else 1)..], number_base) catch unreachable;
+        self.nodes.items[node].tag.instruction.operand = .{ .number = operand };
+    }
+
+    _ = try self.expectToken(.new_line);
+
+    return node;
 }
 
 // Helper functions
@@ -214,6 +233,13 @@ fn eatToken(self: *Self, tag: Token.Tag) ?Token {
     else
         null;
 }
+fn eatTokenIdx(self: *Self, tag: Token.Tag) ?struct { Token, TokenIndex } {
+    return if (self.tokens[self.index].tag == tag)
+        .{ self.nextToken(), self.index - 1 }
+    else
+        null;
+}
+
 fn expectToken(self: *Self, tag: Token.Tag) !Token {
     if (self.tokens[self.index].tag != tag) {
         return self.fail(.{

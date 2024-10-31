@@ -26,6 +26,10 @@ pub const Node = struct {
         /// main_token is the `identifier` of the opcode
         instruction: struct {
             opcode: InstructionType,
+            operand: union(enum) {
+                none: void,
+                number: u16,
+            },
         },
     };
 

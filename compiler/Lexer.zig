@@ -5,6 +5,7 @@ const Lexer = @This();
 pub const Token = struct {
     pub const Tag = enum {
         invalid,
+        new_line,
         eof,
 
         colon,
@@ -29,6 +30,7 @@ pub const Token = struct {
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
                 .invalid,
+                .new_line,
                 .eof,
                 .ident,
                 .int_literal,
@@ -54,8 +56,9 @@ pub const Token = struct {
         pub fn symbol(tag: Tag) []const u8 {
             return tag.lexeme() orelse switch (tag) {
                 .invalid => "invalid bytes",
-                .int_literal => "a number literal",
+                .new_line => "a new-line",
                 .ident => "an identifier",
+                .int_literal => "a number literal",
                 else => unreachable,
             };
         }
@@ -72,8 +75,6 @@ pub const Token = struct {
 
     pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{
         .{ "module", .keyword_module },
-        // .{ "namespace", .keyword_namespace },
-        // .{ "segment", .keyword_segment },
         .{ "pub", .keyword_pub },
         // .{ "var", .keyword_var },
         // .{ "const", .keyword_const },
@@ -122,8 +123,13 @@ pub fn next(lexer: *Lexer) Token {
                     break;
                 },
 
-                ' ', '\n', '\t', '\r' => {
+                ' ', '\t' => {
                     token.loc.start = lexer.index + 1;
+                },
+                '\n', '\r' => {
+                    token.tag = .new_line;
+                    lexer.index += 1;
+                    break;
                 },
 
                 'a'...'z', 'A'...'Z', '_' => {

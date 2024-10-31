@@ -126,7 +126,7 @@ const FunctionBuilder = struct {
     instructions: std.ArrayListUnmanaged(InstructionInfo) = .{},
 
     // Register State
-    a_size: Instruction.SizeMode = .none,
+    a_size: Instruction.SizeMode = .@"8bit",
     xy_size: Instruction.SizeMode = .none,
     a_reg_id: ?u64 = null,
     x_reg_id: ?u64 = null,
@@ -165,20 +165,55 @@ const FunctionBuilder = struct {
         const instr_node = node.tag.instruction;
         std.log.info("instruction {}", .{instr_node});
 
-        const instr = switch (instr_node.opcode) {
-            inline else => |t| b: {
-                const field = comptime find_field: {
-                    @setEvalBranchQuota(10000);
-                    for (std.meta.fields(Instruction)) |field| {
-                        if (std.mem.eql(u8, field.name, @tagName(t))) {
-                            break :find_field field;
+        const target_register = instr_node.opcode.target_register();
+        const register_size = switch (target_register) {
+            .none => .none,
+            .a => b.a_size,
+            .x, .y => b.xy_size,
+        };
+
+        const instr = get_instr: switch (instr_node.operand) {
+            .none => {
+                switch (instr_node.opcode) {
+                    inline else => |t| {
+                        const field = comptime find_field: {
+                            @setEvalBranchQuota(100000);
+                            for (std.meta.fields(Instruction)) |field| {
+                                if (std.mem.eql(u8, field.name, @tagName(t))) {
+                                    break :find_field field;
+                                }
+                            }
+                        };
+
+                        if (field.type == void) {
+                            break :get_instr @unionInit(Instruction, @tagName(t), {});
                         }
-                    }
-                };
-                if (@bitSizeOf(field.type) != 0) {
-                    @panic("Unsuppored instruction: " ++ @tagName(t));
+                    },
                 }
-                break :b @unionInit(Instruction, @tagName(t), {});
+                unreachable;
+            },
+            .number => |num| {
+                switch (instr_node.opcode) {
+                    inline else => |t| {
+                        const field = comptime find_field: {
+                            @setEvalBranchQuota(100000);
+                            for (std.meta.fields(Instruction)) |field| {
+                                if (std.mem.eql(u8, field.name, @tagName(t))) {
+                                    break :find_field field;
+                                }
+                            }
+                        };
+
+                        if (field.type == Instruction.Imm816) {
+                            break :get_instr @unionInit(Instruction, @tagName(t), switch (register_size) {
+                                .@"8bit" => .{ .imm8 = @intCast(num) },
+                                .@"16bit" => .{ .imm16 = num },
+                                else => unreachable,
+                            });
+                        }
+                    },
+                }
+                unreachable;
             },
         };
 

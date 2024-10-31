@@ -3,7 +3,7 @@ const std = @import("std");
 pub const Instruction = union(InstructionType) {
     /// Some instructions support either 8bit or 16bit immediate values,
     /// depending on the current register mode
-    const Imm816 = packed union { imm8: u8, imm16: u16 };
+    pub const Imm816 = packed union { imm8: u8, imm16: u16 };
 
     /// State of the Status Flags Register
     pub const StatusRegister = packed struct(u8) {
