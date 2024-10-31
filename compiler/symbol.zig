@@ -55,6 +55,8 @@ pub const Symbol = union(enum) {
         // TODO: Is this an appropriate location?
         node: Ast.NodeIndex,
 
+        /// Named indices to target instructions
+        labels: []const struct { []const u8, u16 } = &.{},
         /// Higher-level instruction data
         instructions: []InstructionInfo = &.{},
         /// Raw assembly data

@@ -10,6 +10,7 @@ const InstructionType = @import("instruction.zig").InstructionType;
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const memory_map = @import("memory_map.zig");
+const znasm_builtin = @import("builtin.zig");
 const CodeGen = @This();
 
 mapping_mode: MappingMode,
@@ -36,6 +37,12 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
         sym.function.assembly_data = try builder.genereateAssemblyData();
         try builder.fixLabelRelocs();
         sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
+
+        const labels = try gen.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
+        for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
+            label.* = .{ label_name, index };
+        }
+        sym.function.labels = labels;
     }
 }
 
@@ -106,6 +113,156 @@ pub fn resolveRelocations(gen: CodeGen) !void {
     }
 }
 
+/// Writes a .mlb symbol file for Mesen2
+pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer, modules: []const Module) !void {
+    var comments: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer comments.deinit(gen.allocator);
+
+    var module_index: usize = 0;
+    for (gen.symbols.keys(), gen.symbols.values()) |module_name, module_symbols| {
+        if (std.mem.eql(u8, module_name, znasm_builtin.module)) {
+            continue;
+        }
+
+        const module = modules[module_index];
+        module_index += 1;
+
+        var src_fbs = std.io.fixedBufferStream(module.source);
+        const src_reader = src_fbs.reader();
+
+        for (module_symbols.keys(), module_symbols.values()) |symbol_name, symbol| {
+            const is_vector = symbol_name[0] == '@';
+
+            // Usually format module@symbol, except for vectors which would have a double @
+            const debug_sym_name = if (is_vector)
+                symbol_name
+            else
+                try std.fmt.allocPrint(gen.allocator, "{s}@{s}", .{ module_name, symbol_name });
+            defer if (!is_vector) gen.allocator.free(debug_sym_name);
+
+            switch (symbol) {
+                .function => |func| {
+                    src_fbs.pos = module.ast.tokens[module.ast.nodes[func.node].main_token].loc.start;
+
+                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, 0x80) + func.bank_offset;
+
+                    for (func.instructions, 0..) |info, info_idx| {
+                        // Find labels
+                        const label: []const u8 = get_label: {
+                            if (info_idx == 0) {
+                                break :get_label debug_sym_name;
+                            }
+
+                            for (func.labels) |label| {
+                                const name, const idx = label;
+                                if (info_idx == idx) {
+                                    break :get_label name;
+                                }
+                            }
+
+                            break :get_label "";
+                        };
+
+                        // Find comments
+                        comments.clearRetainingCapacity();
+                        while (src_fbs.pos < info.source) {
+                            const line_start = src_fbs.pos;
+                            try src_reader.skipUntilDelimiterOrEof('\n');
+                            const line_end = src_fbs.pos;
+
+                            const line = std.mem.trim(u8, module.source[line_start..line_end], "\n\r");
+                            const comment_start = std.mem.indexOf(u8, line, "//") orelse continue;
+
+                            try comments.append(gen.allocator, line[(comment_start + "//".len)..]);
+                        }
+
+                        // Write symbols
+                        try writer.print("SnesPrgRom:{x}:{s}", .{ func_offset + info.offset, label });
+
+                        for (comments.items, 0..) |comment, i| {
+                            if (i == 0) {
+                                try writer.writeByte(':');
+                            } else {
+                                try writer.writeAll("\\n");
+                            }
+
+                            try writer.writeAll(comment);
+                        }
+
+                        try writer.writeByte('\n');
+                    }
+                },
+                else => @panic("Unsupported"),
+            }
+        }
+    }
+}
+
+/// Genrates .cdl debug data for Mesen2
+pub fn generateCdlData(gen: CodeGen) ![]const u8 {
+    var highest_bank_start: u24 = 0;
+
+    for (gen.banks.keys()) |bank| {
+        const bank_start = memory_map.bankToRomOffset(gen.mapping_mode, bank);
+        highest_bank_start = @max(highest_bank_start, bank_start);
+    }
+
+    const rom_size = highest_bank_start + memory_map.bankSize(gen.mapping_mode);
+
+    const CdlFlags = packed struct(u8) {
+        // Generic flags
+        code: bool = false,
+        data: bool = false,
+        jump_target: bool = false,
+        sub_entry_point: bool = false,
+
+        // SNES specific flags
+        index_mode_8: bool = false,
+        memory_mode_8: bool = false,
+        gsu: bool = false,
+        cx4: bool = false,
+    };
+
+    const cdl_data = try gen.allocator.alloc(CdlFlags, rom_size);
+    @memset(cdl_data, .{});
+
+    for (gen.symbols.values()) |module_symbols| {
+        for (module_symbols.values()) |symbol| {
+            switch (symbol) {
+                .function => |func| {
+                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, 0x80) + func.bank_offset;
+                    for (func.instructions, 0..) |info, info_idx| {
+                        const instr_region = cdl_data[(func_offset + info.offset)..(func_offset + info.offset + info.instr.size())];
+                        const has_label_target = get_label: {
+                            for (func.labels) |label| {
+                                _, const idx = label;
+                                if (info_idx == idx) {
+                                    break :get_label true;
+                                }
+                            }
+                            break :get_label false;
+                        };
+
+                        for (instr_region) |*flag| {
+                            flag.* = .{
+                                .code = true,
+                                .jump_target = has_label_target,
+                                .sub_entry_point = info_idx == 0,
+
+                                .index_mode_8 = info.xy_size == .@"8bit",
+                                .memory_mode_8 = info.a_size == .@"8bit",
+                            };
+                        }
+                    }
+                },
+                else => @panic("Unsupported"),
+            }
+        }
+    }
+
+    return @ptrCast(cdl_data);
+}
+
 /// Index to a target instruction
 pub const Label = u16;
 
@@ -143,7 +300,8 @@ pub const InstructionInfo = struct {
     a_size: Instruction.SizeMode,
     xy_size: Instruction.SizeMode,
 
-    comments: []const []const u8,
+    /// Starting source-offset which caused this instruction
+    source: usize,
 };
 
 /// Builds instruction information from the AST nodes of a function
@@ -226,8 +384,7 @@ const FunctionBuilder = struct {
             .a_size = b.a_size,
             .xy_size = b.xy_size,
 
-            // TODO: Comments
-            .comments = &.{},
+            .source = b.module.ast.tokens[node.main_token].loc.start,
         };
 
         compute_info: switch (instr_node.operand) {

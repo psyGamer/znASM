@@ -109,6 +109,7 @@ pub fn next(lexer: *Lexer) Token {
 
     while (true) : (lexer.index += 1) {
         const c = lexer.buffer[lexer.index];
+        std.log.debug("char {c}", .{c});
 
         switch (state) {
             .start => switch (c) {
@@ -121,6 +122,26 @@ pub fn next(lexer: *Lexer) Token {
                         return token;
                     }
                     break;
+                },
+
+                '/' => {
+                    // Ignore comments
+                    if (lexer.buffer[lexer.index + 1] == '/') {
+                        while (true) : (lexer.index += 1) {
+                            const skip_c = lexer.buffer[lexer.index];
+
+                            if (skip_c == 0 or skip_c == '\n') {
+                                token.loc.start = lexer.index;
+                                lexer.index -= 1;
+                                break;
+                            }
+                        }
+                    } else {
+                        token.tag = .invalid;
+                        token.loc.end = lexer.index;
+                        lexer.index += 1;
+                        return token;
+                    }
                 },
 
                 ' ', '\t' => {

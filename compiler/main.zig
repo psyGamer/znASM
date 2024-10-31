@@ -212,5 +212,40 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
     try rom_file.writeAll(rom_data);
 
+    // Debug Data
+    const debug = true; // TODO: Configurable
+    if (debug) {
+        const mlb_file_path = try changeExtension(allocator, output_file, ".mlb");
+        defer allocator.free(mlb_file_path);
+        const cdl_file_path = try changeExtension(allocator, output_file, ".cdl");
+        defer allocator.free(cdl_file_path);
+
+        const mlb_file = try std.fs.cwd().createFile(mlb_file_path, .{});
+        defer mlb_file.close();
+        const cdl_file = try std.fs.cwd().createFile(cdl_file_path, .{});
+        defer cdl_file.close();
+
+        try codegen.writeMlbSymbols(mlb_file.writer(), modules.items);
+
+        const cdl_data = try codegen.generateCdlData();
+        defer allocator.free(cdl_data);
+        try cdl_file.writeAll(cdl_data);
+    }
+
     return 0;
+}
+
+fn changeExtension(allocator: std.mem.Allocator, src: []const u8, ext: []const u8) ![]const u8 {
+    std.debug.assert(ext[0] == '.');
+
+    if (std.mem.endsWith(u8, src, ext)) {
+        // We return a duped copy here to prevent a situation where the caller
+        // doesn't know whether to free. (They do not know the code path taken)
+        return allocator.dupe(u8, src);
+    }
+    const stem = std.fs.path.stem(src);
+    const dir = std.fs.path.dirname(src) orelse {
+        return std.mem.join(allocator, "", &[_][]const u8{ stem, ext });
+    };
+    return std.mem.join(allocator, "", &[_][]const u8{ dir, std.fs.path.sep_str, ext });
 }

@@ -162,7 +162,7 @@ fn parseFnDef(self: *Self, is_pub: bool) ParseError!NodeIndex {
     return node;
 }
 
-/// FnBlock <- LBRACE NEW_LINE (Expr | Instruction | Label)* RBRACE NEW_LINE
+/// FnBlock <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
 fn parseFnBlock(self: *Self) ParseError!NodeIndex {
     const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
 
@@ -172,6 +172,11 @@ fn parseFnBlock(self: *Self) ParseError!NodeIndex {
         const t = self.tokens[self.index];
         if (t.tag == .rbrace) {
             break;
+        }
+
+        if (t.tag == .new_line) {
+            self.index += 1;
+            continue;
         }
 
         // Expression

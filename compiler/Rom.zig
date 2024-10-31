@@ -1,5 +1,6 @@
 //! Contains all the data of the ROM which will be written to a file
 const std = @import("std");
+const memory_map = @import("memory_map.zig");
 
 const Rom = @This();
 
@@ -106,9 +107,15 @@ banks: []const BankData,
 
 /// Calcuates the log2 of the size in KiB
 pub fn computeRomSize(rom: *Rom) void {
-    // TODO: Support multiple banks
-    std.debug.assert(rom.banks.len == 1);
-    rom.header.rom_size_log2_kb = std.math.log2(32768 / 1024);
+    var highest_bank_start: u24 = 0;
+
+    for (rom.banks) |bank_data| {
+        const bank_start = memory_map.bankToRomOffset(rom.header.mode.map, bank_data.bank);
+        highest_bank_start = @max(highest_bank_start, bank_start);
+    }
+
+    const rom_size = highest_bank_start + memory_map.bankSize(rom.header.mode.map);
+    rom.header.rom_size_log2_kb = @intCast(std.math.log2(rom_size / 1024));
 }
 
 /// Generates byte data for the entire ROM file
@@ -119,7 +126,7 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     }
 
     // Write header data
-    std.log.info("== ROM Header ==", .{});
+    std.log.info("== ROM Info ==", .{});
     std.log.info("  Title: '{s}'", .{rom.header.title});
     std.log.info("  Mode:", .{});
     switch (rom.header.mode.map) {
@@ -146,11 +153,11 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     // Write banks
     std.log.info("  Banks:", .{});
     for (rom.banks) |bank_data| {
-        // TODO: Support other banks
-        std.debug.assert(bank_data.bank == 0x00 or bank_data.bank == 0x80);
-        fbs.pos = 0x0000;
+        std.debug.assert(bank_data.data.len <= memory_map.bankSize(rom.header.mode.map));
+
+        fbs.pos = memory_map.bankToRomOffset(rom.header.mode.map, bank_data.bank);
         std.log.info("    - Bank ${x:0>2}, Size ${x:0>4}, Offset ${x:0>6}", .{ bank_data.bank, bank_data.data.len, fbs.pos });
-        // TODO: Check data isnt too large
+
         try writer.writeAll(bank_data.data);
     }
 
@@ -177,7 +184,8 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     try writer.writeInt(u16, checksum, .little);
     try writer.writeInt(u16, checksum_complement, .little);
 
-    std.log.info("  Checksum: 0x{x:0>4} | 0x{x:0>4}", .{ checksum, checksum_complement });
+    std.log.info("  Checksum: ${x:0>4} + ${x:0>4}", .{ checksum, checksum_complement });
+    std.log.info("==============", .{});
 
     return rom_data;
 }
