@@ -1,6 +1,5 @@
 //! Contains all the data of the ROM which will be written to a file
 const std = @import("std");
-const Config = @import("RomConfig.zig");
 
 const Rom = @This();
 
@@ -66,28 +65,6 @@ pub const Header = extern struct {
 
     checksum: u16 = 0x0000,
     checksum_complement: u16 = 0xFFFF,
-
-    pub fn init(config: Config) !Header {
-        var header: Header = undefined;
-
-        if (config.title.len > header.title.len) {
-            std.log.err("ROM title is too long! Expected {} characters at most, found {}", .{ header.title.len, config.title.len });
-            return error.InvalidConfig;
-        }
-
-        @memcpy(header.title[0..config.title.len], config.title);
-        @memset(header.title[config.title.len..], ' '); // Fill rest with spaces
-
-        header.mode = config.mode;
-        header.chipset = config.chipset;
-        header.country = config.country;
-        header.rom_version = config.version;
-
-        header.rom_size_log2_kb = @intCast(std.math.log2(config.rom_size / 1024));
-        header.ram_size_log2_kb = @intCast(if (config.ram_size == 0) 0 else std.math.log2(config.ram_size / 1024));
-
-        return header;
-    }
 };
 
 /// Absolute addresses to the interrupt handlers (bank must be 0x00)
@@ -114,30 +91,25 @@ pub const InterruptVectors = extern struct {
     emulation_irqbrk: u16,
 };
 
-pub const Segment = struct {
-    /// Bank where the memory will be mapped to
+pub const BankData = struct {
+    /// Memory-mapped target bank
     bank: u8,
-    /// Size of the data block
-    size: u16,
-    /// Default value for all bytes of this block
-    fill: u8 = 0x00,
-
-    data: std.ArrayListUnmanaged(u8) = undefined,
-
-    pub fn allocate(segment: *Segment, allocator: std.mem.Allocator) !void {
-        segment.data = try .initCapacity(allocator, segment.size);
-        @memset(segment.data.items.ptr[0..segment.size], segment.fill);
-    }
-
-    pub fn free(segment: *Segment, allocator: std.mem.Allocator) void {
-        segment.data.deinit(allocator);
-    }
+    /// Read-Only bank data (maximum of 32KiB / 64KiB depending on mapping mode and bank)
+    data: []const u8,
 };
 
 header: Header,
 vectors: InterruptVectors,
 
-segments: []const Segment,
+// segments: []const Segment,
+banks: []const BankData,
+
+/// Calcuates the log2 of the size in KiB
+pub fn computeRomSize(rom: *Rom) void {
+    // TODO: Support multiple banks
+    std.debug.assert(rom.banks.len == 1);
+    rom.header.rom_size_log2_kb = std.math.log2(32768 / 1024);
+}
 
 /// Generates byte data for the entire ROM file
 pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
@@ -171,12 +143,15 @@ pub fn generate(rom: Rom, allocator: std.mem.Allocator) ![]u8 {
     var fbs = std.io.fixedBufferStream(rom_data);
     var writer = fbs.writer();
 
-    // Write segments
-    std.log.info("  Segments:", .{});
-    for (rom.segments) |seg| {
-        // TODO: Respect segment bank
-        std.log.info("    - Bank 0x{x:0>2}, Size 0x{x:0>4}, Offset 0x{x:0>6}", .{ seg.bank, seg.size, fbs.pos });
-        try writer.writeAll(seg.data.items[0..seg.size]);
+    // Write banks
+    std.log.info("  Banks:", .{});
+    for (rom.banks) |bank_data| {
+        // TODO: Support other banks
+        std.debug.assert(bank_data.bank == 0x00 or bank_data.bank == 0x80);
+        fbs.pos = 0x0000;
+        std.log.info("    - Bank ${x:0>2}, Size ${x:0>4}, Offset ${x:0>6}", .{ bank_data.bank, bank_data.data.len, fbs.pos });
+        // TODO: Check data isnt too large
+        try writer.writeAll(bank_data.data);
     }
 
     // Different header location based on mapping mode

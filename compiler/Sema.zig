@@ -7,6 +7,9 @@ const Module = @import("Module.zig");
 const Symbol = symbol.Symbol;
 const SymbolLocation = symbol.SymbolLocation;
 
+/// Module -> Name -> Symbol
+pub const SymbolMap = std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(Symbol));
+
 pub const Error = struct {
     pub const Tag = enum {
         unexpected_top_level_node,
@@ -28,8 +31,7 @@ pub const Error = struct {
 
 modules: []Module,
 
-/// Module -> Name -> Symbol
-symbols: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(Symbol)),
+symbols: SymbolMap,
 errors: std.ArrayListUnmanaged(Error),
 
 pub fn process(allocator: std.mem.Allocator, modules: []Module) !Sema {
@@ -44,26 +46,17 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module) !Sema {
         try sema.gatherSymbols(allocator, @intCast(module_idx));
     }
 
-    // Generate IR
-    for (modules) |module| {
-        for (module.symbols.items) |*sym| {
-            if (sym.* != .function) {
-                continue;
-            }
-
-            // try sema.generateIR(allocator, module, &sym.function);
-        }
-    }
-
     return sema;
 }
 
 pub fn deinit(sema: *Sema, allocator: std.mem.Allocator) void {
     sema.errors.deinit(allocator);
 
-    var iter = sema.symbols.valueIterator();
-    while (iter.next()) |name_table| {
-        name_table.deinit(allocator);
+    for (sema.symbols.values()) |*module_symbols| {
+        for (module_symbols.values()) |*sym| {
+            sym.deinit(allocator);
+        }
+        module_symbols.deinit(allocator);
     }
     sema.symbols.deinit(allocator);
 }

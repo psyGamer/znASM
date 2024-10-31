@@ -53,6 +53,8 @@ pub const Symbol = union(enum) {
 
         // TODO: Is this an appropriate location?
         node: Ast.NodeIndex,
+
+        assembly_data: []u8 = &.{},
         // ir: std.ArrayListUnmanaged(IR) = .{},
         // code: std.ArrayListUnmanaged(u8) = .{},
         // relocs: std.ArrayListUnmanaged(Reloc) = .{},
@@ -63,11 +65,10 @@ pub const Symbol = union(enum) {
     function: Function,
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
-        _ = allocator; // autofix
         switch (sym.*) {
             .variable => {},
             .function => |*fn_sym| {
-                _ = fn_sym; // autofix
+                allocator.free(fn_sym.assembly_data);
                 // fn_sym.ir.deinit(allocator);
                 // fn_sym.code.deinit(allocator);
                 // fn_sym.relocs.deinit(allocator);

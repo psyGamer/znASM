@@ -7,6 +7,8 @@ const Lexer = @import("Lexer.zig");
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
+const CodeGen = @import("CodeGen.zig");
+const Rom = @import("Rom.zig");
 
 // Required to execute tests
 comptime {
@@ -35,16 +37,21 @@ pub fn main() !u8 {
 
     // Parse CLI arguments
     var rom_name: ?[21]u8 = null;
+    var output_file: ?[]const u8 = null;
     var source_files: std.ArrayListUnmanaged([]const u8) = .{};
     defer source_files.deinit(allocator);
 
-    var state: enum { none, name, source_files } = .none;
+    var state: enum { none, name, output, source_files } = .none;
 
     while (arg_iter.next()) |arg| {
         sw: switch (state) {
             .none => {
                 if (std.mem.eql(u8, arg, "--name")) {
                     state = .name;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--output")) {
+                    state = .output;
                     continue;
                 }
                 if (std.mem.eql(u8, arg, "--source")) {
@@ -66,6 +73,10 @@ pub fn main() !u8 {
 
                 state = .none;
             },
+            .output => {
+                output_file = arg;
+                state = .none;
+            },
             .source_files => {
                 if (std.mem.startsWith(u8, arg, "--")) {
                     continue :sw .none;
@@ -81,16 +92,19 @@ pub fn main() !u8 {
         std.log.err("No ROM name was specified", .{});
         return 1;
     }
+    if (output_file == null) {
+        std.log.err("No output file was specified", .{});
+        return 1;
+    }
     if (source_files.items.len == 0) {
         std.log.err("No source files were specified", .{});
         return 1;
     }
 
-    return compile(allocator, rom_name.?, source_files.items);
+    return compile(allocator, rom_name.?, output_file.?, source_files.items);
 }
 
-fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const []const u8) !u8 {
-    _ = rom_name; // autofix
+fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const u8, source_files: []const []const u8) !u8 {
     const stderr = std.io.getStdErr();
     const tty_config = std.io.tty.detectConfig(stderr);
     // Parse all files into modules
@@ -131,6 +145,57 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const
     if (try sema.detectErrors(stderr.writer(), tty_config)) {
         return 1;
     }
+
+    // Generate code
+    var codegen: CodeGen = .{ .symbols = sema.symbols, .allocator = allocator };
+    for (modules.items) |mod| {
+        try codegen.generate(mod);
+    }
+    const banks = try codegen.createBanks();
+
+    // Generate ROM
+
+    var rom: Rom = .{
+        .header = .{
+            .title = rom_name,
+            // TODO: Configurable Mode / Chipset / Country / Version
+            .mode = .{
+                .map = .lorom,
+                .speed = .fast,
+            },
+            .chipset = .{
+                .components = .rom,
+                .coprocessor = .none,
+            },
+            .rom_size_log2_kb = undefined,
+            .ram_size_log2_kb = 0,
+            .country = .usa,
+            .rom_version = 0,
+        },
+        .vectors = undefined, // TODO
+        // .vectors = .{
+        //     .native_cop = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.cop })),
+        //     .native_brk = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.brk })),
+        //     .native_abort = @truncate(codegen.symbol_location(.{ .function = Config.empty_vector })), // Unused
+        //     .native_nmi = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.nmi })),
+        //     .native_irq = @truncate(codegen.symbol_location(.{ .function = config.vectors.native.irq })),
+        //     .emulation_cop = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.cop })),
+        //     .emulation_abort = @truncate(codegen.symbol_location(.{ .function = Config.empty_vector })), // Unused
+        //     .emulation_nmi = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.nmi })),
+        //     .emulation_reset = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.reset })),
+        //     .emulation_irqbrk = @truncate(codegen.symbol_location(.{ .function = config.vectors.emulation.irqbrk })),
+        // },
+        .banks = banks,
+    };
+    rom.computeRomSize();
+
+    const rom_data = try rom.generate(allocator);
+    defer allocator.free(rom_data);
+
+    const rom_file = try std.fs.cwd().createFile(output_file, .{});
+    defer rom_file.close();
+
+    try rom_file.writeAll(rom_data);
 
     return 0;
 }
