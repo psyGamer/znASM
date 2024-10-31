@@ -19,6 +19,7 @@ pub const Token = struct {
         ident,
         int_literal,
 
+        keyword_module,
         // keyword_namespace,
         // keyword_segment,
         keyword_pub,
@@ -44,6 +45,7 @@ pub const Token = struct {
                 .lbrace => "{",
                 .rbrace => "}",
 
+                .keyword_module => "module",
                 // .keyword_namespace => "namespace",
                 // .keyword_segment => "segment",
                 .keyword_pub => "pub",
@@ -73,6 +75,7 @@ pub const Token = struct {
     }
 
     pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{
+        .{ "module", .keyword_module },
         // .{ "namespace", .keyword_namespace },
         // .{ "segment", .keyword_segment },
         .{ "pub", .keyword_pub },

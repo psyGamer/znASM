@@ -8,6 +8,7 @@ const Module = @This();
 source: [:0]const u8,
 source_path: []const u8,
 
+name: ?[]const u8,
 ast: Ast,
 symbols: std.ArrayListUnmanaged(Symbol),
 
@@ -20,8 +21,10 @@ pub fn init(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []c
         .source = source,
         .source_path = source_path,
 
+        .name = null,
         .ast = ast,
         .symbols = .{},
+
         .allocator = allocator,
     };
 }

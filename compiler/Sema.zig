@@ -129,11 +129,6 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
 
 fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !void {
     const module = &sema.modules[module_idx];
-    // var current_module: ?[]const u8 = null;
-    // var current_segment: ?[]const u8 = null;
-    var opt_current_module: ?[]const u8 = null;
-    _ = &opt_current_module;
-    opt_current_module = "hi";
 
     const nodes = module.ast.nodes;
 
@@ -145,10 +140,11 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
         const child = nodes[child_idx];
         std.log.err(" - {}", .{child});
         switch (child.tag) {
+            .module => |module_name| module.name = module_name,
             // .namespace => |namespace| current_namespace = namespace,
             // .segment => |segment| current_segment = segment,
             .global_var_decl => |global_var_decl| {
-                const current_module = opt_current_module orelse {
+                const module_name = module.name orelse {
                     try sema.errors.append(allocator, .{
                         .tag = .missing_module,
                         .type = .err,
@@ -159,11 +155,11 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                 };
 
                 const sym_loc: SymbolLocation = .{
-                    .module = current_module,
+                    .module = module_name,
                     .name = global_var_decl.name,
                 };
 
-                if (sema.lookupSymbol(sym_loc, current_module) != null) {
+                if (sema.lookupSymbol(sym_loc, module_name) != null) {
                     try sema.errors.append(allocator, .{
                         .tag = .duplicate_symbol,
                         .type = .err,
@@ -188,14 +184,14 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                 };
 
                 try module.symbols.append(allocator, sym);
-                const gop = try sema.symbols.getOrPut(allocator, current_module);
+                const gop = try sema.symbols.getOrPut(allocator, module_name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .{};
                 }
                 try gop.value_ptr.put(allocator, sym_loc.name, sym);
             },
             .fn_def => |fn_def| {
-                const current_module = opt_current_module orelse {
+                const module_name = module.name orelse {
                     try sema.errors.append(allocator, .{
                         .tag = .missing_module,
                         .type = .err,
@@ -206,11 +202,11 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                 };
 
                 const sym_loc: SymbolLocation = .{
-                    .module = current_module,
+                    .module = module_name,
                     .name = fn_def.name,
                 };
 
-                if (sema.lookupSymbol(sym_loc, current_module) != null) {
+                if (sema.lookupSymbol(sym_loc, module_name) != null) {
                     try sema.errors.append(allocator, .{
                         .tag = .duplicate_symbol,
                         .type = .err,
@@ -232,7 +228,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
                 };
 
                 try module.symbols.append(allocator, sym);
-                const gop = try sema.symbols.getOrPut(allocator, current_module);
+                const gop = try sema.symbols.getOrPut(allocator, module_name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .{};
                 }

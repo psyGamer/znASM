@@ -6,6 +6,7 @@ pub const Node = struct {
     pub const Tag = union(enum) {
         /// main_token is invalid
         root: void,
+        module: []const u8,
         // namespace: []const u8,
         // segment: []const u8,
         /// main_token is the `keyword_var` or `keyword_const`
@@ -163,7 +164,7 @@ pub fn detectErrors(tree: Self, writer: std.fs.File.Writer, tty_config: std.io.t
         try tty_config.setColor(writer, .green);
         try writer.writeByteNTimes(' ', src_loc.column);
         try writer.writeByte('^');
-        try writer.writeByteNTimes('~', token.loc.end - token.loc.start - 1);
+        try writer.writeByteNTimes('~', token.loc.end -| token.loc.start -| 1);
         try tty_config.setColor(writer, .reset);
 
         try writer.writeByte('\n');
@@ -179,6 +180,7 @@ pub fn renderError(tree: Self, writer: anytype, tty_config: std.io.tty.Config, e
         .unexpected_token => {
             try writer.writeAll("Unexpected token: ");
             try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
             try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
             try tty_config.setColor(writer, .reset);
         },

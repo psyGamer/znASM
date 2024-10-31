@@ -24,7 +24,7 @@ const null_node: NodeIndex = 0;
 
 // Grammer parsing
 
-/// Root <- (NamespaceExpr / SegmentExpr / GlobalVarDecl / FnDef)*
+/// Root <- (ModuleExpr / GlobalVarDecl / FnDef)*
 pub fn parseRoot(self: *Self) !void {
     var root = self.nodes.items[0];
 
@@ -34,6 +34,7 @@ pub fn parseRoot(self: *Self) !void {
 
         switch (t.tag) {
             .eof => break,
+            .keyword_module => try root.children.append(self.allocator, try self.parseModuleExpr()),
             // .keyword_namespace => try root.children.append(self.allocator, try self.parseNamespaceExpr()),
             // .keyword_segment => try root.children.append(self.allocator, try self.parseSegmentExpr()),
             .keyword_pub => {
@@ -87,6 +88,19 @@ pub fn parseRoot(self: *Self) !void {
     }
 
     self.nodes.items[0] = root;
+}
+
+/// ModuleExpr <- KEYWORD_module IDENTIFIER
+fn parseModuleExpr(self: *Self) !NodeIndex {
+    const main_token = self.index;
+
+    _ = try self.expectToken(.keyword_module);
+    const ident = try self.expectToken(.ident);
+
+    return try self.addNode(.{
+        .tag = .{ .module = self.source[ident.loc.start..ident.loc.end] },
+        .main_token = main_token,
+    });
 }
 
 /// NamespaceExpr <- KEYWORD_namespace IDENTIFIER SEMICOLON
