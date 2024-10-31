@@ -165,7 +165,10 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
     try builtin_gop.value_ptr.put(allocator, znasm_builtin.empty_vector_loc.name, znasm_builtin.empty_vector_sym);
 
-    const banks = try codegen.createBanks();
+    try codegen.generateBanks();
+    try codegen.resolveRelocations();
+
+    const banks = try codegen.allocateBanks();
 
     // Generate ROM
     var rom: Rom = .{

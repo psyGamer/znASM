@@ -6,6 +6,7 @@ const Symbol = @import("symbol.zig").Symbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const SymbolMap = @import("Sema.zig").SymbolMap;
 const Instruction = @import("instruction.zig").Instruction;
+const InstructionType = @import("instruction.zig").InstructionType;
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const memory_map = @import("memory_map.zig");
@@ -13,6 +14,8 @@ const CodeGen = @This();
 
 mapping_mode: MappingMode,
 symbols: SymbolMap,
+banks: std.AutoArrayHashMapUnmanaged(u8, std.ArrayListUnmanaged(u8)) = .empty, // Bank -> BankData
+
 allocator: std.mem.Allocator,
 
 pub fn generate(gen: *CodeGen, module: Module) !void {
@@ -32,6 +35,7 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
 
         sym.function.assembly_data = try builder.genereateAssemblyData();
         try builder.fixLabelRelocs();
+        sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
     }
 }
 
@@ -40,40 +44,66 @@ pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
     const symbol = gen.symbols.get(symbol_loc.module).?.get(symbol_loc.name).?;
     return switch (symbol) {
         .variable => @panic("TODO"),
-        .function => |func_sym| func_sym.address,
+        .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, func_sym.bank_offset),
     };
 }
 
 /// Generates byte data for the individual banks
-pub fn createBanks(gen: CodeGen) ![]const Rom.BankData {
+pub fn generateBanks(gen: *CodeGen) !void {
     // TODO: Respect bank and addr min/max constraints
-    var banks: std.AutoArrayHashMapUnmanaged(u8, std.ArrayListUnmanaged(u8)) = .empty;
-    defer banks.deinit(gen.allocator);
-
     for (gen.symbols.values()) |module_symbols| {
         for (module_symbols.values()) |*symbol| {
             if (symbol.* == .function) {
                 // TODO: Support function bank
-                const gop = try banks.getOrPut(gen.allocator, 0x80);
+                const gop = try gen.banks.getOrPut(gen.allocator, 0x80);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .empty;
                 }
 
-                symbol.function.address = memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, @intCast(gop.value_ptr.items.len));
+                symbol.function.bank_offset = @intCast(gop.value_ptr.items.len);
                 try gop.value_ptr.appendSlice(gen.allocator, symbol.function.assembly_data);
                 std.log.info("asm {x}", .{symbol.function.assembly_data});
             }
         }
     }
+}
 
-    var bank_data = try gen.allocator.alloc(Rom.BankData, banks.count());
-    for (banks.keys(), banks.values(), 0..) |bank, *data, i| {
+/// Allocate the actual bank-data for the ROM
+pub fn allocateBanks(gen: CodeGen) ![]const Rom.BankData {
+    var bank_data = try gen.allocator.alloc(Rom.BankData, gen.banks.count());
+    for (gen.banks.keys(), gen.banks.values(), 0..) |bank, *data, i| {
         bank_data[i] = .{
             .bank = bank,
             .data = try data.toOwnedSlice(gen.allocator),
         };
     }
     return bank_data;
+}
+
+/// Resolves relocation of instructions
+pub fn resolveRelocations(gen: CodeGen) !void {
+    for (gen.symbols.values()) |module_symbols| {
+        for (module_symbols.values()) |*symbol| {
+            if (symbol.* != .function) {
+                continue;
+            }
+
+            const func = symbol.function;
+            const bank = gen.banks.get(0x80).?;
+
+            for (func.instructions) |info| {
+                const reloc = info.reloc orelse continue;
+                const target_addr = gen.symbolLocation(reloc.target_sym) + reloc.target_offset;
+
+                switch (reloc.type) {
+                    .addr24 => {
+                        const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(InstructionType))..][0..3];
+                        operand.* = @bitCast(target_addr);
+                    },
+                }
+            }
+        }
+    }
 }
 
 /// Index to a target instruction
@@ -189,8 +219,8 @@ const FunctionBuilder = struct {
             .instr = undefined,
             .offset = undefined,
 
-            // TODO: Relocations
             .reloc = null,
+            // TODO: Branch relocations
             .branch_reloc = null,
 
             .a_size = b.a_size,

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Ast = @import("Ast.zig");
+const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
     pub const separator = "::";
@@ -54,9 +55,13 @@ pub const Symbol = union(enum) {
         // TODO: Is this an appropriate location?
         node: Ast.NodeIndex,
 
+        /// Higher-level instruction data
+        instructions: []InstructionInfo = &.{},
+        /// Raw assembly data
         assembly_data: []u8 = &.{},
-        /// Memory-mapped address of this function
-        address: u24 = undefined,
+
+        /// Offset into the target bank
+        bank_offset: u16 = undefined,
         // ir: std.ArrayListUnmanaged(IR) = .{},
         // code: std.ArrayListUnmanaged(u8) = .{},
         // relocs: std.ArrayListUnmanaged(Reloc) = .{},
