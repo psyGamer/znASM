@@ -6,16 +6,20 @@ const Symbol = @import("symbol.zig").Symbol;
 const Module = @This();
 
 source: [:0]const u8,
+source_path: []const u8,
+
 ast: Ast,
 symbols: std.ArrayListUnmanaged(Symbol),
 
 allocator: std.mem.Allocator,
 
-pub fn init(allocator: std.mem.Allocator, source: [:0]const u8) !Module {
+pub fn init(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []const u8) !Module {
     const ast = try Ast.parse(allocator, source);
 
     return .{
         .source = source,
+        .source_path = source_path,
+
         .ast = ast,
         .symbols = .{},
         .allocator = allocator,

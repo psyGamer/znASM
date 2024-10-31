@@ -91,6 +91,8 @@ pub fn main() !u8 {
 
 fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const []const u8) !u8 {
     _ = rom_name; // autofix
+    const stderr = std.io.getStdErr();
+    const tty_config = std.io.tty.detectConfig(stderr);
     // Parse all files into modules
     var modules: std.ArrayListUnmanaged(Module) = .{};
     defer {
@@ -100,6 +102,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const
         modules.deinit(allocator);
     }
 
+    var hasErrors = false;
     for (source_files) |src| {
         std.log.debug("Parsing file '{s}'...", .{src});
 
@@ -109,19 +112,14 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const
         const src_data = try src_file.readToEndAllocOptions(allocator, std.math.maxInt(usize), null, @alignOf(u8), 0);
         errdefer allocator.free(src_data);
 
-        try modules.append(allocator, try .init(allocator, src_data));
-    }
-
-    var hasErrors = false;
-    for (modules.items) |mod| {
-        for (mod.ast.errors) |err| {
-            const writer = log.startLog(.err, .default);
-            try mod.ast.renderError(err, writer);
-            log.endLog();
-
+        const module: Module = try .init(allocator, src_data, src);
+        if (try module.ast.detectErrors(stderr.writer(), tty_config, src, src_data)) {
             hasErrors = true;
+        } else {
+            try modules.append(allocator, module);
         }
     }
+
     if (hasErrors) {
         return 1;
     }
@@ -130,12 +128,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const
     var sema = try Sema.process(allocator, modules.items);
     defer sema.deinit(allocator);
 
-    if (sema.errors.items.len > 0) {
-        for (sema.errors.items) |err| {
-            const writer = log.startLog(.err, .default);
-            try sema.renderError(err, writer);
-            log.endLog();
-        }
+    if (try sema.detectErrors(stderr.writer(), tty_config)) {
         return 1;
     }
 

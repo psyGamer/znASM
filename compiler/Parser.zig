@@ -77,6 +77,7 @@ pub fn parseRoot(self: *Self) !void {
             else => {
                 try self.errors.append(self.allocator, .{
                     .tag = .unexpected_token,
+                    .type = .err,
                     .token = self.index,
                 });
                 return error.ParseFailed;
@@ -131,6 +132,7 @@ fn parseGlobalVarDecl(self: *Self, is_pub: bool) !NodeIndex {
 
 /// FnDef <- (KEYWORD_pub)? KEYWORD_fn (IDENTIFIER BUILTIN_IDENTIFIER) LPAREN RPAREN IDENTIFIER BlockExpr
 fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
+    const main_token = self.index;
     _ = try self.expectToken(.keyword_fn);
     const ident_name = try self.expectToken(.ident);
     _ = try self.expectToken(.lparen);
@@ -148,6 +150,7 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
                 .is_pub = is_pub,
             },
         },
+        .main_token = main_token,
     });
     try self.nodes.items[node].children.append(self.allocator, try self.parseBlockExpr());
     return node;
@@ -155,6 +158,7 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
 
 /// BlockExpr <- LBRACE RBRACE
 fn parseBlockExpr(self: *Self) !NodeIndex {
+    const main_token = self.index;
     _ = try self.expectToken(.lbrace);
     while (true) {
         const t = self.tokens[self.index];
@@ -167,7 +171,7 @@ fn parseBlockExpr(self: *Self) !NodeIndex {
     }
     _ = try self.expectToken(.rbrace);
 
-    return try self.addNode(.{ .tag = .block_expr });
+    return try self.addNode(.{ .tag = .block_expr, .main_token = main_token });
 }
 
 // Helper functions
@@ -188,6 +192,7 @@ fn expectToken(self: *Self, tag: Token.Tag) !Token {
     if (self.tokens[self.index].tag != tag) {
         return self.fail(.{
             .tag = .expected_token,
+            .type = .err,
             .token = self.index,
             .extra = .{ .expected_tag = tag },
         });

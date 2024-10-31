@@ -3,24 +3,29 @@ const log = @import("logging.zig");
 
 pub const Node = struct {
     pub const Tag = union(enum) {
+        /// main_token is invalid
         root: void,
-        namespace: []const u8,
-        segment: []const u8,
+        // namespace: []const u8,
+        // segment: []const u8,
+        /// main_token is the `keyword_var` or `keyword_const`
         global_var_decl: struct {
             name: []const u8,
             type: []const u8,
             is_const: bool,
             is_pub: bool,
         },
+        /// main_token is the `keyword_fn`
         fn_def: struct {
             name: []const u8,
             return_type: ?[]const u8,
             is_pub: bool,
         },
+        /// main_token is the `lbrace`
         block_expr: void,
     };
 
     tag: Tag,
+    main_token: TokenIndex,
     children: std.ArrayListUnmanaged(NodeIndex) = .{},
 };
 
@@ -36,6 +41,7 @@ pub const Error = struct {
     };
 
     tag: Tag,
+    type: enum { err, warn, note },
 
     /// True if `token` points to the token before the token causing an issue.
     token_is_prev: bool = false,
@@ -87,7 +93,7 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8) !Self {
     defer parser.errors.deinit(allocator);
 
     // Root is always index 0
-    try parser.nodes.append(allocator, .{ .tag = .root });
+    try parser.nodes.append(allocator, .{ .tag = .root, .main_token = undefined });
     parser.parseRoot() catch |err| switch (err) {
         error.ParseFailed => {
             std.debug.assert(parser.errors.items.len > 0);
@@ -115,12 +121,60 @@ pub fn deinit(tree: Self, allocator: std.mem.Allocator) void {
     allocator.free(tree.errors);
 }
 
-pub fn renderError(tree: Self, err: Error, writer: anytype) !void {
+pub fn detectErrors(tree: Self, writer: std.fs.File.Writer, tty_config: std.io.tty.Config, src_file_path: []const u8, source_data: []const u8) !bool {
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+
+    for (tree.errors) |err| {
+        const token = tree.tokens[err.token];
+        const src_loc = std.zig.findLineColumn(source_data, token.loc.start);
+
+        try tty_config.setColor(writer, .bold);
+        try writer.print("{s}:{}:{}: ", .{ src_file_path, src_loc.line + 1, src_loc.column + 1 });
+
+        switch (err.type) {
+            .err => {
+                try tty_config.setColor(writer, .red);
+                try writer.writeAll("error: ");
+            },
+            .warn => {
+                try tty_config.setColor(writer, .yellow);
+                try writer.writeAll("warning: ");
+            },
+            .note => {
+                try tty_config.setColor(writer, .cyan);
+                try writer.writeAll("note: ");
+            },
+        }
+        try tty_config.setColor(writer, .reset);
+        try tree.renderError(writer, tty_config, err);
+        try writer.writeByte('\n');
+
+        try writer.writeAll(src_loc.source_line);
+        try writer.writeByte('\n');
+
+        try tty_config.setColor(writer, .green);
+        try writer.writeByteNTimes(' ', src_loc.column);
+        try writer.writeByte('^');
+        try writer.writeByteNTimes('~', token.loc.end - token.loc.start - 1);
+        try tty_config.setColor(writer, .reset);
+
+        try writer.writeByte('\n');
+        try writer.writeByte('\n');
+    }
+
+    return tree.errors.len != 0;
+}
+
+pub fn renderError(tree: Self, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
     switch (err.tag) {
         .unexpected_eof => return writer.writeAll("Unexpected end-of-file"),
-        .unexpected_token => return writer.print("Unexpected token: {s}", .{
-            tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
-        }),
+        .unexpected_token => {
+            try writer.writeAll("Unexpected token: ");
+            try tty_config.setColor(writer, .bold);
+            try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
+            try tty_config.setColor(writer, .reset);
+        },
         .expected_var_decl_or_fn => return writer.print("Expected variable declaration or function definition, found {s}", .{
             tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
         }),
@@ -128,10 +182,19 @@ pub fn renderError(tree: Self, err: Error, writer: anytype) !void {
             tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
         }),
 
-        .expected_token => return writer.print("Expected {s}, found {s}", .{
-            err.extra.expected_tag.symbol(),
-            tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol(),
-        }),
+        .expected_token => {
+            try writer.writeAll("Expected ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll(err.extra.expected_tag.symbol());
+            try tty_config.setColor(writer, .reset);
+
+            try writer.writeAll(", found ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll(tree.tokens[err.token - @intFromBool(err.token_is_prev)].tag.symbol());
+            try tty_config.setColor(writer, .reset);
+        },
     }
 }
 
