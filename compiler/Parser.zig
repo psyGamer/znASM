@@ -29,6 +29,7 @@ pub fn parseRoot(self: *Self) !void {
 
     while (true) {
         const t = self.tokens[self.index];
+        std.log.debug("tok {}", .{t});
 
         switch (t.tag) {
             .eof => break,
@@ -45,6 +46,7 @@ pub fn parseRoot(self: *Self) !void {
                 // }
 
                 const fn_def = try self.parseFnDef(true);
+                std.log.debug("Fn {}", .{fn_def});
                 if (fn_def != null_node) {
                     try root.children.append(self.allocator, fn_def);
                     continue;
@@ -133,13 +135,16 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
     const ident_name = try self.expectToken(.ident);
     _ = try self.expectToken(.lparen);
     _ = try self.expectToken(.rparen);
-    const ident_return = try self.expectToken(.ident);
+    const opt_ident_return = self.eatToken(.ident);
 
     const node = try self.addNode(.{
         .tag = .{
             .fn_def = .{
                 .name = self.source[ident_name.loc.start..ident_name.loc.end],
-                .return_type = self.source[ident_return.loc.start..ident_return.loc.end],
+                .return_type = if (opt_ident_return) |ident_return|
+                    self.source[ident_return.loc.start..ident_return.loc.end]
+                else
+                    null,
                 .is_pub = is_pub,
             },
         },
@@ -151,6 +156,15 @@ fn parseFnDef(self: *Self, is_pub: bool) !NodeIndex {
 /// BlockExpr <- LBRACE RBRACE
 fn parseBlockExpr(self: *Self) !NodeIndex {
     _ = try self.expectToken(.lbrace);
+    while (true) {
+        const t = self.tokens[self.index];
+        if (t.tag == .rbrace) {
+            break;
+        }
+
+        // Parse expression
+        self.index += 1;
+    }
     _ = try self.expectToken(.rbrace);
 
     return try self.addNode(.{ .tag = .block_expr });

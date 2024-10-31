@@ -14,7 +14,7 @@ pub const Node = struct {
         },
         fn_def: struct {
             name: []const u8,
-            return_type: []const u8,
+            return_type: ?[]const u8,
             is_pub: bool,
         },
         block_expr: void,
@@ -94,6 +94,7 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8) !Self {
         },
         else => |e| return e,
     };
+    std.log.debug("err {any}", .{parser.errors.items});
 
     return .{
         .source = source,

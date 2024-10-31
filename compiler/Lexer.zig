@@ -30,9 +30,9 @@ pub const Token = struct {
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
                 .invalid,
+                .eof,
                 .ident,
-                .builtin_ident
-                    .int_literal,
+                .int_literal,
                 => null,
 
                 .colon => ":",
@@ -44,12 +44,12 @@ pub const Token = struct {
                 .lbrace => "{",
                 .rbrace => "}",
 
-                .keyword_namespace => "namespace",
-                .keyword_segment => "segment",
+                // .keyword_namespace => "namespace",
+                // .keyword_segment => "segment",
                 .keyword_pub => "pub",
-                .keyword_var => "var",
-                .keyword_const => "const",
-                .keyword_inline => "inline",
+                // .keyword_var => "var",
+                // .keyword_const => "const",
+                // .keyword_inline => "inline",
                 .keyword_fn => "fn",
             };
         }

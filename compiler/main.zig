@@ -1,23 +1,27 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const log = @import("logging.zig");
 const target_os = builtin.os.tag;
 
 const Lexer = @import("Lexer.zig");
 const Ast = @import("Ast.zig");
+const Module = @import("Module.zig");
+const Sema = @import("Sema.zig");
 
 // Required to execute tests
 comptime {
     _ = Lexer;
+    // _ = Ast;
 }
 
 pub const std_options: std.Options = .{
-    .logFn = @import("logging.zig").logFn,
+    .logFn = log.logFn,
     .log_level = .debug,
 };
 
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer std.debug.assert(gpa.deinit() == .ok);
+    // defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     var arg_iter = if (target_os == .windows)
@@ -82,31 +86,58 @@ pub fn main() !u8 {
         return 1;
     }
 
-    try compile(allocator, rom_name.?, source_files.items);
-
-    return 0;
+    return compile(allocator, rom_name.?, source_files.items);
 }
 
-fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const []const u8) !void {
+fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, source_files: []const []const u8) !u8 {
     _ = rom_name; // autofix
+    // Parse all files into modules
+    var modules: std.ArrayListUnmanaged(Module) = .{};
+    defer {
+        for (modules.items) |*mod| {
+            mod.deinit();
+        }
+        modules.deinit(allocator);
+    }
+
     for (source_files) |src| {
+        std.log.debug("Parsing file '{s}'...", .{src});
+
         const src_file = try std.fs.cwd().openFile(src, .{});
         defer src_file.close();
 
         const src_data = try src_file.readToEndAllocOptions(allocator, std.math.maxInt(usize), null, @alignOf(u8), 0);
-        defer allocator.free(src_data);
+        errdefer allocator.free(src_data);
 
-        const ast = try Ast.parse(allocator, src_data);
-        defer ast.deinit(allocator);
-        // std.log.debug("Lexing file '{s}'", .{src});
-        // var lexer: Lexer = .{ .buffer = src_data };
-
-        // while (true) {
-        //     const token = lexer.next();
-        //     if (token.tag == .eof) {
-        //         break;
-        //     }
-        //     std.log.debug(" - {}", .{token});
-        // }
+        try modules.append(allocator, try .init(allocator, src_data));
     }
+
+    var hasErrors = false;
+    for (modules.items) |mod| {
+        for (mod.ast.errors) |err| {
+            const writer = log.startLog(.err, .default);
+            try mod.ast.renderError(err, writer);
+            log.endLog();
+
+            hasErrors = true;
+        }
+    }
+    if (hasErrors) {
+        return 1;
+    }
+
+    // Run semantic analysis
+    var sema = try Sema.process(allocator, modules.items);
+    defer sema.deinit(allocator);
+
+    if (sema.errors.items.len > 0) {
+        for (sema.errors.items) |err| {
+            const writer = log.startLog(.err, .default);
+            try sema.renderError(err, writer);
+            log.endLog();
+        }
+        return 1;
+    }
+
+    return 0;
 }
