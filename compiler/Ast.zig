@@ -64,6 +64,9 @@ pub const Error = struct {
 pub const TokenIndex = u32;
 pub const NodeIndex = u32;
 
+/// Root and null share the same index, since no Node can have a root node as a child.
+pub const null_node: NodeIndex = 0;
+
 const Lexer = @import("Lexer.zig");
 const Parser = @import("Parser.zig");
 const Token = Lexer.Token;

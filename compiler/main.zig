@@ -10,6 +10,7 @@ const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
 const CodeGen = @import("CodeGen.zig");
 const Rom = @import("Rom.zig");
+const SymbolLocation = @import("symbol.zig").SymbolLocation;
 
 // Required to execute tests
 comptime {
@@ -167,7 +168,6 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     const banks = try codegen.createBanks();
 
     // Generate ROM
-
     var rom: Rom = .{
         .header = .{
             .title = rom_name,
@@ -186,16 +186,16 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .rom_version = 0,
         },
         .vectors = .{
-            .native_cop = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .native_brk = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .native_abort = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)), // Unused
-            .native_nmi = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .native_irq = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .emulation_cop = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .emulation_abort = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)), // Unused
-            .emulation_nmi = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .emulation_reset = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
-            .emulation_irqbrk = @truncate(codegen.symbolLocation(znasm_builtin.empty_vector_sym)),
+            .native_cop = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_cop orelse znasm_builtin.empty_vector_loc)),
+            .native_brk = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_brk orelse znasm_builtin.empty_vector_loc)),
+            .native_abort = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_abort orelse znasm_builtin.empty_vector_loc)), // Unused
+            .native_nmi = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_nmi orelse znasm_builtin.empty_vector_loc)),
+            .native_irq = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_irq orelse znasm_builtin.empty_vector_loc)),
+            .emulation_cop = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_cop orelse znasm_builtin.empty_vector_loc)),
+            .emulation_abort = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_abort orelse znasm_builtin.empty_vector_loc)), // Unused
+            .emulation_nmi = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_nmi orelse znasm_builtin.empty_vector_loc)),
+            .emulation_reset = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_reset orelse znasm_builtin.empty_vector_loc)),
+            .emulation_irqbrk = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_irqbrk orelse znasm_builtin.empty_vector_loc)),
         },
         .banks = banks,
     };

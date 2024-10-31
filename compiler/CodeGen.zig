@@ -15,7 +15,7 @@ symbols: SymbolMap,
 allocator: std.mem.Allocator,
 
 pub fn generate(gen: *CodeGen, module: Module) !void {
-    for (module.symbols.items) |*sym| {
+    for (gen.symbols.get(module.name.?).?.values()) |*sym| {
         if (sym.* != .function) {
             continue;
         }
@@ -28,23 +28,15 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
         try builder.build();
 
         sym.function.assembly_data = try builder.genereateAssemblyData();
-        std.log.info("asm {x}", .{sym.function.assembly_data});
     }
 }
 
 /// Returns the memory-mapped location of a symbol
-pub fn symbolLocation(gen: CodeGen, target: anytype) u24 {
-    const symbol = if (@TypeOf(target) == Symbol)
-        target
-    else if (@TypeOf(target) == SymbolLocation)
-        gen.symbols.get(target.module).?.get(target.name)
-    else
-        @compileError("Unsupported symbol type '" ++ @typeName(target) ++ "'");
-
+pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
+    const symbol = gen.symbols.get(symbol_loc.module.?).?.get(symbol_loc.name).?;
     return switch (symbol) {
         .variable => @panic("TODO"),
-        // TODO: Support function bank
-        .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, func_sym.offset),
+        .function => |func_sym| func_sym.address,
     };
 }
 
@@ -57,13 +49,15 @@ pub fn createBanks(gen: CodeGen) ![]const Rom.BankData {
     for (gen.symbols.values()) |module_symbols| {
         for (module_symbols.values()) |*symbol| {
             if (symbol.* == .function) {
+                // TODO: Support function bank
                 const gop = try banks.getOrPut(gen.allocator, 0x80);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .empty;
                 }
 
-                symbol.function.offset = @intCast(gop.value_ptr.items.len);
+                symbol.function.address = memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, @intCast(gop.value_ptr.items.len));
                 try gop.value_ptr.appendSlice(gen.allocator, symbol.function.assembly_data);
+                std.log.info("asm {x}", .{symbol.function.assembly_data});
             }
         }
     }

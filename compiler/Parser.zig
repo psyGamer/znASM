@@ -19,8 +19,7 @@ allocator: std.mem.Allocator,
 nodes: std.ArrayListUnmanaged(Node) = .{},
 errors: std.ArrayListUnmanaged(Error) = .{},
 
-// Root and null share the same index, since no Node can have a root node as a child.
-const null_node: NodeIndex = 0;
+const null_node = Ast.null_node;
 
 // Grammer parsing
 
