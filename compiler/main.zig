@@ -129,7 +129,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
         errdefer allocator.free(src_data);
 
         const module: Module = try .init(allocator, src_data, src);
-        if (try module.ast.detectErrors(stderr.writer(), tty_config, src, src_data)) {
+        if (try module.ast.detectErrors(stderr.writer(), tty_config, src)) {
             hasErrors = true;
         } else {
             try modules.append(allocator, module);
@@ -151,19 +151,18 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     // Generate code
     var codegen: CodeGen = .{
         .mapping_mode = .lorom, // TODO: Configurable
-        .symbols = sema.symbols,
+        .sema = &sema,
         .allocator = allocator,
     };
-    for (modules.items) |mod| {
-        try codegen.generate(mod);
-    }
+    try codegen.generate();
 
-    // Include builtin functions
-    const builtin_gop = try codegen.symbols.getOrPut(allocator, znasm_builtin.empty_vector_loc.module);
+    // Include builtin functions (after running codegen, since it doesnt have a valid source)
+    const builtin_gop = try sema.symbol_map.getOrPut(allocator, znasm_builtin.empty_vector_loc.module);
     if (!builtin_gop.found_existing) {
         builtin_gop.value_ptr.* = .empty;
     }
-    try builtin_gop.value_ptr.put(allocator, znasm_builtin.empty_vector_loc.name, znasm_builtin.empty_vector_sym);
+    try builtin_gop.value_ptr.put(allocator, znasm_builtin.empty_vector_loc.name, @intCast(sema.symbols.len));
+    try sema.symbols.append(allocator, .{ .sym = znasm_builtin.empty_vector_sym, .loc = znasm_builtin.empty_vector_loc });
 
     try codegen.generateBanks();
     try codegen.resolveRelocations();
@@ -225,7 +224,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
         const cdl_file = try std.fs.cwd().createFile(cdl_file_path, .{});
         defer cdl_file.close();
 
-        try codegen.writeMlbSymbols(mlb_file.writer(), modules.items);
+        try codegen.writeMlbSymbols(mlb_file.writer());
 
         const cdl_data = try codegen.generateCdlData(rom_data);
         defer allocator.free(cdl_data);

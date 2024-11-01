@@ -4,11 +4,15 @@ const symbol = @import("symbol.zig");
 const Sema = @This();
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
+const Ir = @import("ir.zig").Ir;
 const Symbol = symbol.Symbol;
 const SymbolLocation = symbol.SymbolLocation;
 
 /// Module -> Name -> Symbol
-pub const SymbolMap = std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(Symbol));
+pub const SymbolIndex = u32;
+pub const SymbolMap = std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(SymbolIndex));
+
+pub const ModuleIndex = u32;
 
 pub const Error = struct {
     pub const Tag = enum {
@@ -27,7 +31,7 @@ pub const Error = struct {
     /// Errors of type `note` are associated with the previous `err` / `warn`
     type: enum { err, warn, note },
 
-    module_idx: u32,
+    module: ModuleIndex,
     node: Ast.NodeIndex,
 
     extra: union {
@@ -57,21 +61,23 @@ const InterruptVectors = struct {
 
 modules: []Module,
 
-symbols: SymbolMap,
-interrupt_vectors: InterruptVectors,
-errors: std.ArrayListUnmanaged(Error),
+symbols: std.MultiArrayList(struct { sym: Symbol, loc: SymbolLocation }) = .empty,
+symbol_map: SymbolMap = .empty,
+
+errors: std.ArrayListUnmanaged(Error) = .empty,
+
+interrupt_vectors: InterruptVectors = .{},
+allocator: std.mem.Allocator,
 
 pub fn process(allocator: std.mem.Allocator, modules: []Module) !Sema {
     var sema: Sema = .{
         .modules = modules,
-        .symbols = .{},
-        .interrupt_vectors = .{},
-        .errors = .{},
+        .allocator = allocator,
     };
 
     // Gather symbols
     for (0..modules.len) |module_idx| {
-        try sema.gatherSymbols(allocator, @intCast(module_idx));
+        try sema.gatherSymbols(@intCast(module_idx));
     }
 
     // Only reset is required
@@ -79,24 +85,35 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module) !Sema {
         try sema.errors.append(allocator, .{
             .tag = .missing_reset_vector,
             .type = .err,
-            .module_idx = undefined,
+            .module = undefined,
             .node = Ast.null_node,
         });
+    }
+
+    // Analyse symbols
+    const symbol_slice = sema.symbols.slice();
+    for (symbol_slice.items(.sym), symbol_slice.items(.loc)) |*sym, loc| {
+        const module_idx: ModuleIndex = @intCast(sema.symbol_map.getIndex(loc.module).?);
+        switch (sym.*) {
+            .function => try sema.analyzeFunction(loc, module_idx, &sym.function),
+            else => @panic("unsupported"),
+        }
     }
 
     return sema;
 }
 
 pub fn deinit(sema: *Sema, allocator: std.mem.Allocator) void {
-    sema.errors.deinit(allocator);
-
-    for (sema.symbols.values()) |*module_symbols| {
-        for (module_symbols.values()) |*sym| {
-            sym.deinit(allocator);
-        }
-        module_symbols.deinit(allocator);
+    for (sema.symbols.items(.sym)) |*sym| {
+        sym.deinit(allocator);
     }
     sema.symbols.deinit(allocator);
+    for (sema.symbol_map.values()) |*module_symbols| {
+        module_symbols.deinit(allocator);
+    }
+    sema.symbol_map.deinit(allocator);
+
+    sema.errors.deinit(allocator);
 }
 
 pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.tty.Config) !bool {
@@ -127,11 +144,10 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
             try sema.renderError(writer, tty_config, err);
             try writer.writeByte('\n');
         } else {
-            const module = sema.modules[err.module_idx];
-            const node = module.ast.nodes[err.node];
-            const token = module.ast.tokens[node.main_token];
+            const module = sema.modules[err.module];
+            const token_loc = module.ast.token_locs[module.ast.node_tokens[err.node]];
 
-            const src_loc = std.zig.findLineColumn(module.source, token.loc.start);
+            const src_loc = std.zig.findLineColumn(module.source, token_loc.start);
 
             try tty_config.setColor(writer, .bold);
             try writer.print("{s}:{}:{}: ", .{ module.source_path, src_loc.line + 1, src_loc.column + 1 });
@@ -160,7 +176,7 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
             try tty_config.setColor(writer, .green);
             try writer.writeByteNTimes(' ', src_loc.column);
             try writer.writeByte('^');
-            try writer.writeByteNTimes('~', token.loc.end - token.loc.start - 1);
+            try writer.writeByteNTimes('~', token_loc.end - token_loc.start - 1);
             try tty_config.setColor(writer, .reset);
             try writer.writeByte('\n');
         }
@@ -170,6 +186,7 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
 }
 
 pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
+    const ast = sema.modules[err.module].ast;
     switch (err.tag) {
         .unexpected_top_level_node => return writer.writeAll("Unexpected top level node"),
         .missing_module => return writer.writeAll("Missing module"),
@@ -194,7 +211,7 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
             try writer.writeAll("Unknown interrupt vector ");
             try tty_config.setColor(writer, .bold);
             try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(sema.modules[err.module_idx].ast.nodes[err.node].tag.fn_def.name);
+            try writer.writeAll(ast.parseIdentifier(ast.node_tokens[err.node]));
             try tty_config.setColor(writer, .reset);
         },
         .existing_sym => {
@@ -203,154 +220,41 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
     }
 }
 
-fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !void {
+fn gatherSymbols(sema: *Sema, module_idx: u32) !void {
     const module = &sema.modules[module_idx];
-    const nodes = module.ast.nodes;
-    _ = nodes; // autofix
     const ast = module.ast;
 
-    const root = 0;
-
-    std.log.err("Nodes:", .{});
-    var child_iter = ast.iterChildren(root);
-    node_loop: while (child_iter.next()) |child| {
-        const child_idx = child_iter.index - 1;
-        std.log.err(" - {}", .{child});
-        switch (child.tag) {
-            .module => |module_name| module.name = module_name,
-            .global_var_decl => |global_var_decl| {
-                const module_name = module.name orelse {
-                    try sema.errors.append(allocator, .{
-                        .tag = .missing_module,
-                        .type = .err,
-                        .module_idx = module_idx,
-                        .node = child_idx,
-                    });
-                    return;
-                };
-
-                const sym_loc: SymbolLocation = .{
-                    .module = module_name,
-                    .name = global_var_decl.name,
-                };
-
-                if (sema.lookupSymbol(sym_loc) != null) {
-                    try sema.errors.append(allocator, .{
-                        .tag = .duplicate_symbol,
-                        .type = .err,
-                        .module_idx = module_idx,
-                        .node = child_idx,
-                    });
-                    return;
-                }
-
-                const sym: Symbol = .{
-                    .variable = .{
-                        .type = .parse(global_var_decl.type, module_name),
-                        .is_const = global_var_decl.is_const,
-                        .is_pub = global_var_decl.is_pub,
-
-                        .bank = null,
-                        .addr_min = null,
-                        .addr_max = null,
-
-                        .node = child_idx,
-                    },
-                };
-
-                const gop = try sema.symbols.getOrPut(allocator, module_name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .{};
-                }
-                try gop.value_ptr.put(allocator, sym_loc.name, sym);
+    const range = ast.node_data[Ast.root_node].sub_range;
+    for (range.start..range.end) |extra_idx| {
+        const node_idx = ast.extra_data[extra_idx];
+        switch (ast.node_tags[node_idx]) {
+            .module => {
+                module.name = ast.parseIdentifier(ast.node_tokens[node_idx]);
             },
-            .fn_def => |fn_def| {
-                const module_name = module.name orelse {
-                    try sema.errors.append(allocator, .{
-                        .tag = .missing_module,
-                        .type = .err,
-                        .module_idx = module_idx,
-                        .node = child_idx,
-                    });
-                    return;
-                };
-
+            .fn_def => {
                 const sym_loc: SymbolLocation = .{
-                    .module = module_name,
-                    .name = fn_def.name,
+                    .module = module.name.?,
+                    .name = ast.parseIdentifier(ast.node_tokens[node_idx] + 1),
                 };
 
                 if (sema.lookupSymbol(sym_loc) != null) {
-                    try sema.errors.append(allocator, .{
+                    try sema.errors.append(sema.allocator, .{
                         .tag = .duplicate_symbol,
                         .type = .err,
-                        .module_idx = module_idx,
-                        .node = child_idx,
+                        .module = module_idx,
+                        .node = @intCast(node_idx),
                     });
                     return;
                 }
 
-                const sym: Symbol = .{
-                    .function = .{
-                        // .return_type = .parse(fn_def.return_type),
-                        // .segment = current_segment.?,
-                        // .is_inline = fn_def.is_inline,
-                        .is_pub = fn_def.is_pub,
-
-                        .node = child_idx,
-                    },
-                };
-
-                const gop = try sema.symbols.getOrPut(allocator, module_name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .{};
-                }
-                try gop.value_ptr.put(allocator, sym_loc.name, sym);
-
-                // Handle interrupt vectors
-                inline for (std.meta.fields(InterruptVectors), 0..) |field, i| {
-                    if (std.mem.eql(u8, "@" ++ field.name, sym_loc.name)) {
-                        if (@field(sema.interrupt_vectors, field.name) == null) {
-                            @field(sema.interrupt_vectors, field.name) = sym_loc;
-                        } else {
-                            try sema.errors.append(allocator, .{
-                                .tag = .duplicate_vector,
-                                .type = .err,
-                                .module_idx = module_idx,
-                                .node = child_idx,
-                                .extra = .{ .vector = @enumFromInt(i) },
-                            });
-
-                            const existing_loc = @field(sema.interrupt_vectors, field.name).?;
-                            const existing_module = sema.symbols.getIndex(existing_loc.module);
-                            const existing_sym = sema.lookupSymbol(existing_loc).?;
-                            try sema.errors.append(allocator, .{
-                                .tag = .existing_sym,
-                                .type = .note,
-                                .module_idx = @intCast(existing_module.?),
-                                .node = existing_sym.function.node,
-                            });
-                        }
-
-                        continue :node_loop;
-                    }
-                }
-
-                if (std.mem.startsWith(u8, sym_loc.name, "@")) {
-                    try sema.errors.append(allocator, .{
-                        .tag = .invalid_vector_name,
-                        .type = .err,
-                        .module_idx = module_idx,
-                        .node = child_idx,
-                    });
-                }
+                try sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx));
             },
             else => {
-                try sema.errors.append(allocator, .{
+                try sema.errors.append(sema.allocator, .{
                     .tag = .unexpected_top_level_node,
                     .type = .err,
-                    .module_idx = module_idx,
-                    .node = child_idx,
+                    .module = module_idx,
+                    .node = @intCast(node_idx),
                 });
                 return;
             },
@@ -358,10 +262,85 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
     }
 }
 
+fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: Ast.NodeIndex) !void {
+    const ast = sema.modules[module_idx].ast;
+    const fn_def = ast.node_data[node_idx].fn_def;
+
+    const bank: u8 = if (fn_def.bank_attr == Ast.null_node)
+        0x80
+    else
+        try ast.parseIntLiteral(u8, ast.node_tokens[fn_def.bank_attr]);
+
+    try sema.createSymbol(sym_loc, .{
+        .function = .{
+            .is_pub = ast.token_tags[ast.node_tokens[node_idx] - 1] == .keyword_pub,
+            .bank = bank,
+
+            .node = node_idx,
+        },
+    });
+
+    // Handle interrupt vectors
+    inline for (std.meta.fields(InterruptVectors), 0..) |field, i| {
+        if (std.mem.eql(u8, "@" ++ field.name, sym_loc.name)) {
+            if (@field(sema.interrupt_vectors, field.name) == null) {
+                @field(sema.interrupt_vectors, field.name) = sym_loc;
+            } else {
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .duplicate_vector,
+                    .type = .err,
+                    .module = module_idx,
+                    .node = node_idx,
+                    .extra = .{ .vector = @enumFromInt(i) },
+                });
+
+                const existing_loc = @field(sema.interrupt_vectors, field.name).?;
+                const existing_module = sema.symbol_map.getIndex(existing_loc.module);
+                const existing_sym = sema.lookupSymbol(existing_loc).?;
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .existing_sym,
+                    .type = .note,
+                    .module = @intCast(existing_module.?),
+                    .node = existing_sym.function.node,
+                });
+            }
+
+            return;
+        }
+    }
+
+    // Only interrupt vectors are allowed to start with an @
+    if (std.mem.startsWith(u8, sym_loc.name, "@")) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .invalid_vector_name,
+            .type = .err,
+            .module = module_idx,
+            .node = node_idx,
+        });
+    }
+}
+
+fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: *Symbol.Function) !void {
+    _ = sema; // autofix
+    _ = sym_loc; // autofix
+    _ = module_idx; // autofix
+    _ = node_idx; // autofix
+}
+
+fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {
+    const gop = try sema.symbol_map.getOrPut(sema.allocator, sym_loc.module);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{};
+    }
+    try gop.value_ptr.put(sema.allocator, sym_loc.name, @intCast(sema.symbols.len));
+
+    try sema.symbols.append(sema.allocator, .{ .sym = sym, .loc = sym_loc });
+}
+
 fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?Symbol {
-    if (sema.symbols.get(sym_loc.module)) |module_symbols| {
-        if (module_symbols.get(sym_loc.name)) |sym| {
-            return sym;
+    if (sema.symbol_map.get(sym_loc.module)) |module_symbols| {
+        if (module_symbols.get(sym_loc.name)) |sym_idx| {
+            return sema.symbols.items(.sym)[sym_idx];
         }
     }
     return null;

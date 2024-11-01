@@ -8,16 +8,22 @@ const Error = Ast.Error;
 const TokenIndex = Ast.TokenIndex;
 const NodeIndex = Ast.NodeIndex;
 
-const Self = @This();
+const Parser = @This();
 
 source: [:0]const u8,
-
 index: TokenIndex = 0,
-tokens: []const Token,
 
-allocator: std.mem.Allocator,
-nodes: std.ArrayListUnmanaged(Node) = .{},
+token_tags: []const Token.Tag,
+token_locs: []const Token.Loc,
+
+nodes: std.MultiArrayList(Node) = .empty,
+/// Additional data for specific nodes
+extra_data: std.ArrayListUnmanaged(NodeIndex) = .empty,
+
 errors: std.ArrayListUnmanaged(Error) = .{},
+
+/// Temporarily stores children of nodes
+scratch: std.ArrayListUnmanaged(NodeIndex) = .empty,
 
 state_stack: std.ArrayListUnmanaged(struct {
     index: u32,
@@ -25,361 +31,262 @@ state_stack: std.ArrayListUnmanaged(struct {
     errors: usize,
 }) = .empty,
 
-const null_node = Ast.null_node;
+allocator: std.mem.Allocator,
 
-/// Saves the current parser state, for use when trying multiple sub-items
-fn saveState(self: *Self) !void {
-    try self.state_stack.append(self.allocator, .{
-        .index = self.index,
-        .nodes = self.nodes.items.len,
-        .errors = self.errors.items.len,
-    });
-}
-/// Restores a previously saved parser state
-fn restoreState(self: *Self) void {
-    const state = self.state_stack.pop();
-    self.index = state.index;
-    self.nodes.items.len = state.nodes;
-    self.errors.items.len = state.errors;
-}
+const null_node = Ast.null_node;
 
 // Grammer parsing
 
 const ParseError = error{ParseFailed} || std.mem.Allocator.Error;
 
-/// Root <- (ModuleExpr / GlobalVarDecl / FnDef)*
-pub fn parseRoot(self: *Self) ParseError!void {
-    const root = 0;
+/// Root <- ModuleDef (FnDef)*
+pub fn parseRoot(p: *Parser) ParseError!void {
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    const root = try p.addNode(.{
+        .tag = .root,
+        .main_token = undefined,
+        .data = undefined,
+    });
+
+    p.skipNewLines();
+    try p.scratch.append(p.allocator, try p.parseModuleDef());
 
     while (true) {
-        const t = self.tokens[self.index];
-        std.log.debug("tok {}", .{t});
-
-        sw: switch (t.tag) {
-            .new_line => {
-                self.index += 1;
-                continue;
-            },
-            .eof => break,
-            .keyword_module => self.addChild(root, try self.parseModuleExpr()),
-            .keyword_pub => {
-                // Skip KEYWORD_pub
-                self.index += 1;
-                continue :sw .keyword_fn;
-            },
-            // .keyword_var,
-            // .keyword_const,
-            .keyword_fn,
-            => {
-                // const global_var_decl = try self.parseGlobalVarDecl(false);
-                // if (global_var_decl != null_node) {
-                //     try root.children.append(self.allocator, global_var_decl);
-                //     continue;
-                // }
-
-                const fn_def = try self.parseFnDef(false);
-                if (fn_def != null_node) {
-                    self.addChild(root, fn_def);
-                    continue;
-                }
-
-                unreachable;
-            },
-
-            else => {
-                try self.errors.append(self.allocator, .{
-                    .tag = .unexpected_token,
-                    .type = .err,
-                    .token = self.index,
-                });
-                return error.ParseFailed;
-            },
+        const t = p.token_tags[p.index];
+        std.log.info("t {}", .{t});
+        if (t == .new_line) {
+            p.index += 1;
+            continue;
         }
-    }
-}
-
-/// ModuleExpr <- KEYWORD_module IDENTIFIER
-fn parseModuleExpr(self: *Self) ParseError!NodeIndex {
-    const main_token = self.index;
-
-    _ = try self.expectToken(.keyword_module);
-    const ident = try self.expectToken(.ident);
-
-    return try self.addNode(.{
-        .tag = .{ .module = self.source[ident.loc.start..ident.loc.end] },
-        .main_token = main_token,
-    });
-}
-
-/// GlobalVarDecl <- (KEYWORD_pub)? (KEYWORD_const / KEYWORD_var) IDENTIFIER COLON IDENTIFIER SEMICOLON
-fn parseGlobalVarDecl(self: *Self, is_pub: bool) ParseError!NodeIndex {
-    const mut =
-        self.eatToken(.keyword_var) orelse
-        self.eatToken(.keyword_const) orelse
-        return null_node;
-
-    const ident_name = try self.expectToken(.ident);
-    _ = try self.expectToken(.colon);
-    const ident_type = try self.expectToken(.ident);
-    _ = try self.expectToken(.semicolon);
-
-    return try self.addNode(.{
-        .tag = .{
-            .global_var_decl = .{
-                .name = self.source[ident_name.loc.start..ident_name.loc.end],
-                .type = self.source[ident_type.loc.start..ident_type.loc.end],
-                .is_const = mut.tag == .keyword_const,
-                .is_pub = is_pub,
-            },
-        },
-    });
-}
-
-/// FnDef <- (KEYWORD_pub)? KEYWORD_fn IDENTIFIER LPAREN RPAREN (BankAttr)? (IDENTIFIER)? BlockScope
-fn parseFnDef(self: *Self, is_pub: bool) ParseError!NodeIndex {
-    const main_token = self.index;
-    _ = try self.expectToken(.keyword_fn);
-    const ident_name = try self.expectToken(.ident);
-    _ = try self.expectToken(.lparen);
-    _ = try self.expectToken(.rparen);
-
-    const node = try self.addNode(undefined);
-
-    const bank_attr = try self.parseBankAttr();
-    const opt_ident_return = self.eatToken(.ident);
-
-    self.defineNode(node, .{
-        .tag = .{
-            .fn_def = .{
-                .name = self.source[ident_name.loc.start..ident_name.loc.end],
-                .return_type = if (opt_ident_return) |ident_return|
-                    self.source[ident_return.loc.start..ident_return.loc.end]
-                else
-                    null,
-                .is_pub = is_pub,
-            },
-        },
-        .main_token = main_token,
-    });
-
-    if (bank_attr != null_node) {
-        self.addChild(node, bank_attr);
-    }
-
-    self.addChild(node, try self.parseBlockScope());
-
-    return node;
-}
-
-/// BankAttr <- IDENTIFIER LPAREN (INT_LITERAL) RPAREN
-fn parseBankAttr(self: *Self) ParseError!NodeIndex {
-    const ident_bank, const ident_bank_idx = self.eatTokenIdx(.ident) orelse return null_node;
-    if (!std.mem.eql(u8, "bank", self.source[ident_bank.loc.start..ident_bank.loc.end]))
-        return null_node;
-
-    _ = try self.expectToken(.lparen);
-
-    const int_value = try self.expectToken(.int_literal);
-    const value_str = self.source[int_value.loc.start..int_value.loc.end];
-    const number_base: u8 = switch (value_str[0]) {
-        '$' => 16,
-        '%' => 2,
-        '0'...'9' => 10,
-        else => unreachable,
-    };
-    const bank = std.fmt.parseInt(u8, value_str[(if (number_base == 10) 0 else 1)..], number_base) catch unreachable;
-
-    _ = try self.expectToken(.rparen);
-
-    return self.addNode(.{
-        .tag = .{ .bank_attr = bank },
-        .main_token = ident_bank_idx,
-    });
-}
-
-/// BlockScope <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
-fn parseBlockScope(self: *Self) ParseError!NodeIndex {
-    const node = try self.addNode(.{ .tag = .block_scope, .main_token = self.index });
-
-    _ = try self.expectToken(.lbrace);
-    _ = try self.expectToken(.new_line);
-    while (true) {
-        const t = self.tokens[self.index];
-        if (t.tag == .rbrace) {
+        if (t == .eof) {
             break;
         }
 
-        if (t.tag == .new_line) {
-            self.index += 1;
+        // Function Definition
+        const fn_def = try p.parseFnDef();
+        if (fn_def != null_node) {
+            try p.scratch.append(p.allocator, fn_def);
             continue;
         }
 
+        return p.fail(.{
+            .tag = .expected_toplevel,
+            .type = .err,
+            .token = p.index,
+        });
+    }
+
+    p.nodes.items(.data)[root] = .{ .sub_range = try p.listToSpan(p.scratch.items[scratch_top..]) };
+}
+
+/// ModuleDef <- KEYWORD_module IDENTIFIER NEW_LINE
+fn parseModuleDef(self: *Parser) ParseError!NodeIndex {
+    _ = try self.expectToken(.keyword_module);
+    const ident = try self.expectToken(.ident);
+    _ = try self.expectToken(.new_line);
+
+    // TODO: Verify module name is legal
+    return try self.addNode(.{
+        .tag = .module,
+        .main_token = ident,
+        .data = undefined,
+    });
+}
+
+/// FnDef <- (KEYWORD_pub)? KEYWORD_fn IDENTIFIER LPAREN RPAREN (BankAttr)? (IDENTIFIER)? Block
+fn parseFnDef(p: *Parser) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_fn = p.eatToken(.keyword_fn) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.lparen);
+    _ = try p.expectToken(.rparen);
+    const bank_attr = try p.parseBankAttr();
+    _ = p.eatToken(.ident);
+
+    const block = try p.parseBlock();
+
+    return try p.addNode(.{
+        .tag = .fn_def,
+        .main_token = keyword_fn,
+        .data = .{ .fn_def = .{
+            .block = block,
+            .bank_attr = bank_attr,
+        } },
+    });
+}
+
+/// BankAttr <- IDENTIFIER LPAREN (INT_LITERAL) RPAREN
+fn parseBankAttr(p: *Parser) ParseError!NodeIndex {
+    const ident_bank = p.eatToken(.ident) orelse return null_node;
+    if (!std.mem.eql(u8, "bank", p.source[p.token_locs[ident_bank].start..p.token_locs[ident_bank].end]))
+        return null_node;
+
+    _ = try p.expectToken(.lparen);
+    const int_literal = try p.expectToken(.int_literal);
+    _ = try p.expectToken(.rparen);
+
+    return p.addNode(.{
+        .tag = .bank_attr,
+        .main_token = int_literal,
+        .data = undefined,
+    });
+}
+
+/// Block <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
+fn parseBlock(p: *Parser) ParseError!NodeIndex {
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    const lbrace = try p.expectToken(.lbrace);
+    _ = try p.expectToken(.new_line);
+    while (true) {
+        const t = p.token_tags[p.index];
+        if (t == .new_line) {
+            p.index += 1;
+            continue;
+        }
+        if (t == .rbrace) {
+            break;
+        }
+
         // Expression
-        const expr = self.parseExpr() catch |err| switch (err) {
+        const expr = p.parseExpr() catch |err| switch (err) {
             error.ParseFailed => null_node,
             else => |e| return e,
         };
         if (expr != null_node) {
-            self.addChild(node, expr);
+            try p.scratch.append(p.allocator, expr);
             continue;
         }
 
         // Instruction
-        const instr = self.parseInstruction() catch |err| switch (err) {
+        const instr = p.parseInstruction() catch |err| switch (err) {
             error.ParseFailed => null_node,
             else => |e| return e,
         };
         if (instr != null_node) {
-            self.addChild(node, instr);
+            try p.scratch.append(p.allocator, instr);
             continue;
         }
 
         // Label
-        const label = self.parseLabel() catch |err| switch (err) {
+        const label = p.parseLabel() catch |err| switch (err) {
             error.ParseFailed => null_node,
             else => |e| return e,
         };
         if (label != null_node) {
-            self.addChild(node, label);
+            try p.scratch.append(p.allocator, label);
             continue;
         }
 
-        return self.fail(.{
+        return p.fail(.{
             .tag = .expected_expr_instr_label,
             .type = .err,
-            .token = self.index,
+            .token = p.index,
         });
     }
-    _ = try self.expectToken(.rbrace);
-    _ = try self.expectToken(.new_line);
+    _ = try p.expectToken(.rbrace);
+    _ = try p.expectToken(.new_line);
 
-    return node;
+    return p.addNode(.{
+        .tag = .block,
+        .main_token = lbrace,
+        .data = .{ .sub_range = try p.listToSpan(p.scratch.items[scratch_top..]) },
+    });
 }
 
 /// Expr <-
-fn parseExpr(self: *Self) ParseError!NodeIndex {
+fn parseExpr(self: *Parser) ParseError!NodeIndex {
     _ = self; // autofix
     return null_node;
 }
 
 /// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
-fn parseInstruction(self: *Self) ParseError!NodeIndex {
-    try self.saveState();
-    errdefer self.restoreState();
+fn parseInstruction(self: *Parser) ParseError!NodeIndex {
+    const start_idx = self.index;
+    errdefer self.index = start_idx;
 
-    const ident_opcode, const ident_opcode_idx = try self.expectTokenIdx(.ident);
+    const ident_opcode = self.eatToken(.ident) orelse return null_node;
+    _ = self.eatToken(.ident) orelse self.eatToken(.int_literal);
+    _ = self.eatToken(.new_line) orelse return error.ParseFailed;
 
-    const opcode_name = self.source[ident_opcode.loc.start..ident_opcode.loc.end];
-    const opcode: InstructionType = find_opcode: {
-        inline for (std.meta.fields(InstructionType)) |field| {
-            if (std.mem.eql(u8, field.name, opcode_name)) {
-                break :find_opcode @enumFromInt(field.value);
-            }
-        }
-
-        return error.ParseFailed;
-    };
-
-    const node = try self.addNode(.{
-        .tag = .{ .instruction = .{
-            .opcode = opcode,
-            .operand = .none,
-        } },
-        .main_token = ident_opcode_idx,
+    return try self.addNode(.{
+        .tag = .instruction,
+        .main_token = ident_opcode,
+        .data = undefined,
     });
-
-    if (self.eatToken(.int_literal)) |ident_operand| {
-        const operand_str = self.source[ident_operand.loc.start..ident_operand.loc.end];
-        const number_base: u8 = switch (operand_str[0]) {
-            '$' => 16,
-            '%' => 2,
-            '0'...'9' => 10,
-            else => unreachable,
-        };
-        const operand = std.fmt.parseInt(u16, operand_str[(if (number_base == 10) 0 else 1)..], number_base) catch unreachable;
-        self.nodes.items[node].tag.instruction.operand = .{ .number = operand };
-    }
-    if (self.eatToken(.ident)) |ident_operand| {
-        const operand_str = self.source[ident_operand.loc.start..ident_operand.loc.end];
-        self.nodes.items[node].tag.instruction.operand = .{ .identifier = operand_str };
-    }
-
-    _ = try self.expectToken(.new_line);
-
-    return node;
 }
 
 /// Label <- IDENTIFIER COLON NEW_LINE
-fn parseLabel(self: *Self) ParseError!NodeIndex {
-    try self.saveState();
-    errdefer self.restoreState();
+fn parseLabel(self: *Parser) ParseError!NodeIndex {
+    const start_idx = self.index;
+    errdefer self.index = start_idx;
 
-    const ident_name, const ident_name_idx = try self.expectTokenIdx(.ident);
-    _ = try self.expectToken(.colon);
-    _ = try self.expectToken(.new_line);
+    const ident_name = self.eatToken(.ident) orelse return null_node;
+    _ = self.eatToken(.colon) orelse return error.ParseFailed;
+    _ = self.eatToken(.new_line) orelse return error.ParseFailed;
 
     return try self.addNode(.{
-        .tag = .{ .label = self.source[ident_name.loc.start..ident_name.loc.end] },
-        .main_token = ident_name_idx,
+        .tag = .label,
+        .main_token = ident_name,
+        .data = undefined,
     });
 }
 
 // Helper functions
 
-fn nextToken(self: *Self) Token {
-    const result = self.tokens[self.index];
-    self.index += 1;
+fn addNode(self: *Parser, node: Node) ParseError!NodeIndex {
+    try self.nodes.append(self.allocator, node);
+    return @intCast(self.nodes.len - 1);
+}
+
+/// Stores a list of sub-nodes into `extra`
+fn listToSpan(p: *Parser, list: []const NodeIndex) ParseError!Node.SubRange {
+    const start: NodeIndex = @intCast(p.extra_data.items.len);
+    try p.extra_data.appendSlice(p.allocator, list);
+    const end: NodeIndex = @intCast(p.extra_data.items.len);
+
+    return .{ .start = start, .end = end };
+}
+
+fn skipNewLines(p: *Parser) void {
+    while (p.token_tags[p.index] == .new_line) {
+        p.index += 1;
+    }
+}
+
+fn nextToken(p: *Parser) TokenIndex {
+    const result = p.index;
+    p.index += 1;
     return result;
 }
-
-fn eatToken(self: *Self, tag: Token.Tag) ?Token {
-    return if (self.tokens[self.index].tag == tag)
-        self.nextToken()
+fn checkToken(p: *Parser, offset: TokenIndex, tag: Token.Tag) bool {
+    return if (p.index + offset >= p.token_tags.len)
+        false
+    else
+        p.token_tags[p.index + offset] == tag;
+}
+fn eatToken(p: *Parser, tag: Token.Tag) ?TokenIndex {
+    return if (p.token_tags[p.index] == tag)
+        p.nextToken()
     else
         null;
 }
-fn eatTokenIdx(self: *Self, tag: Token.Tag) ?struct { Token, TokenIndex } {
-    return if (self.tokens[self.index].tag == tag)
-        .{ self.nextToken(), self.index - 1 }
-    else
-        null;
-}
-
-fn expectToken(self: *Self, tag: Token.Tag) ParseError!Token {
-    if (self.tokens[self.index].tag != tag) {
-        return self.fail(.{
+fn expectToken(p: *Parser, tag: Token.Tag) ParseError!TokenIndex {
+    if (p.token_tags[p.index] != tag) {
+        return p.fail(.{
             .tag = .expected_token,
             .type = .err,
-            .token = self.index,
+            .token = p.index,
             .extra = .{ .expected_tag = tag },
         });
     }
-    return self.nextToken();
-}
-fn expectTokenIdx(self: *Self, tag: Token.Tag) ParseError!struct { Token, TokenIndex } {
-    if (self.tokens[self.index].tag != tag) {
-        return self.fail(.{
-            .tag = .expected_token,
-            .type = .err,
-            .token = self.index,
-            .extra = .{ .expected_tag = tag },
-        });
-    }
-    return .{ self.nextToken(), self.index - 1 };
+    return p.nextToken();
 }
 
-fn addNode(self: *Self, node: Node) !NodeIndex {
-    try self.nodes.append(self.allocator, node);
-    return @intCast(self.nodes.items.len - 1);
-}
-fn defineNode(self: *Self, node_idx: NodeIndex, node: Node) void {
-    self.nodes.items[node_idx] = node;
-}
-fn addChild(self: *Self, parent: NodeIndex, child: NodeIndex) void {
-    self.nodes.items[child].parent = parent;
-}
-
-fn fail(self: *Self, err: Error) ParseError {
-    try self.errors.append(self.allocator, err);
+fn fail(p: *Parser, err: Error) ParseError {
+    try p.errors.append(p.allocator, err);
     return error.ParseFailed;
 }

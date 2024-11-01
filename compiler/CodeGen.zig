@@ -4,7 +4,7 @@ const Node = @import("Ast.zig").Node;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 const Symbol = @import("symbol.zig").Symbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
-const SymbolMap = @import("Sema.zig").SymbolMap;
+const Sema = @import("Sema.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const InstructionType = @import("instruction.zig").InstructionType;
 const Rom = @import("Rom.zig");
@@ -15,43 +15,50 @@ const crc32 = @import("util/crc32.zig");
 const CodeGen = @This();
 
 mapping_mode: MappingMode,
-symbols: SymbolMap,
+sema: *Sema,
 banks: std.AutoArrayHashMapUnmanaged(u8, std.ArrayListUnmanaged(u8)) = .empty, // Bank -> BankData
 
 allocator: std.mem.Allocator,
 
-pub fn generate(gen: *CodeGen, module: Module) !void {
-    const module_symbols = gen.symbols.get(module.name.?).?;
-    for (module_symbols.keys(), module_symbols.values()) |name, *sym| {
-        if (sym.* != .function) {
-            continue;
+pub fn generate(gen: *CodeGen) !void {
+    const symbols = gen.sema.symbols.items(.sym);
+
+    for (gen.sema.modules) |module| {
+        const module_symbols = gen.sema.symbol_map.get(module.name.?).?;
+        for (module_symbols.keys(), module_symbols.values()) |name, sym_idx| {
+            const sym = &symbols[sym_idx];
+            if (sym.* != .function) {
+                continue;
+            }
+
+            var builder: FunctionBuilder = .{
+                .codegen = gen,
+                .module = module,
+                .symbol = sym.function,
+                .symbol_name = name,
+            };
+            try builder.build();
+
+            sym.function.bank = memory_map.getRealBank(gen.mapping_mode, builder.target_bank);
+            std.log.info("bank {}", .{sym.function.bank});
+            sym.function.assembly_data = try builder.genereateAssemblyData();
+            try builder.fixLabelRelocs();
+            sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
+
+            const labels = try gen.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
+            for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
+                label.* = .{ label_name, index };
+            }
+            sym.function.labels = labels;
         }
-
-        var builder: FunctionBuilder = .{
-            .codegen = gen,
-            .module = module,
-            .symbol = sym.function,
-            .symbol_name = name,
-        };
-        try builder.build();
-
-        sym.function.bank = memory_map.getRealBank(gen.mapping_mode, builder.target_bank);
-        std.log.info("bank {}", .{sym.function.bank});
-        sym.function.assembly_data = try builder.genereateAssemblyData();
-        try builder.fixLabelRelocs();
-        sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
-
-        const labels = try gen.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
-        for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
-            label.* = .{ label_name, index };
-        }
-        sym.function.labels = labels;
     }
 }
 
 /// Returns the memory-mapped location of a symbol
 pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
-    const symbol = gen.symbols.get(symbol_loc.module).?.get(symbol_loc.name).?;
+    const symbol_idx = gen.sema.symbol_map.get(symbol_loc.module).?.get(symbol_loc.name).?;
+    const symbol = gen.sema.symbols.items(.sym)[symbol_idx];
+
     return switch (symbol) {
         .variable => @panic("TODO"),
         .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, func_sym.bank, func_sym.bank_offset),
@@ -60,18 +67,18 @@ pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
 
 /// Generates byte data for the individual banks
 pub fn generateBanks(gen: *CodeGen) !void {
-    for (gen.symbols.values()) |module_symbols| {
-        for (module_symbols.values()) |*symbol| {
-            if (symbol.* == .function) {
-                const gop = try gen.banks.getOrPut(gen.allocator, symbol.function.bank);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .empty;
-                }
+    for (gen.sema.symbols.items(.sym)) |*sym| {
+        if (sym.* == .function) {
+            const func = &sym.function;
 
-                symbol.function.bank_offset = @intCast(gop.value_ptr.items.len);
-                try gop.value_ptr.appendSlice(gen.allocator, symbol.function.assembly_data);
-                std.log.info("asm {x}", .{symbol.function.assembly_data});
+            const gop = try gen.banks.getOrPut(gen.allocator, func.bank);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .empty;
             }
+
+            func.bank_offset = @intCast(gop.value_ptr.items.len);
+            try gop.value_ptr.appendSlice(gen.allocator, func.assembly_data);
+            std.log.info("asm {x}", .{func.assembly_data});
         }
     }
 }
@@ -90,48 +97,49 @@ pub fn allocateBanks(gen: CodeGen) ![]const Rom.BankData {
 
 /// Resolves relocation of instructions
 pub fn resolveRelocations(gen: CodeGen) !void {
-    for (gen.symbols.values()) |module_symbols| {
-        for (module_symbols.values()) |*symbol| {
-            if (symbol.* != .function) {
-                continue;
-            }
+    for (gen.sema.symbols.items(.sym)) |*sym| {
+        if (sym.* != .function) {
+            continue;
+        }
 
-            const func = symbol.function;
-            const bank = gen.banks.get(func.bank).?;
+        const func = sym.function;
+        const bank = gen.banks.get(func.bank).?;
 
-            for (func.instructions) |info| {
-                const reloc = info.reloc orelse continue;
-                const target_addr = gen.symbolLocation(reloc.target_sym) + reloc.target_offset;
+        for (func.instructions) |info| {
+            const reloc = info.reloc orelse continue;
+            const target_addr = gen.symbolLocation(reloc.target_sym) + reloc.target_offset;
 
-                switch (reloc.type) {
-                    .addr24 => {
-                        const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(InstructionType))..][0..3];
-                        operand.* = @bitCast(target_addr);
-                    },
-                }
+            switch (reloc.type) {
+                .addr24 => {
+                    const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(InstructionType))..][0..3];
+                    operand.* = @bitCast(target_addr);
+                },
             }
         }
     }
 }
 
 /// Writes a .mlb symbol file for Mesen2
-pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer, modules: []const Module) !void {
+pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
+    const symbols = gen.sema.symbols.items(.sym);
+
     var comments: std.ArrayListUnmanaged([]const u8) = .empty;
     defer comments.deinit(gen.allocator);
 
     var module_index: usize = 0;
-    for (gen.symbols.keys(), gen.symbols.values()) |module_name, module_symbols| {
+    for (gen.sema.symbol_map.keys(), gen.sema.symbol_map.values()) |module_name, module_symbols| {
         if (std.mem.eql(u8, module_name, znasm_builtin.module)) {
             continue;
         }
 
-        const module = modules[module_index];
+        const module = gen.sema.modules[module_index];
         module_index += 1;
 
         var src_fbs = std.io.fixedBufferStream(module.source);
         const src_reader = src_fbs.reader();
 
-        for (module_symbols.keys(), module_symbols.values()) |symbol_name, symbol| {
+        for (module_symbols.keys(), module_symbols.values()) |symbol_name, symbol_idx| {
+            const symbol = symbols[symbol_idx];
             const is_vector = symbol_name[0] == '@';
 
             // Usually format module@symbol, except for vectors which would have a double @
@@ -143,7 +151,7 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer, modules: []cons
 
             switch (symbol) {
                 .function => |func| {
-                    src_fbs.pos = module.ast.tokens[module.ast.nodes[func.node].main_token].loc.start;
+                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func.node]].start;
 
                     const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
 
@@ -229,34 +237,32 @@ pub fn generateCdlData(gen: CodeGen, rom: []const u8) ![]const u8 {
     const cdl_flags: []CdlFlags = @ptrCast(cdl_data[(@sizeOf(CdlHeader) - 0)..]);
     @memset(cdl_flags, .{});
 
-    for (gen.symbols.values()) |module_symbols| {
-        for (module_symbols.values()) |symbol| {
-            switch (symbol) {
-                .function => |func| {
-                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
-                    for (func.instructions, 0..) |info, info_idx| {
-                        const has_label_target = get_label: {
-                            for (func.labels) |label| {
-                                _, const idx = label;
-                                if (info_idx == idx) {
-                                    break :get_label true;
-                                }
+    for (gen.sema.symbols.items(.sym)) |sym| {
+        switch (sym) {
+            .function => |func| {
+                const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
+                for (func.instructions, 0..) |info, info_idx| {
+                    const has_label_target = get_label: {
+                        for (func.labels) |label| {
+                            _, const idx = label;
+                            if (info_idx == idx) {
+                                break :get_label true;
                             }
-                            break :get_label false;
-                        };
+                        }
+                        break :get_label false;
+                    };
 
-                        cdl_flags[func_offset + info.offset] = .{
-                            .code = true,
-                            .jump_target = has_label_target,
-                            .sub_entry_point = info_idx == 0,
+                    cdl_flags[func_offset + info.offset] = .{
+                        .code = true,
+                        .jump_target = has_label_target,
+                        .sub_entry_point = info_idx == 0,
 
-                            .index_mode_8 = info.xy_size == .@"8bit",
-                            .memory_mode_8 = info.a_size == .@"8bit",
-                        };
-                    }
-                },
-                else => @panic("Unsupported"),
-            }
+                        .index_mode_8 = info.xy_size == .@"8bit",
+                        .memory_mode_8 = info.a_size == .@"8bit",
+                    };
+                }
+            },
+            else => @panic("Unsupported"),
         }
     }
 
@@ -325,7 +331,8 @@ const FunctionBuilder = struct {
     y_reg_id: ?u64 = null,
 
     pub fn build(b: *FunctionBuilder) !void {
-        try b.handleFnDef(b.symbol.node);
+        _ = b; // autofix
+        // try b.handleFnDef(b.symbol.node);
     }
 
     const Error = error{OutOfMemory};

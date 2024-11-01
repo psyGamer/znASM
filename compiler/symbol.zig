@@ -34,7 +34,9 @@ pub const Symbol = union(enum) {
     };
     pub const Function = struct {
         is_pub: bool,
-        // return_type: SymbolLocation,
+
+        /// Memory-mapped target bank
+        bank: u8,
 
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 } = &.{},
@@ -43,8 +45,6 @@ pub const Symbol = union(enum) {
         /// Raw assembly data
         assembly_data: []u8 = &.{},
 
-        /// Memory-mapped target bank
-        bank: u8 = undefined,
         /// Offset into the target bank
         bank_offset: u16 = undefined,
 

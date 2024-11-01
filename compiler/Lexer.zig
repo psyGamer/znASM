@@ -67,6 +67,11 @@ pub const Token = struct {
     pub const Loc = struct {
         start: usize,
         end: usize,
+
+        /// Returns the source data of the token location
+        pub fn source(loc: Loc, src: []const u8) []const u8 {
+            return src[loc.start..loc.end];
+        }
     };
 
     pub fn getKeyword(bytes: []const u8) ?Tag {
