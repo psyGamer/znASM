@@ -214,7 +214,7 @@ fn gatherSymbols(sema: *Sema, allocator: std.mem.Allocator, module_idx: u32) !vo
     std.log.err("Nodes:", .{});
     var child_iter = ast.iterChildren(root);
     node_loop: while (child_iter.next()) |child| {
-        const child_idx = child_iter.index;
+        const child_idx = child_iter.index - 1;
         std.log.err(" - {}", .{child});
         switch (child.tag) {
             .module => |module_name| module.name = module_name,

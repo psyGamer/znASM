@@ -115,7 +115,7 @@ pub fn computeRomSize(rom: *Rom) void {
     }
 
     const rom_size = highest_bank_start + memory_map.bankSize(rom.header.mode.map);
-    rom.header.rom_size_log2_kb = @intCast(std.math.log2(rom_size / 1024));
+    rom.header.rom_size_log2_kb = @intCast(std.math.log2_int_ceil(u24, rom_size / 1024));
 }
 
 /// Generates byte data for the entire ROM file

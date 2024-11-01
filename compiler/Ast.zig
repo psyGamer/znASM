@@ -21,11 +21,11 @@ pub const Node = struct {
             is_pub: bool,
         },
 
-        /// main_token is the `lbrace`
-        fn_block: void,
+        /// main_token is the `identifier` of "bank"
+        bank_attr: u8,
 
         /// main_token is the `lbrace`
-        block_expr: void,
+        block_scope: void,
 
         /// main_token is the `identifier` of the opcode
         instruction: struct {

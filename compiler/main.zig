@@ -227,7 +227,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
         try codegen.writeMlbSymbols(mlb_file.writer(), modules.items);
 
-        const cdl_data = try codegen.generateCdlData();
+        const cdl_data = try codegen.generateCdlData(rom_data);
         defer allocator.free(cdl_data);
         try cdl_file.writeAll(cdl_data);
     }

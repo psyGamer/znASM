@@ -33,27 +33,8 @@ pub const Symbol = union(enum) {
         node: Ast.NodeIndex,
     };
     pub const Function = struct {
-        pub const Reloc = struct {
-            offset: u24,
-            sym: SymbolLocation,
-            type: enum {
-                imm8,
-            },
-        };
-        // TODO: Parameters
-        // pub const Parameter = struct {
-        //     name: []const u8,
-        //     type: Symbol,
-        // };
-
-        // return_type: SymbolLocation,
-        // segment: []const u8,
-        // is_inline: bool,
         is_pub: bool,
-        // parameters: []const Parameter
-
-        // TODO: Is this an appropriate location?
-        node: Ast.NodeIndex,
+        // return_type: SymbolLocation,
 
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 } = &.{},
@@ -62,12 +43,13 @@ pub const Symbol = union(enum) {
         /// Raw assembly data
         assembly_data: []u8 = &.{},
 
+        /// Memory-mapped target bank
+        bank: u8 = undefined,
         /// Offset into the target bank
         bank_offset: u16 = undefined,
-        // ir: std.ArrayListUnmanaged(IR) = .{},
-        // code: std.ArrayListUnmanaged(u8) = .{},
-        // relocs: std.ArrayListUnmanaged(Reloc) = .{},
-        // segment_offset: u16 = 0,
+
+        /// `fn_def` node of this symbol
+        node: Ast.NodeIndex,
     };
 
     variable: Variable,

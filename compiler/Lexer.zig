@@ -109,7 +109,6 @@ pub fn next(lexer: *Lexer) Token {
 
     while (true) : (lexer.index += 1) {
         const c = lexer.buffer[lexer.index];
-        std.log.debug("char {c}", .{c});
 
         switch (state) {
             .start => switch (c) {

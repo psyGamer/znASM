@@ -10,6 +10,30 @@ pub fn bankSize(mode: MappingMode) u16 {
     };
 }
 
+/// Returns the non-mirrored memory-mapped target bank
+pub fn getRealBank(mode: MappingMode, bank: u8) u8 {
+    return switch (mode) {
+        .lorom => switch (bank) {
+            0x00...0x7D => bank + 0x80,
+            0x7E...0x7F => unreachable,
+            0x80...0xFF => bank,
+        },
+        .hirom => switch (bank) {
+            0x00...0x3F => bank + (0xC0 - 0x00),
+            0x40...0x7F => unreachable,
+            0x80...0xBF => bank + (0xC0 - 0x80),
+            0xC0...0xFF => bank,
+        },
+        .exhirom => switch (bank) {
+            0x00...0x3D => bank + (0x40 - 0x00),
+            0x3E...0x7D => bank,
+            0x7E...0x7F => unreachable,
+            0x80...0xBF => bank + (0xC0 - 0x80),
+            0xC0...0xFF => bank,
+        },
+    };
+}
+
 /// Maps a bank with the offset from the first accessible byte to the actual address
 pub fn bankOffsetToAddr(mode: MappingMode, bank: u8, offset: u16) u24 {
     return switch (mode) {

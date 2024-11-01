@@ -12,6 +12,7 @@ pub const empty_vector_loc: SymbolLocation = .{
 var empty_vector_asm: [1]u8 = .{@intFromEnum(InstructionType.rti)};
 pub const empty_vector_sym: Symbol = .{ .function = .{
     .is_pub = false,
-    .node = undefined,
     .assembly_data = &empty_vector_asm,
+    .bank = 0x80,
+    .node = undefined,
 } };

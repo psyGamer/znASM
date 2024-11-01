@@ -135,16 +135,20 @@ fn parseGlobalVarDecl(self: *Self, is_pub: bool) ParseError!NodeIndex {
     });
 }
 
-/// FnDef <- (KEYWORD_pub)? KEYWORD_fn (IDENTIFIER BUILTIN_IDENTIFIER) LPAREN RPAREN IDENTIFIER FnBlock
+/// FnDef <- (KEYWORD_pub)? KEYWORD_fn IDENTIFIER LPAREN RPAREN (BankAttr)? (IDENTIFIER)? BlockScope
 fn parseFnDef(self: *Self, is_pub: bool) ParseError!NodeIndex {
     const main_token = self.index;
     _ = try self.expectToken(.keyword_fn);
     const ident_name = try self.expectToken(.ident);
     _ = try self.expectToken(.lparen);
     _ = try self.expectToken(.rparen);
+
+    const node = try self.addNode(undefined);
+
+    const bank_attr = try self.parseBankAttr();
     const opt_ident_return = self.eatToken(.ident);
 
-    const node = try self.addNode(.{
+    self.defineNode(node, .{
         .tag = .{
             .fn_def = .{
                 .name = self.source[ident_name.loc.start..ident_name.loc.end],
@@ -157,14 +161,45 @@ fn parseFnDef(self: *Self, is_pub: bool) ParseError!NodeIndex {
         },
         .main_token = main_token,
     });
-    self.addChild(node, try self.parseFnBlock());
+
+    if (bank_attr != null_node) {
+        self.addChild(node, bank_attr);
+    }
+
+    self.addChild(node, try self.parseBlockScope());
 
     return node;
 }
 
-/// FnBlock <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
-fn parseFnBlock(self: *Self) ParseError!NodeIndex {
-    const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
+/// BankAttr <- IDENTIFIER LPAREN (INT_LITERAL) RPAREN
+fn parseBankAttr(self: *Self) ParseError!NodeIndex {
+    const ident_bank, const ident_bank_idx = self.eatTokenIdx(.ident) orelse return null_node;
+    if (!std.mem.eql(u8, "bank", self.source[ident_bank.loc.start..ident_bank.loc.end]))
+        return null_node;
+
+    _ = try self.expectToken(.lparen);
+
+    const int_value = try self.expectToken(.int_literal);
+    const value_str = self.source[int_value.loc.start..int_value.loc.end];
+    const number_base: u8 = switch (value_str[0]) {
+        '$' => 16,
+        '%' => 2,
+        '0'...'9' => 10,
+        else => unreachable,
+    };
+    const bank = std.fmt.parseInt(u8, value_str[(if (number_base == 10) 0 else 1)..], number_base) catch unreachable;
+
+    _ = try self.expectToken(.rparen);
+
+    return self.addNode(.{
+        .tag = .{ .bank_attr = bank },
+        .main_token = ident_bank_idx,
+    });
+}
+
+/// BlockScope <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
+fn parseBlockScope(self: *Self) ParseError!NodeIndex {
+    const node = try self.addNode(.{ .tag = .block_scope, .main_token = self.index });
 
     _ = try self.expectToken(.lbrace);
     _ = try self.expectToken(.new_line);
@@ -221,48 +256,10 @@ fn parseFnBlock(self: *Self) ParseError!NodeIndex {
     return node;
 }
 
-/// Expr <- BlockExpr
+/// Expr <-
 fn parseExpr(self: *Self) ParseError!NodeIndex {
-    try self.saveState();
-    errdefer self.restoreState();
-
-    const start_index = self.index;
-
-    const block = self.parseBlockExpr() catch |err| switch (err) {
-        error.ParseFailed => null_node,
-        else => |e| return e,
-    };
-    if (block != null_node) {
-        return block;
-    }
-
-    self.index = start_index;
-
-    return self.fail(.{
-        .tag = .expected_expression,
-        .type = .err,
-        .token = self.index,
-    });
-}
-
-/// BlockExpr <- LBRACE NEW_LINE Expr* RBRACE NEW_LINE
-fn parseBlockExpr(self: *Self) ParseError!NodeIndex {
-    const node = try self.addNode(.{ .tag = .block_expr, .main_token = self.index });
-
-    _ = try self.expectToken(.lbrace);
-    _ = try self.expectToken(.new_line);
-    while (true) {
-        const t = self.tokens[self.index];
-        if (t.tag == .rbrace) {
-            break;
-        }
-
-        self.addChild(node, try self.parseExpr());
-    }
-    _ = try self.expectToken(.rbrace);
-    _ = try self.expectToken(.new_line);
-
-    return node;
+    _ = self; // autofix
+    return null_node;
 }
 
 /// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
@@ -374,6 +371,9 @@ fn expectTokenIdx(self: *Self, tag: Token.Tag) ParseError!struct { Token, TokenI
 fn addNode(self: *Self, node: Node) !NodeIndex {
     try self.nodes.append(self.allocator, node);
     return @intCast(self.nodes.items.len - 1);
+}
+fn defineNode(self: *Self, node_idx: NodeIndex, node: Node) void {
+    self.nodes.items[node_idx] = node;
 }
 fn addChild(self: *Self, parent: NodeIndex, child: NodeIndex) void {
     self.nodes.items[child].parent = parent;

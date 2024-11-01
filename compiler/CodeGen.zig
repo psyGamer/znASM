@@ -11,6 +11,7 @@ const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const memory_map = @import("memory_map.zig");
 const znasm_builtin = @import("builtin.zig");
+const crc32 = @import("util/crc32.zig");
 const CodeGen = @This();
 
 mapping_mode: MappingMode,
@@ -34,6 +35,8 @@ pub fn generate(gen: *CodeGen, module: Module) !void {
         };
         try builder.build();
 
+        sym.function.bank = memory_map.getRealBank(gen.mapping_mode, builder.target_bank);
+        std.log.info("bank {}", .{sym.function.bank});
         sym.function.assembly_data = try builder.genereateAssemblyData();
         try builder.fixLabelRelocs();
         sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
@@ -51,18 +54,16 @@ pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
     const symbol = gen.symbols.get(symbol_loc.module).?.get(symbol_loc.name).?;
     return switch (symbol) {
         .variable => @panic("TODO"),
-        .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, 0x80, func_sym.bank_offset),
+        .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, func_sym.bank, func_sym.bank_offset),
     };
 }
 
 /// Generates byte data for the individual banks
 pub fn generateBanks(gen: *CodeGen) !void {
-    // TODO: Respect bank and addr min/max constraints
     for (gen.symbols.values()) |module_symbols| {
         for (module_symbols.values()) |*symbol| {
             if (symbol.* == .function) {
-                // TODO: Support function bank
-                const gop = try gen.banks.getOrPut(gen.allocator, 0x80);
+                const gop = try gen.banks.getOrPut(gen.allocator, symbol.function.bank);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .empty;
                 }
@@ -96,7 +97,7 @@ pub fn resolveRelocations(gen: CodeGen) !void {
             }
 
             const func = symbol.function;
-            const bank = gen.banks.get(0x80).?;
+            const bank = gen.banks.get(func.bank).?;
 
             for (func.instructions) |info| {
                 const reloc = info.reloc orelse continue;
@@ -144,7 +145,7 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer, modules: []cons
                 .function => |func| {
                     src_fbs.pos = module.ast.tokens[module.ast.nodes[func.node].main_token].loc.start;
 
-                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, 0x80) + func.bank_offset;
+                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
 
                     for (func.instructions, 0..) |info, info_idx| {
                         // Find labels
@@ -199,16 +200,11 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer, modules: []cons
 }
 
 /// Genrates .cdl debug data for Mesen2
-pub fn generateCdlData(gen: CodeGen) ![]const u8 {
-    var highest_bank_start: u24 = 0;
-
-    for (gen.banks.keys()) |bank| {
-        const bank_start = memory_map.bankToRomOffset(gen.mapping_mode, bank);
-        highest_bank_start = @max(highest_bank_start, bank_start);
-    }
-
-    const rom_size = highest_bank_start + memory_map.bankSize(gen.mapping_mode);
-
+pub fn generateCdlData(gen: CodeGen, rom: []const u8) ![]const u8 {
+    const CdlHeader = extern struct {
+        magic: [5]u8 align(1) = "CDLv2".*,
+        crc: u32 align(1),
+    };
     const CdlFlags = packed struct(u8) {
         // Generic flags
         code: bool = false,
@@ -223,16 +219,22 @@ pub fn generateCdlData(gen: CodeGen) ![]const u8 {
         cx4: bool = false,
     };
 
-    const cdl_data = try gen.allocator.alloc(CdlFlags, rom_size);
-    @memset(cdl_data, .{});
+    const cdl_data = try gen.allocator.alloc(u8, rom.len + @sizeOf(CdlHeader));
+    @memset(cdl_data, 0xCC);
+
+    const cdl_header: *CdlHeader = @ptrCast(@alignCast(cdl_data.ptr));
+    // Specific hash algorithm used by Mesen2 (See https://github.com/SourMesen/Mesen2/blob/master/Utilities/CRC32.cpp)
+    cdl_header.* = .{ .crc = crc32.Crc32SliceBy8(0x04C11DB7).hash(rom) };
+
+    const cdl_flags: []CdlFlags = @ptrCast(cdl_data[(@sizeOf(CdlHeader) - 0)..]);
+    @memset(cdl_flags, .{});
 
     for (gen.symbols.values()) |module_symbols| {
         for (module_symbols.values()) |symbol| {
             switch (symbol) {
                 .function => |func| {
-                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, 0x80) + func.bank_offset;
+                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
                     for (func.instructions, 0..) |info, info_idx| {
-                        const instr_region = cdl_data[(func_offset + info.offset)..(func_offset + info.offset + info.instr.size())];
                         const has_label_target = get_label: {
                             for (func.labels) |label| {
                                 _, const idx = label;
@@ -243,16 +245,14 @@ pub fn generateCdlData(gen: CodeGen) ![]const u8 {
                             break :get_label false;
                         };
 
-                        for (instr_region) |*flag| {
-                            flag.* = .{
-                                .code = true,
-                                .jump_target = has_label_target,
-                                .sub_entry_point = info_idx == 0,
+                        cdl_flags[func_offset + info.offset] = .{
+                            .code = true,
+                            .jump_target = has_label_target,
+                            .sub_entry_point = info_idx == 0,
 
-                                .index_mode_8 = info.xy_size == .@"8bit",
-                                .memory_mode_8 = info.a_size == .@"8bit",
-                            };
-                        }
+                            .index_mode_8 = info.xy_size == .@"8bit",
+                            .memory_mode_8 = info.a_size == .@"8bit",
+                        };
                     }
                 },
                 else => @panic("Unsupported"),
@@ -260,7 +260,7 @@ pub fn generateCdlData(gen: CodeGen) ![]const u8 {
         }
     }
 
-    return @ptrCast(cdl_data);
+    return cdl_data;
 }
 
 /// Index to a target instruction
@@ -315,6 +315,8 @@ const FunctionBuilder = struct {
     instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
+    target_bank: u8 = 0x80, // 0x80 is the first bank, so default to that
+
     // Register State
     a_size: Instruction.SizeMode = .none,
     xy_size: Instruction.SizeMode = .none,
@@ -323,43 +325,48 @@ const FunctionBuilder = struct {
     y_reg_id: ?u64 = null,
 
     pub fn build(b: *FunctionBuilder) !void {
-        try b.handleFnBlock(b.symbol.node);
+        try b.handleFnDef(b.symbol.node);
     }
 
     const Error = error{OutOfMemory};
 
     // Node handling
-    fn handleFnBlock(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+    fn handleFnDef(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+        const node = b.module.ast.nodes[node_idx];
+        std.debug.assert(node.tag == .fn_def);
+
         var child_iter = b.module.ast.iterChildren(node_idx);
         while (child_iter.nextIndex()) |child_idx| {
             const child = b.module.ast.nodes[child_idx];
+            std.log.info("c {}", .{child});
             switch (child.tag) {
-                .block_expr => try b.handleBlock(child_idx),
+                .bank_attr => |bank| b.target_bank = bank,
+                .block_scope => try b.handleBlockScope(child_idx),
 
+                else => std.debug.panic("Unexpected expression node {}", .{child}),
+            }
+        }
+    }
+
+    fn handleBlockScope(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
+        const node = b.module.ast.nodes[node_idx];
+        std.debug.assert(node.tag == .block_scope);
+
+        var child_iter = b.module.ast.iterChildren(node_idx);
+        while (child_iter.next()) |child| {
+            switch (child.tag) {
+                // .expr => try b.handleBlock(child),
                 .instruction => try b.handleInstruction(child),
                 .label => try b.handleLabel(child),
+
                 else => std.debug.panic("Unexpected expression node {}", .{child}),
             }
         }
     }
 
     fn handleExpression(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
-        const node = b.module.ast.nodes[node_idx];
-        return switch (node.tag) {
-            else => std.debug.panic("Unexpected expression node {}", .{node}),
-
-            .block_expr => b.handleBlock(node_idx),
-        };
-    }
-
-    fn handleBlock(b: *FunctionBuilder, node_idx: NodeIndex) Error!void {
-        const node = b.module.ast.nodes[node_idx];
-        std.debug.assert(node.tag == .block_expr);
-
-        var child_iter = b.module.ast.iterChildren(node_idx);
-        while (child_iter.nextIndex()) |expr_idx| {
-            try b.handleExpression(expr_idx);
-        }
+        _ = b; // autofix
+        _ = node_idx; // autofix
     }
 
     fn handleInstruction(b: *FunctionBuilder, node: Node) Error!void {
