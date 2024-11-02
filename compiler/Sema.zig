@@ -240,7 +240,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
     const ast = &module.ast;
 
     const range = ast.node_data[Ast.root_node].sub_range;
-    for (range.start..range.end) |extra_idx| {
+    for (range.extra_start..range.extra_end) |extra_idx| {
         const node_idx = ast.extra_data[extra_idx];
         const token_idx = ast.node_tokens[node_idx];
 
@@ -288,12 +288,14 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
 
 fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: NodeIndex) !void {
     const ast = &sema.modules[module_idx].ast;
-    const fn_def = ast.node_data[node_idx].fn_def;
 
-    const bank: u8 = if (fn_def.bank_attr == Ast.null_node)
+    const fn_def = ast.node_data[node_idx].fn_def;
+    const data = ast.extraData(Ast.Node.FnDefData, fn_def.extra);
+
+    const bank: u8 = if (data.bank_attr == Ast.null_node)
         memory_map.getRealBank(sema.mapping_mode, 0x00)
     else
-        memory_map.getRealBank(sema.mapping_mode, try sema.parseInt(u8, ast, ast.node_tokens[fn_def.bank_attr]));
+        memory_map.getRealBank(sema.mapping_mode, try sema.parseInt(u8, ast, ast.node_tokens[data.bank_attr]));
 
     const fn_token = ast.node_tokens[node_idx];
 
@@ -340,7 +342,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                     .tag = .invalid_vector_bank,
                     .type = .err,
                     .ast = ast,
-                    .token = ast.node_tokens[fn_def.bank_attr],
+                    .token = ast.node_tokens[data.bank_attr],
                     .extra = .{ .bank = .{
                         .fn_name = fn_token + 1,
                         .actual = bank,

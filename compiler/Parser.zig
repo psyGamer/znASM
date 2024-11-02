@@ -7,6 +7,7 @@ const Node = Ast.Node;
 const Error = Ast.Error;
 const TokenIndex = Ast.TokenIndex;
 const NodeIndex = Ast.NodeIndex;
+const ExtraIndex = Ast.ExtraIndex;
 
 const Parser = @This();
 
@@ -41,8 +42,8 @@ const ParseError = error{ParseFailed} || std.mem.Allocator.Error;
 
 /// Root <- ModuleDef (FnDef)*
 pub fn parseRoot(p: *Parser) ParseError!void {
-    const scratch_top = p.scratch.items.len;
-    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+    const tld_start = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(tld_start);
 
     const root = try p.addNode(.{
         .tag = .root,
@@ -53,6 +54,7 @@ pub fn parseRoot(p: *Parser) ParseError!void {
     p.skipNewLines();
     try p.scratch.append(p.allocator, try p.parseModuleDef());
 
+    var doc_start: ?usize = null;
     while (true) {
         const t = p.token_tags[p.index];
         std.log.info("t {}", .{t});
@@ -60,12 +62,33 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             p.index += 1;
             continue;
         }
+        if (t == .doc_comment) {
+            doc_start = doc_start orelse p.scratch.items.len;
+            try p.scratch.append(p.allocator, try p.addNode(.{
+                .tag = .doc_comment,
+                .main_token = p.index,
+                .data = undefined,
+            }));
+            p.index += 1;
+            continue;
+        }
         if (t == .eof) {
             break;
         }
 
+        const doc_comments: Node.SubRange = get_comments: {
+            if (doc_start) |start| {
+                const comments = try p.writeExtraSubRange(p.scratch.items[start..]);
+                p.scratch.shrinkRetainingCapacity(start);
+                doc_start = null;
+                break :get_comments comments;
+            } else {
+                break :get_comments .{ .extra_start = null_node, .extra_end = null_node };
+            }
+        };
+
         // Function Definition
-        const fn_def = try p.parseFnDef();
+        const fn_def = try p.parseFnDef(doc_comments);
         if (fn_def != null_node) {
             try p.scratch.append(p.allocator, fn_def);
             continue;
@@ -78,7 +101,7 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         });
     }
 
-    p.nodes.items(.data)[root] = .{ .sub_range = try p.listToSpan(p.scratch.items[scratch_top..]) };
+    p.nodes.items(.data)[root] = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[tld_start..]) };
 }
 
 /// ModuleDef <- KEYWORD_module IDENTIFIER NEW_LINE
@@ -96,7 +119,7 @@ fn parseModuleDef(self: *Parser) ParseError!NodeIndex {
 }
 
 /// FnDef <- (KEYWORD_pub)? KEYWORD_fn IDENTIFIER LPAREN RPAREN (BankAttr)? (IDENTIFIER)? Block
-fn parseFnDef(p: *Parser) ParseError!NodeIndex {
+fn parseFnDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_fn = p.eatToken(.keyword_fn) orelse return null_node;
     _ = try p.expectToken(.ident);
@@ -112,7 +135,11 @@ fn parseFnDef(p: *Parser) ParseError!NodeIndex {
         .main_token = keyword_fn,
         .data = .{ .fn_def = .{
             .block = block,
-            .bank_attr = bank_attr,
+            .extra = try p.writeExtraData(Ast.Node.FnDefData, .{
+                .bank_attr = bank_attr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
         } },
     });
 }
@@ -193,7 +220,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
     return p.addNode(.{
         .tag = .block,
         .main_token = lbrace,
-        .data = .{ .sub_range = try p.listToSpan(p.scratch.items[scratch_top..]) },
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[scratch_top..]) },
     });
 }
 
@@ -243,12 +270,27 @@ fn addNode(self: *Parser, node: Node) ParseError!NodeIndex {
 }
 
 /// Stores a list of sub-nodes into `extra`
-fn listToSpan(p: *Parser, list: []const NodeIndex) ParseError!Node.SubRange {
-    const start: NodeIndex = @intCast(p.extra_data.items.len);
+fn writeExtraSubRange(p: *Parser, list: []const NodeIndex) ParseError!Node.SubRange {
+    const start: ExtraIndex = @intCast(p.extra_data.items.len);
     try p.extra_data.appendSlice(p.allocator, list);
-    const end: NodeIndex = @intCast(p.extra_data.items.len);
+    const end: ExtraIndex = @intCast(p.extra_data.items.len);
 
-    return .{ .start = start, .end = end };
+    return .{ .extra_start = start, .extra_end = end };
+}
+/// Stores a custom data-type into `extra`
+fn writeExtraData(p: *Parser, comptime T: type, value: T) !ExtraIndex {
+    const fields = std.meta.fields(T);
+
+    const extra_idx = p.extra_data.items.len;
+    try p.extra_data.ensureUnusedCapacity(p.allocator, fields.len);
+    p.extra_data.items.len += fields.len;
+
+    inline for (fields, 0..) |field, i| {
+        comptime std.debug.assert(field.type == NodeIndex);
+        p.extra_data.items[extra_idx + i] = @field(value, field.name);
+    }
+
+    return @intCast(extra_idx);
 }
 
 fn skipNewLines(p: *Parser) void {

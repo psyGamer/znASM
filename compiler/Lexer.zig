@@ -19,6 +19,7 @@ pub const Token = struct {
 
         ident,
         int_literal,
+        doc_comment,
 
         keyword_module,
         keyword_pub,
@@ -34,6 +35,7 @@ pub const Token = struct {
                 .eof,
                 .ident,
                 .int_literal,
+                .doc_comment,
                 => null,
 
                 .colon => ":",
@@ -59,6 +61,7 @@ pub const Token = struct {
                 .new_line => "a new-line",
                 .ident => "an identifier",
                 .int_literal => "a number literal",
+                .doc_comment => "a document comment",
                 else => unreachable,
             };
         }
@@ -98,6 +101,9 @@ pub fn next(lexer: *Lexer) Token {
     const State = enum {
         start,
         ident,
+        slash,
+        comment,
+        doc_comment,
         dec_int,
         hex_int,
         bin_int,
@@ -114,38 +120,21 @@ pub fn next(lexer: *Lexer) Token {
 
     while (true) : (lexer.index += 1) {
         const c = lexer.buffer[lexer.index];
+        if (c == 0) {
+            if (lexer.index != lexer.buffer.len) {
+                token.tag = .invalid;
+                token.loc.start = lexer.index;
+                lexer.index += 1;
+                token.loc.end = lexer.index;
+                return token;
+            }
+            break;
+        }
 
         switch (state) {
             .start => switch (c) {
-                0 => {
-                    if (lexer.index != lexer.buffer.len) {
-                        token.tag = .invalid;
-                        token.loc.start = lexer.index;
-                        lexer.index += 1;
-                        token.loc.end = lexer.index;
-                        return token;
-                    }
-                    break;
-                },
-
                 '/' => {
-                    // Ignore comments
-                    if (lexer.buffer[lexer.index + 1] == '/') {
-                        while (true) : (lexer.index += 1) {
-                            const skip_c = lexer.buffer[lexer.index];
-
-                            if (skip_c == 0 or skip_c == '\n') {
-                                token.loc.start = lexer.index;
-                                lexer.index -= 1;
-                                break;
-                            }
-                        }
-                    } else {
-                        token.tag = .invalid;
-                        token.loc.end = lexer.index;
-                        lexer.index += 1;
-                        return token;
-                    }
+                    state = .slash;
                 },
 
                 ' ', '\t' => {
@@ -234,6 +223,34 @@ pub fn next(lexer: *Lexer) Token {
                     }
                     break;
                 },
+            },
+
+            .slash => switch (c) {
+                '/' => {
+                    state = .comment;
+                },
+                else => break,
+            },
+
+            .comment => switch (c) {
+                '/' => {
+                    state = .doc_comment;
+                },
+                '\n', '\r' => {
+                    token.tag = .new_line;
+                    lexer.index += 1;
+                    break;
+                },
+                else => {},
+            },
+
+            .doc_comment => switch (c) {
+                '\n', '\r' => {
+                    token.tag = .doc_comment;
+                    lexer.index += 1;
+                    break;
+                },
+                else => {},
             },
 
             .dec_int => switch (c) {

@@ -32,7 +32,7 @@ pub fn handleFnDef(anal: *Analyzer, node_idx: NodeIndex) !void {
 
 pub fn handleBlock(anal: *Analyzer, node_idx: NodeIndex) !void {
     const range = anal.ast.node_data[node_idx].sub_range;
-    for (range.start..range.end) |extra_idx| {
+    for (range.extra_start..range.extra_end) |extra_idx| {
         const child_idx = anal.ast.extra_data[extra_idx];
 
         switch (anal.ast.node_tags[child_idx]) {

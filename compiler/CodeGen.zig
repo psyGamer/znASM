@@ -169,6 +169,36 @@ pub fn resolveRelocations(gen: CodeGen) !void {
 
 /// Writes a .mlb symbol file for Mesen2
 pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
+    const WordWrapIter = struct {
+        const max_comment_length = 60;
+
+        line: []const u8,
+        index: usize = 0,
+
+        pub fn next(iter: *@This()) ?[]const u8 {
+            const start = iter.index;
+            const end = @min(iter.line.len, iter.index + max_comment_length);
+
+            var last_valid = start;
+            while (iter.index < end) : (iter.index += 1) {
+                if (iter.index == iter.line.len - 1) {
+                    last_valid = iter.line.len;
+                    break;
+                }
+                if (iter.line[iter.index] == ' ') {
+                    last_valid = iter.index;
+                }
+            }
+
+            if (last_valid == start) {
+                return null;
+            }
+
+            iter.index = last_valid + 1;
+            return iter.line[start..last_valid];
+        }
+    };
+
     const symbols = gen.sema.symbols.items(.sym);
 
     var comments: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -198,18 +228,55 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
                     const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
 
                     for (func.instructions, 0..) |info, info_idx| {
-                        // Find comments
-                        comments.clearRetainingCapacity();
+                        defer {
+                            for (comments.items) |comment| {
+                                gen.allocator.free(comment);
+                            }
+                            comments.clearRetainingCapacity();
+                        }
+
+                        // Document comments
+                        if (info_idx == 0) {
+                            const fn_def = module.ast.node_data[func.node].fn_def;
+                            const data = module.ast.extraData(Ast.Node.FnDefData, fn_def.extra);
+
+                            for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
+                                const node_idx = module.ast.extra_data[extra_idx];
+                                const token_idx = module.ast.node_tokens[node_idx];
+                                std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                                const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
+
+                                if (comments.items.len == 0) {
+                                    try comments.append(gen.allocator, try gen.allocator.dupe(u8, " Documentation:"));
+                                }
+
+                                var iter: WordWrapIter = .{ .line = doc_comment };
+                                while (iter.next()) |line| {
+                                    try comments.append(gen.allocator, try std.fmt.allocPrint(gen.allocator, "   {s}", .{line}));
+                                }
+                            }
+                        }
+
+                        // Regular comments
                         const info_source = module.ast.token_locs[module.ast.node_tokens[info.source]].start;
                         while (src_fbs.pos < info_source) {
                             const line_start = src_fbs.pos;
                             try src_reader.skipUntilDelimiterOrEof('\n');
                             const line_end = src_fbs.pos;
 
-                            const line = std.mem.trim(u8, module.source[line_start..line_end], "\n\r");
-                            const comment_start = std.mem.indexOf(u8, line, "//") orelse continue;
+                            const comment_line = module.source[line_start..line_end];
+                            const comment_start = std.mem.indexOf(u8, comment_line, "//") orelse continue;
+                            const comment = std.mem.trim(u8, comment_line[(comment_start + "//".len)..], " \t\n\r");
 
-                            try comments.append(gen.allocator, line[(comment_start + "//".len)..]);
+                            if (info_idx == 0 and comments.items.len != 0) {
+                                // Separate from doc-comments
+                                try comments.append(gen.allocator, try gen.allocator.dupe(u8, ""));
+                            }
+
+                            var iter: WordWrapIter = .{ .line = comment };
+                            while (iter.next()) |line| {
+                                try comments.append(gen.allocator, try std.fmt.allocPrint(gen.allocator, " {s}", .{line}));
+                            }
                         }
 
                         // Write label

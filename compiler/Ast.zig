@@ -10,6 +10,9 @@ pub const Node = struct {
         /// `main_token` is `identifier` of module name
         module,
 
+        /// `main_token` is the `doc_comment`
+        doc_comment,
+
         /// `data` is `fn_def`
         /// `main_token - 1` is the optional `keyword_pub`
         /// `main_token + 1` is the `identifier` of the name
@@ -49,13 +52,19 @@ pub const Node = struct {
 
         fn_def: struct {
             block: NodeIndex,
-            bank_attr: NodeIndex,
+            extra: ExtraIndex,
         },
     };
 
     pub const SubRange = struct {
-        start: NodeIndex,
-        end: NodeIndex,
+        extra_start: ExtraIndex,
+        extra_end: ExtraIndex,
+    };
+
+    pub const FnDefData = struct {
+        bank_attr: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
     };
 };
 
@@ -83,6 +92,7 @@ pub const Error = struct {
 
 pub const TokenIndex = u32;
 pub const NodeIndex = u32;
+pub const ExtraIndex = u32;
 
 // Token 0 is valid, so use ~0 as null
 pub const null_token: TokenIndex = std.math.maxInt(TokenIndex);
@@ -173,6 +183,16 @@ pub fn deinit(tree: *Ast, allocator: std.mem.Allocator) void {
     tree.token_slice.deinit(allocator);
     tree.node_slice.deinit(allocator);
     allocator.free(tree.errors);
+}
+
+/// Parses the extra data for the specified type
+pub fn extraData(tree: Ast, comptime T: type, extra_idx: usize) T {
+    var result: T = undefined;
+    inline for (std.meta.fields(T), 0..) |field, i| {
+        comptime std.debug.assert(field.type == NodeIndex);
+        @field(result, field.name) = tree.extra_data[extra_idx + i];
+    }
+    return result;
 }
 
 /// Resolves the source data of a token
