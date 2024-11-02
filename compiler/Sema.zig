@@ -12,6 +12,8 @@ const Relocation = @import("CodeGen.zig").Relocation;
 const Ir = @import("ir.zig").Ir;
 const Symbol = symbol.Symbol;
 const SymbolLocation = symbol.SymbolLocation;
+const memory_map = @import("memory_map.zig");
+const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const Sema = @This();
 
 /// Module -> Name -> Symbol
@@ -34,6 +36,8 @@ pub const Error = struct {
         invalid_opcode,
         // Extra: vector
         duplicate_vector,
+        // Extra: bank
+        invalid_vector_bank,
         // Extra: size_type
         undefined_size_mode,
         // Extra: max_bit_size
@@ -51,6 +55,10 @@ pub const Error = struct {
     extra: union {
         none: void,
         vector: std.meta.FieldEnum(InterruptVectors),
+        bank: struct {
+            fn_name: Ast.TokenIndex,
+            actual: u8,
+        },
         size_type: Instruction.SizeType,
         max_bit_size: u16,
     } = .{ .none = {} },
@@ -76,6 +84,7 @@ const InterruptVectors = struct {
 };
 
 modules: []Module,
+mapping_mode: MappingMode,
 
 symbols: std.MultiArrayList(struct { sym: Symbol, loc: SymbolLocation }) = .empty,
 symbol_map: SymbolMap = .empty,
@@ -85,9 +94,10 @@ errors: std.ArrayListUnmanaged(Error) = .empty,
 interrupt_vectors: InterruptVectors = .{},
 allocator: std.mem.Allocator,
 
-pub fn process(allocator: std.mem.Allocator, modules: []Module) !Sema {
+pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: MappingMode) !Sema {
     var sema: Sema = .{
         .modules = modules,
+        .mapping_mode = mapping_mode,
         .allocator = allocator,
     };
 
@@ -203,7 +213,6 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
 }
 
 pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
-    _ = sema; // autofix
     switch (err.tag) {
         .unexpected_top_level_node => return writer.writeAll("Unexpected top level node"),
         .missing_module => return writer.writeAll("Missing module"),
@@ -235,6 +244,24 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
             try tty_config.setColor(writer, .bold);
             try tty_config.setColor(writer, .bright_magenta);
             try writer.print("@{s}", .{@tagName(err.extra.vector)});
+            try tty_config.setColor(writer, .reset);
+        },
+
+        .invalid_vector_bank => {
+            try writer.writeAll("Expected interrupt vector ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.writeAll(err.ast.tokenSource(err.extra.bank.fn_name));
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(" to be located in bank ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.print("${x}", .{memory_map.getRealBank(sema.mapping_mode, 0x00)});
+            try tty_config.setColor(writer, .reset);
+            try writer.writeAll(", but got ");
+            try tty_config.setColor(writer, .bold);
+            try tty_config.setColor(writer, .bright_magenta);
+            try writer.print("${x}", .{err.extra.bank.actual});
             try tty_config.setColor(writer, .reset);
         },
 
@@ -280,7 +307,7 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
 
 const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
 
-fn gatherSymbols(sema: *Sema, module_idx: u32) !void {
+fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
     const module = &sema.modules[module_idx];
     const ast = &module.ast;
 
@@ -339,12 +366,12 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) !void {
     }
 }
 
-fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: NodeIndex) AnalyzeError!void {
+fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: NodeIndex) !void {
     const ast = &sema.modules[module_idx].ast;
     const fn_def = ast.node_data[node_idx].fn_def;
 
     const bank: u8 = if (fn_def.bank_attr == Ast.null_node)
-        0x80
+        memory_map.getRealBank(sema.mapping_mode, 0x00)
     else
         try sema.parseInt(u8, ast, ast.node_tokens[fn_def.bank_attr]);
 
@@ -367,7 +394,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                     .tag = .duplicate_vector,
                     .type = .err,
                     .ast = ast,
-                    .token = fn_token,
+                    .token = fn_token + 1,
                     .extra = .{ .vector = @enumFromInt(i) },
                 });
 
@@ -387,6 +414,20 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                 @field(sema.interrupt_vectors, field.name) = sym_loc;
             }
 
+            // Enforce bank $00
+            if (bank != memory_map.getRealBank(sema.mapping_mode, 0x00)) {
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .invalid_vector_bank,
+                    .type = .err,
+                    .ast = ast,
+                    .token = ast.node_tokens[fn_def.bank_attr],
+                    .extra = .{ .bank = .{
+                        .fn_name = fn_token + 1,
+                        .actual = bank,
+                    } },
+                });
+            }
+
             return;
         }
     }
@@ -397,12 +438,12 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
             .tag = .invalid_vector_name,
             .type = .err,
             .ast = ast,
-            .token = fn_token,
+            .token = fn_token + 1,
         });
     }
 }
 
-fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, func: *Symbol.Function) !void {
+fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, func: *Symbol.Function) AnalyzeError!void {
     var analyzer: @import("sema/FunctionAnalyzer.zig") = .{
         .ast = &sema.modules[module_idx].ast,
         .sema = sema,
@@ -415,6 +456,7 @@ fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex
     for (analyzer.ir.items) |ir| {
         std.log.debug(" - {}", .{ir});
     }
+    func.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
 }
 
 fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {

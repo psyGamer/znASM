@@ -1,5 +1,6 @@
 const std = @import("std");
 const Ast = @import("Ast.zig");
+const Ir = @import("ir.zig").Ir;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
@@ -38,6 +39,8 @@ pub const Symbol = union(enum) {
         /// Memory-mapped target bank
         bank: u8,
 
+        /// Intermediate representation for instructions
+        ir: []const Ir = &.{},
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 } = &.{},
         /// Higher-level instruction data

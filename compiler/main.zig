@@ -141,7 +141,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Run semantic analysis
-    var sema = try Sema.process(allocator, modules.items);
+    var sema = try Sema.process(allocator, modules.items, .lorom);
     defer sema.deinit(allocator);
 
     if (try sema.detectErrors(stderr.writer(), tty_config)) {
