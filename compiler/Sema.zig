@@ -121,7 +121,7 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
         const module_idx: ModuleIndex = @intCast(sema.symbol_map.getIndex(loc.module).?);
         switch (sym.*) {
             .function => sema.analyzeFunction(loc, module_idx, &sym.function) catch |err| switch (err) {
-                error.AnalyzeFailed => {},
+                error.AnalyzeFailed => std.log.err("Failed to analyze function {}", .{loc}),
                 else => |e| return e,
             },
             else => @panic("unsupported"),
@@ -277,7 +277,10 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                 }
 
                 sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx)) catch |err| switch (err) {
-                    error.AnalyzeFailed => continue,
+                    error.AnalyzeFailed => {
+                        std.log.err("Failed to gather symbol of {}", .{sym_loc});
+                        continue;
+                    },
                     else => |e| return e,
                 };
             },

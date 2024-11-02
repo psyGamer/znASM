@@ -148,7 +148,7 @@ pub fn resolveRelocations(gen: CodeGen) !void {
 
             switch (reloc.type) {
                 .rel8 => {
-                    const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset;
+                    const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.size();
                     const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
                     const operand: *[1]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..1];
                     operand.* = @bitCast(rel_offset);

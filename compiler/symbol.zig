@@ -19,6 +19,12 @@ pub const SymbolLocation = struct {
             .name = sym_loc[(separator_idx + separator.len)..],
         };
     }
+
+    pub fn format(value: SymbolLocation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.writeAll(value.module);
+        try writer.writeAll("::");
+        try writer.writeAll(value.name);
+    }
 };
 
 pub const Symbol = union(enum) {

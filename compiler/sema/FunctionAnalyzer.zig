@@ -191,8 +191,8 @@ pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) !void {
                 .ast = anal.ast,
                 .token = anal.ast.node_tokens[ir.node],
             });
+            return error.AnalyzeFailed;
         }
-        return error.AnalyzeFailed;
     }
 
     try anal.ir.append(anal.sema.allocator, .{
