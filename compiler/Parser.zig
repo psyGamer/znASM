@@ -175,12 +175,22 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         }
 
         // Call
-        const call = p.parseCall() catch |err| switch (err) {
+        const call = p.parseCallStatement() catch |err| switch (err) {
             error.ParseFailed => null_node,
             else => |e| return e,
         };
         if (call != null_node) {
             try p.scratch.append(p.allocator, call);
+            continue;
+        }
+
+        // While
+        const @"while" = p.parseWhileStatement() catch |err| switch (err) {
+            error.ParseFailed => null_node,
+            else => |e| return e,
+        };
+        if (@"while" != null_node) {
+            try p.scratch.append(p.allocator, @"while");
             continue;
         }
 
@@ -216,10 +226,42 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Call <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN NEW_LINE
+/// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
+fn parseInstruction(p: *Parser) ParseError!NodeIndex {
+    const start_idx = p.index;
+    errdefer p.index = start_idx;
+
+    const ident_opcode = p.eatToken(.ident) orelse return null_node;
+    _ = p.eatToken(.ident) orelse p.eatToken(.int_literal);
+    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
+
+    return try p.addNode(.{
+        .tag = .instruction,
+        .main_token = ident_opcode,
+        .data = undefined,
+    });
+}
+
+/// Label <- IDENTIFIER COLON NEW_LINE
+fn parseLabel(p: *Parser) ParseError!NodeIndex {
+    const start_idx = p.index;
+    errdefer p.index = start_idx;
+
+    const ident_name = p.eatToken(.ident) orelse return null_node;
+    _ = p.eatToken(.colon) orelse return error.ParseFailed;
+    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
+
+    return try p.addNode(.{
+        .tag = .label,
+        .main_token = ident_name,
+        .data = undefined,
+    });
+}
+
+/// CallStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN NEW_LINE
 ///
 /// ExprList <- (Expr COMMA)* Expr?
-fn parseCall(p: *Parser) ParseError!NodeIndex {
+fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
     const start_idx = p.index;
     errdefer p.index = start_idx;
 
@@ -253,41 +295,9 @@ fn parseCall(p: *Parser) ParseError!NodeIndex {
     _ = try p.expectToken(.new_line);
 
     return p.addNode(.{
-        .tag = .call,
+        .tag = .call_statement,
         .main_token = ident_name,
         .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[expr_start..]) },
-    });
-}
-
-/// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
-fn parseInstruction(p: *Parser) ParseError!NodeIndex {
-    const start_idx = p.index;
-    errdefer p.index = start_idx;
-
-    const ident_opcode = p.eatToken(.ident) orelse return null_node;
-    _ = p.eatToken(.ident) orelse p.eatToken(.int_literal);
-    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
-
-    return try p.addNode(.{
-        .tag = .instruction,
-        .main_token = ident_opcode,
-        .data = undefined,
-    });
-}
-
-/// Label <- IDENTIFIER COLON NEW_LINE
-fn parseLabel(p: *Parser) ParseError!NodeIndex {
-    const start_idx = p.index;
-    errdefer p.index = start_idx;
-
-    const ident_name = p.eatToken(.ident) orelse return null_node;
-    _ = p.eatToken(.colon) orelse return error.ParseFailed;
-    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
-
-    return try p.addNode(.{
-        .tag = .label,
-        .main_token = ident_name,
-        .data = undefined,
     });
 }
 
@@ -302,6 +312,26 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
     }
 
     return null_node;
+}
+
+/// WhiteStatement
+///     <- KEYWORD_while LPAREN KEYWORD_true RPAREN Block
+fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
+    const keyword_while = p.eatToken(.keyword_while) orelse return error.ParseFailed;
+    _ = try p.expectToken(.lparen);
+    _ = try p.expectToken(.keyword_true);
+    _ = try p.expectToken(.rparen);
+
+    const block = try p.parseBlock();
+
+    return try p.addNode(.{
+        .tag = .while_statement,
+        .main_token = keyword_while,
+        .data = .{ .while_statement = .{
+            .condition = null_node,
+            .block = block,
+        } },
+    });
 }
 
 // Helper functions

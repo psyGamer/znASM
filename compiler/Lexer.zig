@@ -25,10 +25,13 @@ pub const Token = struct {
 
         keyword_module,
         keyword_pub,
-        // keyword_var,
-        // keyword_const,
-        // keyword_inline,
         keyword_fn,
+        keyword_true,
+        keyword_false,
+        keyword_if,
+        keyword_else,
+        keyword_do,
+        keyword_while,
 
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
@@ -53,10 +56,13 @@ pub const Token = struct {
 
                 .keyword_module => "module",
                 .keyword_pub => "pub",
-                // .keyword_var => "var",
-                // .keyword_const => "const",
-                // .keyword_inline => "inline",
                 .keyword_fn => "fn",
+                .keyword_true => "true",
+                .keyword_false => "false",
+                .keyword_if => "if",
+                .keyword_else => "else",
+                .keyword_do => "do",
+                .keyword_while => "while",
             };
         }
         pub fn symbol(tag: Tag) []const u8 {
@@ -89,10 +95,13 @@ pub const Token = struct {
     pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{
         .{ "module", .keyword_module },
         .{ "pub", .keyword_pub },
-        // .{ "var", .keyword_var },
-        // .{ "const", .keyword_const },
-        // .{ "inline", .keyword_inline },
         .{ "fn", .keyword_fn },
+        .{ "true", .keyword_true },
+        .{ "false", .keyword_false },
+        .{ "if", .keyword_if },
+        .{ "else", .keyword_else },
+        .{ "do", .keyword_do },
+        .{ "while", .keyword_while },
     });
 
     tag: Tag,

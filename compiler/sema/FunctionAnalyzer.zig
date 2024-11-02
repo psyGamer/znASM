@@ -11,6 +11,7 @@ const Relocation = @import("../CodeGen.zig").Relocation;
 const BuiltinFn = @import("BuiltinFn.zig");
 
 const Analyzer = @This();
+const Error = Sema.AnalyzeError;
 
 ast: *const Ast,
 sema: *Sema,
@@ -20,18 +21,19 @@ sym_loc: SymbolLocation,
 
 ir: std.ArrayListUnmanaged(Ir) = .empty,
 
-// State
-
 /// Size of the A-Register / Memory instructions
 mem_size: Instruction.SizeMode = .none,
 /// Size of the X/Y-Registers
 idx_size: Instruction.SizeMode = .none,
 
-pub fn handleFnDef(anal: *Analyzer, node_idx: NodeIndex) !void {
+// Used to generate unique labels for loops
+while_loops: u16 = 0,
+
+pub fn handleFnDef(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     try anal.handleBlock(anal.ast.node_data[node_idx].fn_def.block);
 }
 
-pub fn handleBlock(anal: *Analyzer, node_idx: NodeIndex) !void {
+pub fn handleBlock(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     const range = anal.ast.node_data[node_idx].sub_range;
     for (range.extra_start..range.extra_end) |extra_idx| {
         const child_idx = anal.ast.extra_data[extra_idx];
@@ -39,13 +41,14 @@ pub fn handleBlock(anal: *Analyzer, node_idx: NodeIndex) !void {
         switch (anal.ast.node_tags[child_idx]) {
             .instruction => try anal.handleInstruction(child_idx),
             .label => try anal.handleLabel(child_idx),
-            .call => try anal.handleCall(child_idx),
+            .call_statement => try anal.handleCall(child_idx),
+            .while_statement => try anal.handleWhile(child_idx),
             else => unreachable,
         }
     }
 }
 
-pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) !void {
+pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     const opcode_name = anal.ast.parseIdentifier(anal.ast.node_tokens[node_idx]);
 
     const opcode = get_opcode: {
@@ -157,7 +160,7 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) !void {
     });
 }
 
-pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) !void {
+pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     const label_token = anal.ast.node_tokens[node_idx];
     const label = anal.ast.parseIdentifier(label_token);
 
@@ -205,12 +208,12 @@ pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) !void {
     }
 
     try anal.ir.append(anal.sema.allocator, .{
-        .tag = .{ .label = label },
+        .tag = .{ .label = try anal.sema.allocator.dupe(u8, label) },
         .node = node_idx,
     });
 }
 
-fn handleCall(anal: *Analyzer, node_idx: NodeIndex) !void {
+fn handleCall(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     const target_ident = anal.ast.node_tokens[node_idx];
     const target_name = anal.ast.tokenSource(target_ident);
 
@@ -246,6 +249,34 @@ fn handleCall(anal: *Analyzer, node_idx: NodeIndex) !void {
         }
     } else {
         // Function / macro call
+        @panic("TODO");
+    }
+}
+
+fn handleWhile(anal: *Analyzer, node_idx: NodeIndex) Error!void {
+    const while_statement = anal.ast.node_data[node_idx].while_statement;
+
+    if (while_statement.condition == Ast.null_node) {
+        // while (true)
+        const loop_label = try std.fmt.allocPrint(anal.sema.allocator, "__while{}_loop", .{anal.while_loops});
+        anal.while_loops += 1;
+
+        try anal.ir.append(anal.sema.allocator, .{
+            .tag = .{ .label = loop_label },
+            .node = node_idx,
+        });
+
+        try anal.handleBlock(while_statement.block);
+
+        try anal.ir.append(anal.sema.allocator, .{
+            .tag = .{ .branch = .{
+                .type = .always,
+                .target = loop_label,
+            } },
+            .node = node_idx,
+        });
+    } else {
+        // Runtime loop condition
         @panic("TODO");
     }
 }

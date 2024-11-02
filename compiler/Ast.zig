@@ -26,7 +26,11 @@ pub const Node = struct {
         block,
 
         /// `main_token` is the `identifier` of the target
-        call,
+        call_statement,
+
+        /// `data` is `while_statement`
+        /// `main_token` is the `keyword_while`
+        while_statement,
 
         /// `main_token` is the `identifier` of the opcode, followed by operands until a `new_line`
         instruction,
@@ -59,6 +63,10 @@ pub const Node = struct {
         fn_def: struct {
             block: NodeIndex,
             extra: ExtraIndex,
+        },
+        while_statement: struct {
+            condition: NodeIndex,
+            block: NodeIndex,
         },
     };
 
