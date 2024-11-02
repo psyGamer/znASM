@@ -12,7 +12,6 @@ const Ir = @import("ir.zig").Ir;
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const memory_map = @import("memory_map.zig");
-const znasm_builtin = @import("builtin.zig");
 const crc32 = @import("util/crc32.zig");
 const CodeGen = @This();
 
@@ -175,14 +174,8 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
     var comments: std.ArrayListUnmanaged([]const u8) = .empty;
     defer comments.deinit(gen.allocator);
 
-    var module_index: usize = 0;
-    for (gen.sema.symbol_map.keys(), gen.sema.symbol_map.values()) |module_name, module_symbols| {
-        if (std.mem.eql(u8, module_name, znasm_builtin.module)) {
-            continue;
-        }
-
+    for (gen.sema.symbol_map.keys(), gen.sema.symbol_map.values(), 0..) |module_name, module_symbols, module_index| {
         const module = gen.sema.modules[module_index];
-        module_index += 1;
 
         var src_fbs = std.io.fixedBufferStream(module.source);
         const src_reader = src_fbs.reader();

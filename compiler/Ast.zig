@@ -212,7 +212,7 @@ pub fn areTokens(tree: Ast, token_idx: TokenIndex, tags: []const Token.Tag) bool
         std.mem.eql(Token.Tag, tree.token_tags[token_idx..(token_idx + tags.len)], tags);
 }
 
-pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, src_file_path: []const u8) !bool {
+pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config) !bool {
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
 
@@ -220,7 +220,7 @@ pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, s
         const token_loc = tree.token_locs[err.token];
         const src_loc = std.zig.findLineColumn(tree.source, token_loc.start);
 
-        const args = .{ src_file_path, src_loc.line + 1, src_loc.column + 1 };
+        const args = .{ tree.source_path, src_loc.line + 1, src_loc.column + 1 };
         switch (err.type) {
             .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", args),
             .warn => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [yellow]warning: ", args),
