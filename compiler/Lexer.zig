@@ -8,6 +8,7 @@ pub const Token = struct {
         new_line,
         eof,
 
+        comma,
         colon,
         semicolon,
         lparen,
@@ -18,6 +19,7 @@ pub const Token = struct {
         rbrace,
 
         ident,
+        builtin_ident,
         int_literal,
         doc_comment,
 
@@ -34,10 +36,12 @@ pub const Token = struct {
                 .new_line,
                 .eof,
                 .ident,
+                .builtin_ident,
                 .int_literal,
                 .doc_comment,
                 => null,
 
+                .comma => ",",
                 .colon => ":",
                 .semicolon => ";",
                 .lparen => "(",
@@ -60,6 +64,7 @@ pub const Token = struct {
                 .invalid => "invalid bytes",
                 .new_line => "a new-line",
                 .ident => "an identifier",
+                .builtin_ident => "a built-in identifier",
                 .int_literal => "a number literal",
                 .doc_comment => "a document comment",
                 else => unreachable,
@@ -151,7 +156,7 @@ pub fn next(lexer: *Lexer) Token {
                     state = .ident;
                 },
                 '@' => {
-                    token.tag = .ident;
+                    token.tag = .builtin_ident;
                     state = .ident;
                 },
 
@@ -166,6 +171,12 @@ pub fn next(lexer: *Lexer) Token {
                 '%' => {
                     token.tag = .int_literal;
                     state = .bin_int;
+                },
+
+                ',' => {
+                    token.tag = .comma;
+                    lexer.index += 1;
+                    break;
                 },
                 ':' => {
                     token.tag = .colon;
@@ -216,7 +227,7 @@ pub fn next(lexer: *Lexer) Token {
             },
 
             .ident => switch (c) {
-                'a'...'z', 'A'...'Z', '_', '0'...'9' => {},
+                'a'...'z', 'A'...'Z', '0'...'9', '_' => {},
                 else => {
                     if (Token.getKeyword(lexer.buffer[token.loc.start..lexer.index])) |tag| {
                         token.tag = tag;

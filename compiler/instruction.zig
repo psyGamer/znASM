@@ -34,6 +34,24 @@ pub const Instruction = union(InstructionType) {
 
     /// Branch Always
     bra: i8,
+    /// Branch Always Long
+    brl: i16,
+    /// Branch if Carry Set
+    bcs: i8,
+    /// Branch if Carry Clear
+    bcc: i8,
+    /// Branch if Overflow Set
+    bvs: i8,
+    /// Branch if Overflow Clear
+    bvc: i8,
+    /// Branch if Equal
+    beq: i8,
+    /// Branch if Not Equal
+    bne: i8,
+    /// Branch if Plus
+    bpl: i8,
+    /// Branch if Minus
+    bmi: i8,
 
     /// Jump
     jmp: u16,
@@ -280,6 +298,15 @@ pub const InstructionType = enum(u8) {
     sbc = 0xE9,
 
     bra = 0x80,
+    brl = 0x82,
+    bcs = 0xB0,
+    bcc = 0x90,
+    bvs = 0x70,
+    bvc = 0x50,
+    beq = 0xF0,
+    bne = 0xD0,
+    bpl = 0x10,
+    bmi = 0x30,
 
     jmp = 0x4C,
     jml = 0x5C,

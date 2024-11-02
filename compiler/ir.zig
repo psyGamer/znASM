@@ -1,6 +1,7 @@
 //! Intermediate representation for program logic
 const Instruction = @import("instruction.zig").Instruction;
 const Relocation = @import("CodeGen.zig").Relocation;
+const BranchRelocation = @import("CodeGen.zig").BranchRelocation;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 
 pub const Ir = struct {
@@ -10,6 +11,7 @@ pub const Ir = struct {
             reloc: ?Relocation,
         },
         label: []const u8,
+        branch: BranchRelocation,
     };
 
     tag: Tag,

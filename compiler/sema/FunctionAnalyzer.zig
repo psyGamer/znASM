@@ -8,6 +8,7 @@ const SymbolLocation = @import("../symbol.zig").SymbolLocation;
 const Instruction = @import("../instruction.zig").Instruction;
 const InstructionType = @import("../instruction.zig").InstructionType;
 const Relocation = @import("../CodeGen.zig").Relocation;
+const BuiltinFn = @import("BuiltinFn.zig");
 
 const Analyzer = @This();
 
@@ -38,6 +39,7 @@ pub fn handleBlock(anal: *Analyzer, node_idx: NodeIndex) !void {
         switch (anal.ast.node_tags[child_idx]) {
             .instruction => try anal.handleInstruction(child_idx),
             .label => try anal.handleLabel(child_idx),
+            .call => try anal.handleCall(child_idx),
             else => unreachable,
         }
     }
@@ -49,7 +51,14 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) !void {
     const opcode = get_opcode: {
         inline for (std.meta.fields(Instruction)) |field| {
             @setEvalBranchQuota(std.meta.fields(InstructionType).len * 1000);
-            const curr_opcode = comptime std.meta.stringToEnum(InstructionType, field.name).?;
+            const curr_opcode: InstructionType = comptime get_tag: {
+                for (std.meta.fields(InstructionType)) |tag| {
+                    if (std.mem.eql(u8, field.name, tag.name)) {
+                        break :get_tag @enumFromInt(tag.value);
+                    }
+                }
+                unreachable;
+            };
             const mnemonic = field.name[0..3];
 
             if (std.mem.eql(u8, mnemonic, opcode_name)) {
@@ -199,4 +208,44 @@ pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) !void {
         .tag = .{ .label = label },
         .node = node_idx,
     });
+}
+
+fn handleCall(anal: *Analyzer, node_idx: NodeIndex) !void {
+    const target_ident = anal.ast.node_tokens[node_idx];
+    const target_name = anal.ast.tokenSource(target_ident);
+
+    const param_range = anal.ast.node_data[node_idx].sub_range;
+    const params = anal.ast.extra_data[param_range.extra_start..param_range.extra_end];
+
+    if (target_name[0] == '@') {
+        // Built-in call
+        if (BuiltinFn.get(target_name)) |builtin| {
+            if (builtin.param_count != params.len) {
+                try anal.sema.errors.append(anal.sema.allocator, .{
+                    .tag = .expected_arguments,
+                    .type = .err,
+                    .ast = anal.ast,
+                    .token = anal.ast.node_tokens[node_idx],
+                    .extra = .{ .arguments = .{
+                        .expected = builtin.param_count,
+                        .actual = @intCast(params.len),
+                    } },
+                });
+                return error.AnalyzeFailed;
+            }
+
+            try builtin.handler_fn(anal, node_idx, params);
+        } else {
+            try anal.sema.errors.append(anal.sema.allocator, .{
+                .tag = .invalid_builtin,
+                .type = .err,
+                .ast = anal.ast,
+                .token = anal.ast.node_tokens[node_idx],
+            });
+            return error.AnalyzeFailed;
+        }
+    } else {
+        // Function / macro call
+        @panic("TODO");
+    }
 }

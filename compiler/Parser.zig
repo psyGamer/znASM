@@ -94,35 +94,31 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
-        return p.fail(.{
-            .tag = .expected_toplevel,
-            .type = .err,
-            .token = p.index,
-        });
+        return p.fail(.expected_toplevel);
     }
 
     p.nodes.items(.data)[root] = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[tld_start..]) };
 }
 
 /// ModuleDef <- KEYWORD_module IDENTIFIER NEW_LINE
-fn parseModuleDef(self: *Parser) ParseError!NodeIndex {
-    _ = try self.expectToken(.keyword_module);
-    const ident = try self.expectToken(.ident);
-    _ = try self.expectToken(.new_line);
+fn parseModuleDef(p: *Parser) ParseError!NodeIndex {
+    _ = try p.expectToken(.keyword_module);
+    const ident = try p.expectToken(.ident);
+    _ = try p.expectToken(.new_line);
 
     // TODO: Verify module name is legal
-    return try self.addNode(.{
+    return try p.addNode(.{
         .tag = .module,
         .main_token = ident,
         .data = undefined,
     });
 }
 
-/// FnDef <- (KEYWORD_pub)? KEYWORD_fn IDENTIFIER LPAREN RPAREN (BankAttr)? (IDENTIFIER)? Block
+/// FnDef <- (KEYWORD_pub)? KEYWORD_fn (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN RPAREN (BankAttr)? (IDENTIFIER)? Block
 fn parseFnDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_fn = p.eatToken(.keyword_fn) orelse return null_node;
-    _ = try p.expectToken(.ident);
+    _ = p.eatToken(.builtin_ident) orelse try p.expectToken(.ident);
     _ = try p.expectToken(.lparen);
     _ = try p.expectToken(.rparen);
     const bank_attr = try p.parseBankAttr();
@@ -178,13 +174,13 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
             break;
         }
 
-        // Expression
-        const expr = p.parseExpr() catch |err| switch (err) {
+        // Call
+        const call = p.parseCall() catch |err| switch (err) {
             error.ParseFailed => null_node,
             else => |e| return e,
         };
-        if (expr != null_node) {
-            try p.scratch.append(p.allocator, expr);
+        if (call != null_node) {
+            try p.scratch.append(p.allocator, call);
             continue;
         }
 
@@ -208,11 +204,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
             continue;
         }
 
-        return p.fail(.{
-            .tag = .expected_expr_instr_label,
-            .type = .err,
-            .token = p.index,
-        });
+        return p.fail(.expected_statement);
     }
     _ = try p.expectToken(.rbrace);
     _ = try p.expectToken(.new_line);
@@ -224,22 +216,59 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Expr <-
-fn parseExpr(self: *Parser) ParseError!NodeIndex {
-    _ = self; // autofix
-    return null_node;
+/// Call <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN NEW_LINE
+///
+/// ExprList <- (Expr COMMA)* Expr?
+fn parseCall(p: *Parser) ParseError!NodeIndex {
+    const start_idx = p.index;
+    errdefer p.index = start_idx;
+
+    const expr_start = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(expr_start);
+
+    const ident_name = p.eatToken(.builtin_ident) orelse p.eatToken(.ident) orelse return error.ParseFailed;
+    _ = p.eatToken(.lparen) orelse return error.ParseFailed;
+    while (true) {
+        if (p.eatToken(.rparen)) |_| break;
+
+        const param = try p.parseExpr();
+        if (param == null_node) {
+            return p.fail(.expected_expr);
+        }
+
+        try p.scratch.append(p.allocator, param);
+
+        switch (p.token_tags[p.index]) {
+            .comma => p.index += 1,
+            .rparen => {
+                p.index += 1;
+                break;
+            },
+            else => {
+                // Likely just a missing comma
+                try p.warn(.expected_comma_after_arg);
+            },
+        }
+    }
+    _ = try p.expectToken(.new_line);
+
+    return p.addNode(.{
+        .tag = .call,
+        .main_token = ident_name,
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[expr_start..]) },
+    });
 }
 
 /// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
-fn parseInstruction(self: *Parser) ParseError!NodeIndex {
-    const start_idx = self.index;
-    errdefer self.index = start_idx;
+fn parseInstruction(p: *Parser) ParseError!NodeIndex {
+    const start_idx = p.index;
+    errdefer p.index = start_idx;
 
-    const ident_opcode = self.eatToken(.ident) orelse return null_node;
-    _ = self.eatToken(.ident) orelse self.eatToken(.int_literal);
-    _ = self.eatToken(.new_line) orelse return error.ParseFailed;
+    const ident_opcode = p.eatToken(.ident) orelse return null_node;
+    _ = p.eatToken(.ident) orelse p.eatToken(.int_literal);
+    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
 
-    return try self.addNode(.{
+    return try p.addNode(.{
         .tag = .instruction,
         .main_token = ident_opcode,
         .data = undefined,
@@ -247,26 +276,39 @@ fn parseInstruction(self: *Parser) ParseError!NodeIndex {
 }
 
 /// Label <- IDENTIFIER COLON NEW_LINE
-fn parseLabel(self: *Parser) ParseError!NodeIndex {
-    const start_idx = self.index;
-    errdefer self.index = start_idx;
+fn parseLabel(p: *Parser) ParseError!NodeIndex {
+    const start_idx = p.index;
+    errdefer p.index = start_idx;
 
-    const ident_name = self.eatToken(.ident) orelse return null_node;
-    _ = self.eatToken(.colon) orelse return error.ParseFailed;
-    _ = self.eatToken(.new_line) orelse return error.ParseFailed;
+    const ident_name = p.eatToken(.ident) orelse return null_node;
+    _ = p.eatToken(.colon) orelse return error.ParseFailed;
+    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
 
-    return try self.addNode(.{
+    return try p.addNode(.{
         .tag = .label,
         .main_token = ident_name,
         .data = undefined,
     });
 }
 
+/// Expr <- (IDENTIFIER)
+fn parseExpr(p: *Parser) ParseError!NodeIndex {
+    if (p.eatToken(.ident)) |ident| {
+        return try p.addNode(.{
+            .tag = .expr_ident,
+            .main_token = ident,
+            .data = undefined,
+        });
+    }
+
+    return null_node;
+}
+
 // Helper functions
 
-fn addNode(self: *Parser, node: Node) ParseError!NodeIndex {
-    try self.nodes.append(self.allocator, node);
-    return @intCast(self.nodes.len - 1);
+fn addNode(p: *Parser, node: Node) ParseError!NodeIndex {
+    try p.nodes.append(p.allocator, node);
+    return @intCast(p.nodes.len - 1);
 }
 
 /// Stores a list of sub-nodes into `extra`
@@ -318,17 +360,41 @@ fn eatToken(p: *Parser, tag: Token.Tag) ?TokenIndex {
 }
 fn expectToken(p: *Parser, tag: Token.Tag) ParseError!TokenIndex {
     if (p.token_tags[p.index] != tag) {
-        return p.fail(.{
+        try p.errors.append(p.allocator, .{
             .tag = .expected_token,
-            .type = .err,
+            .is_note = false,
             .token = p.index,
             .extra = .{ .expected_tag = tag },
         });
+        return error.ParseFailed;
     }
     return p.nextToken();
 }
 
-fn fail(p: *Parser, err: Error) ParseError {
-    try p.errors.append(p.allocator, err);
+/// Reports a fatal error, which doesn't allow for further parsing
+fn fail(p: *Parser, tag: Error.Tag) ParseError {
+    try p.errors.append(p.allocator, .{
+        .tag = tag,
+        .token = p.index,
+        .is_note = false,
+    });
     return error.ParseFailed;
+}
+
+/// Reports an error, while continuing with parsing
+fn warn(p: *Parser, tag: Error.Tag) !void {
+    try p.errors.append(p.allocator, .{
+        .tag = tag,
+        .token = p.index,
+        .is_note = false,
+    });
+}
+
+/// Attaches a note to the previous error
+fn note(p: *Parser, tag: Error.Tag) !void {
+    return p.errMsg(.{
+        .tag = tag,
+        .token = p.index,
+        .is_note = true,
+    });
 }

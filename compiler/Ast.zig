@@ -25,11 +25,17 @@ pub const Node = struct {
         /// `main_token` is the `lbrace`
         block,
 
+        /// `main_token` is the `identifier` of the target
+        call,
+
         /// `main_token` is the `identifier` of the opcode, followed by operands until a `new_line`
         instruction,
 
         /// `main_token` is the `identifier` of the name
         label,
+
+        /// `main_token` is the `identifier` of the expression
+        expr_ident,
     };
 
     tag: Tag,
@@ -72,13 +78,17 @@ pub const Error = struct {
     pub const Tag = enum {
         // Extra: none
         expected_toplevel,
-        expected_expr_instr_label,
+        expected_statement,
+        expected_expr,
+        expected_comma_after_arg,
         // Extra: expected_tag
         expected_token,
     };
 
     tag: Tag,
-    type: enum { err, warn, note },
+
+    /// Notes are associated with the previous error
+    is_note: bool,
 
     /// True if `token` points to the token before the token causing an issue.
     token_is_prev: bool = false,
@@ -201,7 +211,7 @@ pub fn tokenSource(tree: Ast, token_idx: TokenIndex) []const u8 {
 }
 /// Parses the string value of a token
 pub fn parseIdentifier(tree: Ast, token_idx: TokenIndex) []const u8 {
-    std.debug.assert(tree.token_tags[token_idx] == .ident);
+    std.debug.assert(tree.token_tags[token_idx] == .ident or tree.token_tags[token_idx] == .builtin_ident);
     return tree.tokenSource(token_idx);
 }
 /// Parses the int value of an `int_literal`
@@ -241,11 +251,12 @@ pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config) !
         const src_loc = std.zig.findLineColumn(tree.source, token_loc.start);
 
         const args = .{ tree.source_path, src_loc.line + 1, src_loc.column + 1 };
-        switch (err.type) {
-            .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", args),
-            .warn => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [yellow]warning: ", args),
-            .note => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", args),
+        if (err.is_note) {
+            try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", args);
+        } else {
+            try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", args);
         }
+
         try tree.renderError(writer, tty_config, err);
         try writer.writeByte('\n');
 
@@ -277,10 +288,26 @@ pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, er
                 tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
             },
         ),
-        .expected_expr_instr_label => try rich.print(
+        .expected_statement => try rich.print(
             writer,
             tty_config,
-            "Expected [" ++ highlight ++ "]an expression[reset], [" ++ highlight ++ "]an instruction[reset], or [" ++ highlight ++ "]a label[reset], found [" ++ highlight ++ "]{s}",
+            "Expected [" ++ highlight ++ "]a statement[reset], found [" ++ highlight ++ "]{s}",
+            .{
+                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            },
+        ),
+        .expected_expr => try rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]an expression[reset], found [" ++ highlight ++ "]{s}",
+            .{
+                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            },
+        ),
+        .expected_comma_after_arg => try rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]a comma[reset], after an argument, found [" ++ highlight ++ "]{s}",
             .{
                 tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
             },

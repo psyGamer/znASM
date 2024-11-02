@@ -33,6 +33,7 @@ pub const Error = struct {
         missing_reset_vector,
         invalid_vector_name,
         invalid_opcode,
+        invalid_builtin,
         // Extra: vector
         duplicate_vector,
         // Extra: bank
@@ -42,6 +43,10 @@ pub const Error = struct {
         // Extra: max_bit_size
         value_too_large,
         invalid_number,
+        // Extra: arguments
+        expected_arguments,
+        // Extra: expected_token
+        expected_token,
     };
 
     tag: Tag,
@@ -60,6 +65,11 @@ pub const Error = struct {
         },
         size_type: Instruction.SizeType,
         max_bit_size: u16,
+        arguments: struct {
+            expected: u8,
+            actual: u8,
+        },
+        expected_token: Token.Tag,
     } = .{ .none = {} },
 
     pub fn getNotes(err: Error) u32 {
@@ -200,6 +210,7 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
         .missing_reset_vector => return rich.print(writer, tty_config, "Interrupt vector [" ++ highlight ++ "]@emulation_reset [reset]is not defined", .{}),
         .invalid_vector_name => return rich.print(writer, tty_config, "Unknown interrupt vector [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .invalid_opcode => return rich.print(writer, tty_config, "Invalid instruction opcode [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .invalid_builtin => return rich.print(writer, tty_config, "Invalid built-in function [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .existing_sym => return writer.writeAll("Symbol already defined here"),
         .existing_label => return writer.writeAll("Label already defiend here"),
 
@@ -230,10 +241,22 @@ pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, e
             "The value [" ++ highlight ++ "]{s} [reset]is not a valid [" ++ highlight ++ "]{}-bit number",
             .{ err.ast.tokenSource(err.token), err.extra.max_bit_size },
         ),
+
+        .expected_arguments => return rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]{d} argument{s}[reset], found [" ++ highlight ++ "]{d}",
+            .{ err.extra.arguments.expected, if (err.extra.arguments.expected == 1) "" else "s", err.extra.arguments.actual },
+        ),
+
+        .expected_token => return rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+            err.extra.expected_token.symbol(),
+            err.ast.token_tags[err.token].symbol(),
+        }),
     }
 }
 
-const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
+pub const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
 
 fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
     const module = &sema.modules[module_idx];
@@ -419,4 +442,21 @@ pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.T
         });
         return error.AnalyzeFailed;
     };
+}
+
+pub fn expectToken(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, tag: Token.Tag) AnalyzeError!Ast.TokenIndex {
+    const token_idx = ast.node_tokens[node_idx];
+
+    if (ast.token_tags[token_idx] != tag) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .expected_token,
+            .type = .err,
+            .ast = ast,
+            .token = token_idx,
+            .extra = .{ .expected_token = tag },
+        });
+        return error.AnalyzeFailed;
+    }
+
+    return token_idx;
 }

@@ -34,9 +34,17 @@ pub const Relocation = struct {
     target_offset: u16,
 };
 /// Branches need to be relocated to point to their label and use the short / long form
-const BranchRelocation = struct {
+pub const BranchRelocation = struct {
     pub const Type = enum {
         always,
+        carry_set,
+        carry_clear,
+        overflow_set,
+        overflow_clear,
+        equal,
+        not_equal,
+        plus,
+        minus,
     };
 
     type: Type,
@@ -81,6 +89,7 @@ pub fn generate(gen: *CodeGen) !void {
         };
         try builder.build();
 
+        try builder.resolveBranchRelocs();
         sym.function.assembly_data = try builder.genereateAssemblyData();
         try builder.fixLabelRelocs();
         sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
@@ -458,6 +467,7 @@ const FunctionBuilder = struct {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
                 .label => try b.handleLabel(ir),
+                .branch => try b.handleBranch(ir),
             }
         }
     }
@@ -479,6 +489,20 @@ const FunctionBuilder = struct {
     }
     fn handleLabel(b: *FunctionBuilder, ir: Ir) !void {
         try b.labels.put(b.codegen.allocator, ir.tag.label, @intCast(b.instructions.items.len));
+    }
+    fn handleBranch(b: *FunctionBuilder, ir: Ir) !void {
+        try b.instructions.append(b.codegen.allocator, .{
+            .instr = undefined,
+            .offset = undefined,
+
+            .reloc = null,
+            .branch_reloc = ir.tag.branch,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
     }
 
     /// Generates the raw assembly bytes for all instructions
@@ -520,6 +544,172 @@ const FunctionBuilder = struct {
                         @intCast(b.symbol.assembly_data.len)
                     else
                         b.instructions.items[instr_index].offset;
+                }
+            }
+        }
+    }
+
+    /// Resolves branch locations into a short / long form
+    fn resolveBranchRelocs(b: *FunctionBuilder) !void {
+        // Relative offsets to the target instruction to determine short- / long-form
+        var reloc_offsets: std.AutoArrayHashMapUnmanaged(usize, i32) = .{};
+        defer reloc_offsets.deinit(b.codegen.allocator);
+
+        for (b.instructions.items, 0..) |info, i| {
+            if (info.branch_reloc != null) {
+                // Default to long-form, lower to short-form later
+                try reloc_offsets.put(b.codegen.allocator, i, std.math.maxInt(i32));
+            }
+        }
+
+        const short_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
+            .always = comptime Instruction.bra.size(),
+            .carry_set = comptime Instruction.bcs.size(),
+            .carry_clear = comptime Instruction.bcc.size(),
+            .overflow_set = comptime Instruction.bvs.size(),
+            .overflow_clear = comptime Instruction.bvc.size(),
+            .equal = comptime Instruction.beq.size(),
+            .not_equal = comptime Instruction.bne.size(),
+            .plus = comptime Instruction.bpl.size(),
+            .minus = comptime Instruction.bmi.size(),
+        });
+        const long_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
+            .always = comptime Instruction.jmp.size(),
+            .carry_set = comptime Instruction.bcc.size() + Instruction.jmp.size(),
+            .carry_clear = comptime Instruction.bcs.size() + Instruction.jmp.size(),
+            .overflow_set = comptime Instruction.bvc.size() + Instruction.jmp.size(),
+            .overflow_clear = comptime Instruction.bvs.size() + Instruction.jmp.size(),
+            .equal = comptime Instruction.bne.size() + Instruction.jmp.size(),
+            .not_equal = comptime Instruction.beq.size() + Instruction.jmp.size(),
+            .plus = comptime Instruction.bmi.size() + Instruction.jmp.size(),
+            .minus = comptime Instruction.bpl.size() + Instruction.jmp.size(),
+        });
+
+        // Interativly lower to short-form
+        var changed = true;
+        while (changed) {
+            changed = false;
+
+            for (reloc_offsets.keys(), reloc_offsets.values()) |source_idx, *relative_offset| {
+                // If its's already short, don't mark this as a change, but still recalculate the offset
+                const already_short = relative_offset.* >= std.math.minInt(i8) and relative_offset.* <= std.math.maxInt(i8);
+
+                const reloc = b.instructions.items[source_idx].branch_reloc.?;
+                const target_idx = b.labels.get(reloc.target).?;
+
+                // Calculate offset to target
+                const min = @min(source_idx + 1, target_idx);
+                const max = @max(source_idx + 1, target_idx);
+
+                relative_offset.* = 0;
+                for (b.instructions.items[min..max], min..max) |info, i| {
+                    if (info.branch_reloc) |other_reloc| {
+                        const other_offset = reloc_offsets.get(i).?;
+
+                        if (other_offset >= std.math.minInt(i8) and other_offset <= std.math.maxInt(i8)) {
+                            relative_offset.* += short_sizes.get(other_reloc.type);
+                        } else {
+                            relative_offset.* += long_sizes.get(other_reloc.type);
+                        }
+                    } else {
+                        relative_offset.* += info.instr.size();
+                    }
+                }
+                if (target_idx <= source_idx) {
+                    relative_offset.* = -relative_offset.*;
+                }
+
+                if (!already_short and relative_offset.* >= std.math.minInt(i8) and relative_offset.* <= std.math.maxInt(i8)) {
+                    changed = true;
+                }
+            }
+        }
+
+        // Calculate target offsets (for jumps)
+        var target_offsets: std.AutoArrayHashMapUnmanaged(usize, u16) = .{};
+        defer target_offsets.deinit(b.codegen.allocator);
+
+        for (reloc_offsets.keys()) |source_idx| {
+            const reloc = b.instructions.items[source_idx].branch_reloc.?;
+            const target_idx = b.labels.get(reloc.target).?;
+
+            var offset: usize = 0;
+            for (b.instructions.items[0..target_idx], 0..) |info, i| {
+                if (info.branch_reloc) |other_reloc| {
+                    const other_offset = reloc_offsets.get(i).?;
+
+                    if (other_offset >= std.math.minInt(i8) and other_offset <= std.math.maxInt(i8)) {
+                        offset += short_sizes.get(other_reloc.type);
+                    } else {
+                        offset += long_sizes.get(other_reloc.type);
+                    }
+                } else {
+                    offset += info.instr.size();
+                }
+            }
+
+            try target_offsets.put(b.codegen.allocator, source_idx, @intCast(offset));
+        }
+
+        // Insert instructions (reversed to avoid shifting following indices)
+        var it = std.mem.reverseIterator(reloc_offsets.keys());
+
+        while (it.next()) |source_idx| {
+            const info = &b.instructions.items[source_idx];
+            const reloc = info.branch_reloc.?;
+
+            const relative_offset = reloc_offsets.get(source_idx).?;
+            const target_offset = target_offsets.get(source_idx).?;
+
+            const use_short = relative_offset >= std.math.minInt(i8) and relative_offset <= std.math.maxInt(i8);
+
+            if (use_short) {
+                info.instr = switch (reloc.type) {
+                    .always => .{ .bra = @intCast(relative_offset) },
+                    .carry_set => .{ .bcs = @intCast(relative_offset) },
+                    .carry_clear => .{ .bcc = @intCast(relative_offset) },
+                    .overflow_set => .{ .bvs = @intCast(relative_offset) },
+                    .overflow_clear => .{ .bvc = @intCast(relative_offset) },
+                    .equal => .{ .beq = @intCast(relative_offset) },
+                    .not_equal => .{ .bne = @intCast(relative_offset) },
+                    .plus => .{ .bpl = @intCast(relative_offset) },
+                    .minus => .{ .bmi = @intCast(relative_offset) },
+                };
+            } else {
+                const jmp_size = comptime InstructionType.jmp.size();
+                info.instr = switch (reloc.type) {
+                    .always => .{ .jmp = undefined },
+                    .carry_set => .{ .bcc = jmp_size },
+                    .carry_clear => .{ .bcs = jmp_size },
+                    .overflow_set => .{ .bvc = jmp_size },
+                    .overflow_clear => .{ .bvs = jmp_size },
+                    .equal => .{ .bne = jmp_size },
+                    .not_equal => .{ .beq = jmp_size },
+                    .plus => .{ .bmi = jmp_size },
+                    .minus => .{ .bpl = jmp_size },
+                };
+
+                const jmp_reloc: Relocation = .{
+                    .type = .addr16,
+                    .target_sym = b.symbol_location,
+                    .target_offset = target_offset,
+                };
+
+                if (reloc.type == .always) {
+                    info.reloc = jmp_reloc;
+                } else {
+                    try b.instructions.insert(b.codegen.allocator, source_idx + 1, .{
+                        .instr = .{ .jmp = undefined },
+                        .offset = undefined,
+
+                        .reloc = jmp_reloc,
+                        .branch_reloc = null,
+
+                        .mem_size = info.mem_size,
+                        .idx_size = info.idx_size,
+
+                        .source = info.source,
+                    });
                 }
             }
         }
