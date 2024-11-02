@@ -1,5 +1,5 @@
 const std = @import("std");
-const log = @import("logging.zig");
+const rich = @import("util/rich.zig");
 const InstructionType = @import("instruction.zig").InstructionType;
 
 pub const Node = struct {
@@ -212,7 +212,7 @@ pub fn areTokens(tree: Ast, token_idx: TokenIndex, tags: []const Token.Tag) bool
         std.mem.eql(Token.Tag, tree.token_tags[token_idx..(token_idx + tags.len)], tags);
 }
 
-pub fn detectErrors(tree: Ast, writer: std.fs.File.Writer, tty_config: std.io.tty.Config, src_file_path: []const u8) !bool {
+pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, src_file_path: []const u8) !bool {
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
 
@@ -220,24 +220,12 @@ pub fn detectErrors(tree: Ast, writer: std.fs.File.Writer, tty_config: std.io.tt
         const token_loc = tree.token_locs[err.token];
         const src_loc = std.zig.findLineColumn(tree.source, token_loc.start);
 
-        try tty_config.setColor(writer, .bold);
-        try writer.print("{s}:{}:{}: ", .{ src_file_path, src_loc.line + 1, src_loc.column + 1 });
-
+        const args = .{ src_file_path, src_loc.line + 1, src_loc.column + 1 };
         switch (err.type) {
-            .err => {
-                try tty_config.setColor(writer, .red);
-                try writer.writeAll("error: ");
-            },
-            .warn => {
-                try tty_config.setColor(writer, .yellow);
-                try writer.writeAll("warning: ");
-            },
-            .note => {
-                try tty_config.setColor(writer, .cyan);
-                try writer.writeAll("note: ");
-            },
+            .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", args),
+            .warn => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [yellow]warning: ", args),
+            .note => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", args),
         }
-        try tty_config.setColor(writer, .reset);
         try tree.renderError(writer, tty_config, err);
         try writer.writeByte('\n');
 
@@ -258,80 +246,34 @@ pub fn detectErrors(tree: Ast, writer: std.fs.File.Writer, tty_config: std.io.tt
 }
 
 pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
+    const highlight = "bold bright_magenta";
+
     switch (err.tag) {
-        .expected_toplevel => {
-            try writer.writeAll("Expected ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll("a top-level definition");
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(", found ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol());
-            try tty_config.setColor(writer, .reset);
-        },
-        .expected_expr_instr_label => {
-            try writer.writeAll("Expected ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll("expression");
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(", ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll("instruction");
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(", or ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll("label");
-            try tty_config.setColor(writer, .reset);
-        },
+        .expected_toplevel => try rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]a top-level definition[reset], found [" ++ highlight ++ "]{s}",
+            .{
+                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            },
+        ),
+        .expected_expr_instr_label => try rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]an expression[reset], [" ++ highlight ++ "]an instruction[reset], or [" ++ highlight ++ "]a label[reset], found [" ++ highlight ++ "]{s}",
+            .{
+                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            },
+        ),
 
-        .expected_token => {
-            try writer.writeAll("Expected ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(err.extra.expected_tag.symbol());
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(", found ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol());
-            try tty_config.setColor(writer, .reset);
-        },
-    }
-}
-
-const TestNode = struct {
-    tag: Node.Tag,
-    children: []const @This() = &.{},
-};
-fn testAst(source: [:0]const u8, expected_tree: TestNode) !void {
-    const ast = try parse(std.testing.allocator, source, "");
-    defer ast.deinit(std.testing.allocator);
-
-    // Should not contain any errors
-    if (ast.errors.len != 0) {
-        for (ast.errors) |err| {
-            const writer = log.startLog(.err, .default);
-            try ast.renderError(err, writer);
-            log.endLog();
-        }
-        return error.TestExpectedEqual;
-    }
-
-    return expectNodeEquals(ast, expected_tree, ast.nodes[0]);
-}
-fn expectNodeEquals(ast: Ast, expected: TestNode, actual: Node) !void {
-    if (expected.children.len != actual.children.items.len) {
-        return error.TestExpectedEqual;
-    }
-
-    try std.testing.expectEqualDeep(expected.tag, actual.tag);
-
-    for (expected.children, actual.children.items) |expected_child, actual_child| {
-        try expectNodeEquals(ast, expected_child, ast.nodes[actual_child]);
+        .expected_token => try rich.print(
+            writer,
+            tty_config,
+            "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}",
+            .{
+                err.extra.expected_tag.symbol(),
+                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            },
+        ),
     }
 }

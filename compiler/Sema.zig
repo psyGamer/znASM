@@ -1,5 +1,7 @@
 const std = @import("std");
 const symbol = @import("symbol.zig");
+const memory_map = @import("memory_map.zig");
+const rich = @import("util/rich.zig");
 
 const Token = @import("Lexer.zig").Token;
 const Ast = @import("Ast.zig");
@@ -12,7 +14,6 @@ const Relocation = @import("CodeGen.zig").Relocation;
 const Ir = @import("ir.zig").Ir;
 const Symbol = symbol.Symbol;
 const SymbolLocation = symbol.SymbolLocation;
-const memory_map = @import("memory_map.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const Sema = @This();
 
@@ -25,8 +26,6 @@ pub const ModuleIndex = u32;
 pub const Error = struct {
     pub const Tag = enum {
         // Extra: node
-        unexpected_top_level_node,
-        missing_module,
         duplicate_symbol,
         duplicate_label,
         existing_sym,
@@ -158,24 +157,13 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
             const token_loc = err.ast.token_locs[err.token];
             const src_loc = std.zig.findLineColumn(err.ast.source, token_loc.start);
 
-            try tty_config.setColor(writer, .bold);
-            try writer.print("{s}:{}:{}: ", .{ err.ast.source_path, src_loc.line + 1, src_loc.column + 1 });
-
+            const args = .{ err.ast.source_path, src_loc.line + 1, src_loc.column + 1 };
             switch (err.type) {
-                .err => {
-                    try tty_config.setColor(writer, .red);
-                    try writer.writeAll("error: ");
-                },
-                .warn => {
-                    try tty_config.setColor(writer, .yellow);
-                    try writer.writeAll("warning: ");
-                },
-                .note => {
-                    try tty_config.setColor(writer, .cyan);
-                    try writer.writeAll("note: ");
-                },
+                .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", args),
+                .warn => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [yellow]warning: ", args),
+                .note => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", args),
             }
-            try tty_config.setColor(writer, .reset);
+
             try sema.renderError(writer, tty_config, err);
             try writer.writeByte('\n');
 
@@ -190,20 +178,11 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
             try writer.writeByte('\n');
         } else {
             switch (err.type) {
-                .err => {
-                    try tty_config.setColor(writer, .red);
-                    try writer.writeAll("error: ");
-                },
-                .warn => {
-                    try tty_config.setColor(writer, .yellow);
-                    try writer.writeAll("warning: ");
-                },
-                .note => {
-                    try tty_config.setColor(writer, .cyan);
-                    try writer.writeAll("note: ");
-                },
+                .err => try rich.print(writer, tty_config, "[bold red]error: ", .{}),
+                .warn => try rich.print(writer, tty_config, "[bold yellow]warning: ", .{}),
+                .note => try rich.print(writer, tty_config, "[bold cyan] note: ", .{}),
             }
-            try tty_config.setColor(writer, .reset);
+
             try sema.renderError(writer, tty_config, err);
             try writer.writeByte('\n');
         }
@@ -213,95 +192,44 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
 }
 
 pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
+    const highlight = "bold bright_magenta";
+
     switch (err.tag) {
-        .unexpected_top_level_node => return writer.writeAll("Unexpected top level node"),
-        .missing_module => return writer.writeAll("Missing module"),
-        .duplicate_symbol => return writer.writeAll("Found duplicate symbol"),
-        .duplicate_label => return writer.writeAll("Found duplicate label"),
-        .missing_reset_vector => {
-            try writer.writeAll("Interrupt vector ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll("@emulation_reset");
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(" is not defined");
-        },
-        .invalid_vector_name => {
-            try writer.writeAll("Unknown interrupt vector ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(err.ast.tokenSource(err.token));
-            try tty_config.setColor(writer, .reset);
-        },
-        .invalid_opcode => {
-            try writer.writeAll("Invalid instruction opcode");
-        },
-        .existing_sym => try writer.writeAll("Symbol already declarded here"),
-        .existing_label => try writer.writeAll("Label already declarded here"),
+        .duplicate_symbol => return rich.print(writer, tty_config, "Found duplicate symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .duplicate_label => return rich.print(writer, tty_config, "Found duplicate label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .missing_reset_vector => return rich.print(writer, tty_config, "Interrupt vector [" ++ highlight ++ "]@emulation_reset [reset]is not defined", .{}),
+        .invalid_vector_name => return rich.print(writer, tty_config, "Unknown interrupt vector [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .invalid_opcode => return rich.print(writer, tty_config, "Invalid instruction opcode [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .existing_sym => return writer.writeAll("Symbol already defined here"),
+        .existing_label => return writer.writeAll("Label already defiend here"),
 
-        .duplicate_vector => {
-            try writer.writeAll("Duplicate interrupt vector ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.print("@{s}", .{@tagName(err.extra.vector)});
-            try tty_config.setColor(writer, .reset);
-        },
+        .duplicate_vector => return rich.print(writer, tty_config, "Found duplicate interrupt vector [" ++ highlight ++ "]{s}", .{@tagName(err.extra.vector)}),
 
-        .invalid_vector_bank => {
-            try writer.writeAll("Expected interrupt vector ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(err.ast.tokenSource(err.extra.bank.fn_name));
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(" to be located in bank ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.print("${x}", .{memory_map.getRealBank(sema.mapping_mode, 0x00)});
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(", but got ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.print("${x}", .{err.extra.bank.actual});
-            try tty_config.setColor(writer, .reset);
-        },
+        .invalid_vector_bank => return rich.print(
+            writer,
+            tty_config,
+            "Expected interrupt vector [" ++ highlight ++ "]{s} [reset]to be located in bank [" ++ highlight ++ "]${x}[reset], but got [" ++ highlight ++ "]${x}",
+            .{ err.ast.tokenSource(err.extra.bank.fn_name), memory_map.getRealBank(sema.mapping_mode, 0x00), err.extra.bank.actual },
+        ),
 
-        .undefined_size_mode => {
-            try writer.writeAll("Size-mode is undefiend for ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(switch (err.extra.size_type) {
-                .none => unreachable,
-                .mem => "A-Register / Memory access",
-                .idx => "X/Y-Registers",
-            });
-            try tty_config.setColor(writer, .reset);
-        },
+        .undefined_size_mode => return rich.print(writer, tty_config, "Size-mode is undefined for [" ++ highlight ++ "]{s}", .{switch (err.extra.size_type) {
+            .none => unreachable,
+            .mem => "A-Register / Memory access",
+            .idx => "X/Y-Registers",
+        }}),
 
-        .value_too_large => {
-            try writer.writeAll("The value of ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(err.ast.tokenSource(err.token));
-            if (err.ast.parseIntLiteral(u64, err.token)) |value| {
-                try writer.print(" ({})", .{value});
-            } else |_| {}
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(" is too large to fit into a ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.print("{}-bit number", .{err.extra.max_bit_size});
-        },
-        .invalid_number => {
-            try writer.writeAll("The value of ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.writeAll(err.ast.tokenSource(err.token));
-            try tty_config.setColor(writer, .reset);
-            try writer.writeAll(" is not a valid ");
-            try tty_config.setColor(writer, .bold);
-            try tty_config.setColor(writer, .bright_magenta);
-            try writer.print("{}-bit number", .{err.extra.max_bit_size});
-        },
+        .value_too_large => return rich.print(
+            writer,
+            tty_config,
+            "The value [" ++ highlight ++ "]{!} [reset]is too large to fit into a [" ++ highlight ++ "]{}-bit number",
+            .{ err.ast.parseIntLiteral(u64, err.token), err.extra.max_bit_size },
+        ),
+        .invalid_number => return rich.print(
+            writer,
+            tty_config,
+            "The value [" ++ highlight ++ "]{s} [reset]is not a valid [" ++ highlight ++ "]{}-bit number",
+            .{ err.ast.tokenSource(err.token), err.extra.max_bit_size },
+        ),
     }
 }
 
@@ -331,7 +259,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                         .tag = .duplicate_symbol,
                         .type = .err,
                         .ast = ast,
-                        .token = token_idx,
+                        .token = token_idx + 1,
                     });
                     try sema.errors.append(sema.allocator, .{
                         .tag = .existing_sym,
@@ -353,15 +281,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                     else => |e| return e,
                 };
             },
-            else => {
-                try sema.errors.append(sema.allocator, .{
-                    .tag = .unexpected_top_level_node,
-                    .type = .err,
-                    .ast = ast,
-                    .token = token_idx,
-                });
-                return;
-            },
+            else => unreachable,
         }
     }
 }
@@ -373,7 +293,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
     const bank: u8 = if (fn_def.bank_attr == Ast.null_node)
         memory_map.getRealBank(sema.mapping_mode, 0x00)
     else
-        try sema.parseInt(u8, ast, ast.node_tokens[fn_def.bank_attr]);
+        memory_map.getRealBank(sema.mapping_mode, try sema.parseInt(u8, ast, ast.node_tokens[fn_def.bank_attr]));
 
     const fn_token = ast.node_tokens[node_idx];
 
