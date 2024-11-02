@@ -1,4 +1,8 @@
 const std = @import("std");
+const memory_map = @import("memory_map.zig");
+const crc32 = @import("util/crc32.zig");
+const rich = @import("util/rich.zig");
+
 const Ast = @import("Ast.zig");
 const Node = Ast.Node;
 const NodeIndex = Ast.NodeIndex;
@@ -11,8 +15,6 @@ const InstructionType = @import("instruction.zig").InstructionType;
 const Ir = @import("ir.zig").Ir;
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
-const memory_map = @import("memory_map.zig");
-const crc32 = @import("util/crc32.zig");
 const CodeGen = @This();
 
 /// A relocatoion indicates that this instruction has an operand to another symbol,
@@ -133,8 +135,13 @@ pub fn allocateBanks(gen: CodeGen) ![]const Rom.BankData {
 }
 
 /// Resolves relocation of instructions
-pub fn resolveRelocations(gen: CodeGen) !void {
-    for (gen.sema.symbols.items(.sym)) |*sym| {
+/// Returns whether the operation was successful
+pub fn resolveRelocations(gen: CodeGen) !bool {
+    const highlight = "bold bright_magenta";
+    var has_errors = false;
+
+    const symbols = gen.sema.symbols.slice();
+    for (symbols.items(.sym), symbols.items(.loc)) |*sym, loc| {
         if (sym.* != .function) {
             continue;
         }
@@ -149,11 +156,22 @@ pub fn resolveRelocations(gen: CodeGen) !void {
             switch (reloc.type) {
                 .rel8 => {
                     const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.size();
-                    const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
+                    const offset = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr));
+                    if (offset < std.math.minInt(i8) or offset > std.math.maxInt(i8)) {
+                        try gen.reportLinkerError(info, loc, "Offset [" ++ highlight ++ "]{}[reset] is does not fit into a [" ++ highlight ++ "]signed 8-bit number", .{offset});
+                        has_errors = true;
+                        continue;
+                    }
+                    const rel_offset: i8 = @intCast(offset);
                     const operand: *[1]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..1];
                     operand.* = @bitCast(rel_offset);
                 },
                 .addr16 => {
+                    if (memory_map.getRealBank(gen.mapping_mode, @intCast(target_addr >> 16)) != func.bank) {
+                        try gen.reportLinkerError(info, loc, "Target address [" ++ highlight ++ "]${x:0>6}[reset] is not in the same bank as the calling code ([" ++ highlight ++ "]${x:0>2}[reset]) ", .{ target_addr, func.bank });
+                        has_errors = true;
+                        continue;
+                    }
                     const absolute_addr: u16 = @truncate(target_addr);
                     const operand: *[2]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..2];
                     operand.* = @bitCast(absolute_addr);
@@ -165,6 +183,45 @@ pub fn resolveRelocations(gen: CodeGen) !void {
             }
         }
     }
+
+    return !has_errors;
+}
+
+/// Reports a linker error
+/// This doesn't use the error style, like in Ast/Sema, since the linker is just relocations
+fn reportLinkerError(gen: CodeGen, info: InstructionInfo, sym_loc: SymbolLocation, comptime fmt: []const u8, args: anytype) !void {
+    const module = get_module: {
+        for (gen.sema.modules) |module| {
+            if (std.mem.eql(u8, module.name.?, sym_loc.module)) {
+                break :get_module module;
+            }
+        }
+        unreachable;
+    };
+
+    const stderr = std.io.getStdErr();
+    const tty_config = std.io.tty.detectConfig(stderr);
+    const writer = stderr.writer();
+
+    const token_idx = module.ast.node_tokens[info.source];
+    const token_loc = module.ast.token_locs[token_idx];
+    const src_loc = std.zig.findLineColumn(module.source, token_loc.start);
+
+    try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", .{ module.source_path, src_loc.line + 1, src_loc.column + 1 });
+    try rich.print(writer, tty_config, fmt, args);
+    try writer.writeByte('\n');
+
+    try writer.writeAll(src_loc.source_line);
+    try writer.writeByte('\n');
+
+    try tty_config.setColor(writer, .green);
+    try writer.writeByteNTimes(' ', src_loc.column);
+    try writer.writeByte('^');
+    try writer.writeByteNTimes('~', token_loc.end -| token_loc.start -| 1);
+    try tty_config.setColor(writer, .reset);
+
+    try writer.writeByte('\n');
+    try writer.writeByte('\n');
 }
 
 /// Writes a .mlb symbol file for Mesen2

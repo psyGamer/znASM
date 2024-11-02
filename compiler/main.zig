@@ -162,7 +162,9 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     try codegen.generate();
 
     try codegen.generateBanks();
-    try codegen.resolveRelocations();
+    if (try codegen.resolveRelocations() == false) {
+        return 1;
+    }
 
     const banks = try codegen.allocateBanks();
 
