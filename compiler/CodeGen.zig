@@ -26,30 +26,31 @@ pub fn generate(gen: *CodeGen) !void {
     for (gen.sema.modules) |module| {
         const module_symbols = gen.sema.symbol_map.get(module.name.?).?;
         for (module_symbols.keys(), module_symbols.values()) |name, sym_idx| {
+            _ = name; // autofix
             const sym = &symbols[sym_idx];
             if (sym.* != .function) {
                 continue;
             }
 
-            var builder: FunctionBuilder = .{
-                .codegen = gen,
-                .module = module,
-                .symbol = sym.function,
-                .symbol_name = name,
-            };
-            try builder.build();
+            // var builder: FunctionBuilder = .{
+            //     .codegen = gen,
+            //     .module = module,
+            //     .symbol = sym.function,
+            //     .symbol_name = name,
+            // };
+            // try builder.build();
 
-            sym.function.bank = memory_map.getRealBank(gen.mapping_mode, builder.target_bank);
-            std.log.info("bank {}", .{sym.function.bank});
-            sym.function.assembly_data = try builder.genereateAssemblyData();
-            try builder.fixLabelRelocs();
-            sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
+            // sym.function.bank = memory_map.getRealBank(gen.mapping_mode, builder.target_bank);
+            // std.log.info("bank {}", .{sym.function.bank});
+            // sym.function.assembly_data = try builder.genereateAssemblyData();
+            // try builder.fixLabelRelocs();
+            // sym.function.instructions = try builder.instructions.toOwnedSlice(gen.allocator);
 
-            const labels = try gen.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
-            for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
-                label.* = .{ label_name, index };
-            }
-            sym.function.labels = labels;
+            // const labels = try gen.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
+            // for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
+            //     label.* = .{ label_name, index };
+            // }
+            // sym.function.labels = labels;
         }
     }
 }
@@ -110,6 +111,17 @@ pub fn resolveRelocations(gen: CodeGen) !void {
             const target_addr = gen.symbolLocation(reloc.target_sym) + reloc.target_offset;
 
             switch (reloc.type) {
+                .rel8 => {
+                    const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset;
+                    const rel_offset: i8 = @intCast(@as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr)));
+                    const operand: *[1]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(rel_offset);
+                },
+                .addr16 => {
+                    const absolute_addr: u16 = @truncate(target_addr);
+                    const operand: *[2]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..2];
+                    operand.* = @bitCast(absolute_addr);
+                },
                 .addr24 => {
                     const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(InstructionType))..][0..3];
                     operand.* = @bitCast(target_addr);
@@ -276,6 +288,10 @@ pub const Label = u16;
 /// which needs to be fixed after emitting the data into ROM
 pub const Relocation = struct {
     pub const Type = enum {
+        /// Relative 8-bit offset to the symbol
+        rel8,
+        /// 16-bit Absolute address of the symbol
+        addr16,
         /// 24-bit Long address of the symbol
         addr24,
     };
@@ -481,18 +497,18 @@ const FunctionBuilder = struct {
         const data_writer = data.writer(b.codegen.allocator);
 
         for (b.instructions.items) |*info| {
-            const target_register = info.instr.target_register();
-            const register_size = switch (target_register) {
+            const size_type = info.instr.size_type();
+            const size_mode = switch (size_type) {
                 .none => .none,
                 .a => info.a_size,
                 .x, .y => info.xy_size,
             };
-            if (target_register != .none) {
-                std.debug.assert(register_size != .none);
+            if (size_type != .none) {
+                std.debug.assert(size_mode != .none);
             }
 
             info.offset = @intCast(data.items.len);
-            try info.instr.write_data(data_writer, register_size);
+            try info.instr.write_data(data_writer, size_mode);
         }
 
         return data.toOwnedSlice(b.codegen.allocator);

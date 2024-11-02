@@ -14,7 +14,7 @@ ast: Ast,
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []const u8) !Module {
-    const ast = try Ast.parse(allocator, source);
+    const ast = try Ast.parse(allocator, source, source_path);
 
     return .{
         .source = source,

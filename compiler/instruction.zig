@@ -21,8 +21,8 @@ pub const Instruction = union(InstructionType) {
     /// Should always be none for non-Imm816 instructions
     pub const SizeMode = enum { none, @"8bit", @"16bit" };
 
-    /// Represents the register used by an instruction
-    pub const RegisterType = enum { none, a, x, y };
+    /// Used size-type of an instruction
+    pub const SizeType = enum { none, mem, idx };
 
     // TODO
     ora: void,
@@ -265,9 +265,9 @@ pub const Instruction = union(InstructionType) {
         return @as(InstructionType, instr).size();
     }
 
-    /// Checks which register is used for this instruction
-    pub fn target_register(instr: Instruction) RegisterType {
-        return @as(InstructionType, instr).target_register();
+    /// Checks which size-type is used for this instruction
+    pub fn size_type(instr: Instruction) SizeType {
+        return @as(InstructionType, instr).size_type();
     }
 };
 
@@ -388,12 +388,11 @@ pub const InstructionType = enum(u8) {
         unreachable;
     }
 
-    /// Checks which register is used for this instruction
-    pub fn target_register(instr: InstructionType) Instruction.RegisterType {
+    /// Checks which size-type is used for this opcode
+    pub fn size_type(instr: InstructionType) Instruction.SizeType {
         return switch (instr) {
-            .lda, .cmp => .a,
-            .ldx, .cpx => .x,
-            .ldy, .cpy => .y,
+            .lda, .cmp => .mem,
+            .ldx, .cpx, .ldy, .cpy => .idx,
             else => .none,
         };
     }

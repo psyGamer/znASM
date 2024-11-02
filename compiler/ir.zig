@@ -1,7 +1,7 @@
 //! Intermediate representation for program logic
 const Instruction = @import("instruction.zig").Instruction;
-const NodeIndex = @import("Ast.zig").NodeIndex;
 const Relocation = @import("CodeGen.zig").Relocation;
+const NodeIndex = @import("Ast.zig").NodeIndex;
 
 pub const Ir = struct {
     const Tag = union(enum) {

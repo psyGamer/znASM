@@ -84,6 +84,9 @@ pub const Error = struct {
 pub const TokenIndex = u32;
 pub const NodeIndex = u32;
 
+// Token 0 is valid, so use ~0 as null
+pub const null_token: TokenIndex = std.math.maxInt(TokenIndex);
+
 // Root and null share the same index, since no Node can have a root node as a child.
 pub const root_node: NodeIndex = 0;
 pub const null_node: NodeIndex = 0;
@@ -96,6 +99,7 @@ const Ast = @This();
 
 /// Reference to externally-owned data.
 source: [:0]const u8,
+source_path: []const u8,
 
 token_slice: std.MultiArrayList(Token).Slice,
 token_tags: []const Token.Tag,
@@ -110,7 +114,7 @@ extra_data: []const NodeIndex,
 
 errors: []const Error,
 
-pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8) !Ast {
+pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []const u8) !Ast {
     var tokens: std.MultiArrayList(Token) = .empty;
 
     var lexer: Lexer = .{ .buffer = source };
@@ -152,6 +156,7 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8) !Ast {
 
     return .{
         .source = source,
+        .source_path = source_path,
         .token_slice = token_slice,
         .token_tags = token_tags,
         .token_locs = token_locs,
@@ -170,15 +175,19 @@ pub fn deinit(tree: *Ast, allocator: std.mem.Allocator) void {
     allocator.free(tree.errors);
 }
 
-/// Parses the string value of an `identifier`
-pub fn parseIdentifier(tree: Ast, token_idx: Ast.TokenIndex) []const u8 {
-    std.debug.assert(tree.token_tags[token_idx] == .ident);
+/// Resolves the source data of a token
+pub fn tokenSource(tree: Ast, token_idx: TokenIndex) []const u8 {
     return tree.token_locs[token_idx].source(tree.source);
 }
+/// Parses the string value of a token
+pub fn parseIdentifier(tree: Ast, token_idx: TokenIndex) []const u8 {
+    std.debug.assert(tree.token_tags[token_idx] == .ident);
+    return tree.tokenSource(token_idx);
+}
 /// Parses the int value of an `int_literal`
-pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: Ast.TokenIndex) !T {
+pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
     std.debug.assert(tree.token_tags[token_idx] == .int_literal);
-    const int_str = tree.token_locs[token_idx].source(tree.source);
+    const int_str = tree.tokenSource(token_idx);
     const number_base: u8 = switch (int_str[0]) {
         '$' => 16,
         '%' => 2,
@@ -186,6 +195,21 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: Ast.TokenIndex) !
         else => unreachable,
     };
     return try std.fmt.parseInt(T, int_str[(if (number_base == 10) 0 else 1)..], number_base);
+}
+
+/// Checks if the index is of the specified token tag
+pub fn isToken(tree: Ast, token_idx: TokenIndex, tag: Token.Tag) bool {
+    return if (token_idx >= tree.token_tags.len)
+        false
+    else
+        tree.token_tags[token_idx] == tag;
+}
+/// Checks if the index are of the specified token tags
+pub fn areTokens(tree: Ast, token_idx: TokenIndex, tags: []const Token.Tag) bool {
+    return if (token_idx + tags.len - 1 >= tree.token_tags.len)
+        false
+    else
+        std.mem.eql(Token.Tag, tree.token_tags[token_idx..(token_idx + tags.len)], tags);
 }
 
 pub fn detectErrors(tree: Ast, writer: std.fs.File.Writer, tty_config: std.io.tty.Config, src_file_path: []const u8) !bool {
@@ -271,7 +295,6 @@ pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, er
             try tty_config.setColor(writer, .bright_magenta);
             try writer.writeAll(err.extra.expected_tag.symbol());
             try tty_config.setColor(writer, .reset);
-
             try writer.writeAll(", found ");
             try tty_config.setColor(writer, .bold);
             try tty_config.setColor(writer, .bright_magenta);
@@ -286,7 +309,7 @@ const TestNode = struct {
     children: []const @This() = &.{},
 };
 fn testAst(source: [:0]const u8, expected_tree: TestNode) !void {
-    const ast = try parse(std.testing.allocator, source);
+    const ast = try parse(std.testing.allocator, source, "");
     defer ast.deinit(std.testing.allocator);
 
     // Should not contain any errors
