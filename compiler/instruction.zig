@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Instruction = union(InstructionType) {
+pub const Instruction = union(Opcode) {
     /// Some instructions support either 8bit or 16bit immediate values,
     /// depending on the current register mode
     pub const Imm816 = packed union { imm8: u8, imm16: u16 };
@@ -200,7 +200,7 @@ pub const Instruction = union(InstructionType) {
     nop: void,
 
     /// Coverts the instruction into the assembly bytes for it
-    pub fn write_data(instr: Instruction, writer: anytype, register_size: SizeMode) !void {
+    pub fn writeData(instr: Instruction, writer: anytype, size_mode: SizeMode) !void {
         // Opcode
         try writer.writeByte(@intFromEnum(instr));
 
@@ -214,9 +214,9 @@ pub const Instruction = union(InstructionType) {
 
                 // Handle 8-bit / 16-bit instructions
                 if (field.type == Imm816) {
-                    std.debug.assert(register_size != .none);
+                    std.debug.assert(size_mode != .none);
 
-                    if (register_size == .@"8bit") {
+                    if (size_mode == .@"8bit") {
                         const value = @field(instr, field.name).imm8;
                         try writer.writeInt(u8, value, .little);
                     } else {
@@ -224,7 +224,7 @@ pub const Instruction = union(InstructionType) {
                         try writer.writeInt(u16, value, .little);
                     }
                 } else {
-                    std.debug.assert(register_size == .none);
+                    std.debug.assert(size_mode == .none);
 
                     const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
                     try writer.writeAll(&operand_data);
@@ -237,59 +237,18 @@ pub const Instruction = union(InstructionType) {
         unreachable;
     }
 
-    pub fn to_data(instrs: []const Instruction, allocator: std.mem.Allocator) ![]u8 {
-        var data_size: usize = 0;
-        for (instrs) |instr| {
-            data_size += instr.size();
-        }
-
-        const data = try allocator.alloc(u8, data_size);
-        var offset: usize = 0;
-
-        outer: for (instrs) |instr| {
-            // TODO: Handle 8/16bit instructions
-
-            // Opcode
-            data[offset] = @intFromEnum(instr);
-            offset += 1;
-
-            // Operands
-            inline for (@typeInfo(Instruction).@"union".fields) |field| {
-                if (std.mem.eql(u8, field.name, @tagName(instr))) {
-                    if (@bitSizeOf(field.type) == 0) {
-                        // No other data associated
-                        continue :outer;
-                    }
-
-                    // Handle 8-bit / 16-bit instructions
-                    if (field.type == Imm816) {
-                        @panic("8-bit / 16-bit instructions aren't supported");
-                    } else {
-                        const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
-                        @memcpy(data[offset..(offset + operand_data.len)], &operand_data);
-                        offset += operand_data.len;
-                    }
-
-                    continue :outer;
-                }
-            }
-        }
-
-        return data;
-    }
-
     /// Computes the size of opcode + operands
-    pub inline fn size(instr: Instruction) u8 {
-        return @as(InstructionType, instr).size();
+    pub inline fn size(instr: Instruction, size_mode: SizeMode) u8 {
+        return @as(Opcode, instr).size(size_mode);
     }
 
     /// Checks which size-type is used for this instruction
-    pub fn size_type(instr: Instruction) SizeType {
-        return @as(InstructionType, instr).size_type();
+    pub fn sizeType(instr: Instruction) SizeType {
+        return @as(Opcode, instr).sizeType();
     }
 };
 
-pub const InstructionType = enum(u8) {
+pub const Opcode = enum(u8) {
     ora = 0x09,
     @"and" = 0x29,
     eor = 0x49,
@@ -401,12 +360,18 @@ pub const InstructionType = enum(u8) {
     nop = 0xEA,
 
     /// Computes the size of opcode + operands
-    pub fn size(instr: InstructionType) u8 {
-        // TODO: Handle 8/16bit instructions
+    pub fn size(instr: Opcode, size_mode: Instruction.SizeMode) u8 {
         inline for (@typeInfo(Instruction).@"union".fields) |field| {
             if (std.mem.eql(u8, field.name, @tagName(instr))) {
                 const opcode_size = 1; // Always 1 byte
-                const operand_size = @bitSizeOf(field.type) / 8;
+                const operand_size: u8 = if (field.type == Instruction.Imm816)
+                    switch (size_mode) {
+                        .@"8bit" => @sizeOf(u8),
+                        .@"16bit" => @sizeOf(u8),
+                        .none => unreachable,
+                    }
+                else
+                    @bitSizeOf(field.type) / 8;
 
                 return opcode_size + operand_size;
             }
@@ -416,7 +381,7 @@ pub const InstructionType = enum(u8) {
     }
 
     /// Checks which size-type is used for this opcode
-    pub fn size_type(instr: InstructionType) Instruction.SizeType {
+    pub fn sizeType(instr: Opcode) Instruction.SizeType {
         return switch (instr) {
             .lda, .cmp => .mem,
             .ldx, .cpx, .ldy, .cpy => .idx,

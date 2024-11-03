@@ -6,7 +6,7 @@ const Ir = @import("../ir.zig").Ir;
 const Symbol = @import("../symbol.zig").Symbol;
 const SymbolLocation = @import("../symbol.zig").SymbolLocation;
 const Instruction = @import("../instruction.zig").Instruction;
-const InstructionType = @import("../instruction.zig").InstructionType;
+const Opcode = @import("../instruction.zig").Opcode;
 const Relocation = @import("../CodeGen.zig").Relocation;
 const BuiltinFn = @import("BuiltinFn.zig");
 
@@ -53,9 +53,9 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
 
     const opcode = get_opcode: {
         inline for (std.meta.fields(Instruction)) |field| {
-            @setEvalBranchQuota(std.meta.fields(InstructionType).len * 1000);
-            const curr_opcode: InstructionType = comptime get_tag: {
-                for (std.meta.fields(InstructionType)) |tag| {
+            @setEvalBranchQuota(std.meta.fields(Opcode).len * 1000);
+            const curr_opcode: Opcode = comptime get_tag: {
+                for (std.meta.fields(Opcode)) |tag| {
                     if (std.mem.eql(u8, field.name, tag.name)) {
                         break :get_tag @enumFromInt(tag.value);
                     }
@@ -113,7 +113,7 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                 break :get_instr .{ @unionInit(Instruction, field.name, {}), null };
             }
             if (field.type == Instruction.Imm816) {
-                const size_type = opcode.size_type();
+                const size_type = opcode.sizeType();
                 const curr_size = switch (size_type) {
                     .mem => anal.mem_size,
                     .idx => anal.idx_size,

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const Token = @import("Lexer.zig").Token;
 const Ast = @import("Ast.zig");
-const InstructionType = @import("instruction.zig").InstructionType;
 const Node = Ast.Node;
 const Error = Ast.Error;
 const TokenIndex = Ast.TokenIndex;

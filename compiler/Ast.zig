@@ -1,6 +1,5 @@
 const std = @import("std");
 const rich = @import("util/rich.zig");
-const InstructionType = @import("instruction.zig").InstructionType;
 
 pub const Node = struct {
     /// Documents the valid data for each tag. If something is undocumented, the data is undefined to use

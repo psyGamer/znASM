@@ -11,7 +11,7 @@ const Symbol = @import("symbol.zig").Symbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const Sema = @import("Sema.zig");
 const Instruction = @import("instruction.zig").Instruction;
-const InstructionType = @import("instruction.zig").InstructionType;
+const Opcode = @import("instruction.zig").Opcode;
 const Ir = @import("ir.zig").Ir;
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
@@ -172,7 +172,7 @@ pub fn resolveRelocations(gen: CodeGen) !bool {
 
             switch (reloc.type) {
                 .rel8 => {
-                    const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.size();
+                    const current_addr = memory_map.bankOffsetToAddr(gen.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.size(.none);
                     const offset = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr));
                     if (offset < std.math.minInt(i8) or offset > std.math.maxInt(i8)) {
                         try gen.reportLinkerError(info, loc, "Offset [" ++ highlight ++ "]{}[reset] is does not fit into a [" ++ highlight ++ "]signed 8-bit number", .{offset});
@@ -194,7 +194,7 @@ pub fn resolveRelocations(gen: CodeGen) !bool {
                     operand.* = @bitCast(absolute_addr);
                 },
                 .addr24 => {
-                    const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(InstructionType))..][0..3];
+                    const operand: *[3]u8 = bank.items[(func.bank_offset + info.offset + @sizeOf(Opcode))..][0..3];
                     operand.* = @bitCast(target_addr);
                 },
             }
@@ -541,7 +541,7 @@ const FunctionBuilder = struct {
         const data_writer = data.writer(b.codegen.allocator);
 
         for (b.instructions.items) |*info| {
-            const size_type = info.instr.size_type();
+            const size_type = info.instr.sizeType();
             const size_mode = switch (size_type) {
                 .none => .none,
                 .mem => info.mem_size,
@@ -552,7 +552,7 @@ const FunctionBuilder = struct {
             }
 
             info.offset = @intCast(data.items.len);
-            try info.instr.write_data(data_writer, size_mode);
+            try info.instr.writeData(data_writer, size_mode);
         }
 
         return data.toOwnedSlice(b.codegen.allocator);
@@ -590,26 +590,26 @@ const FunctionBuilder = struct {
         }
 
         const short_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
-            .always = comptime Instruction.bra.size(),
-            .carry_set = comptime Instruction.bcs.size(),
-            .carry_clear = comptime Instruction.bcc.size(),
-            .overflow_set = comptime Instruction.bvs.size(),
-            .overflow_clear = comptime Instruction.bvc.size(),
-            .equal = comptime Instruction.beq.size(),
-            .not_equal = comptime Instruction.bne.size(),
-            .plus = comptime Instruction.bpl.size(),
-            .minus = comptime Instruction.bmi.size(),
+            .always = comptime Instruction.bra.size(.none),
+            .carry_set = comptime Instruction.bcs.size(.none),
+            .carry_clear = comptime Instruction.bcc.size(.none),
+            .overflow_set = comptime Instruction.bvs.size(.none),
+            .overflow_clear = comptime Instruction.bvc.size(.none),
+            .equal = comptime Instruction.beq.size(.none),
+            .not_equal = comptime Instruction.bne.size(.none),
+            .plus = comptime Instruction.bpl.size(.none),
+            .minus = comptime Instruction.bmi.size(.none),
         });
         const long_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
-            .always = comptime Instruction.jmp.size(),
-            .carry_set = comptime Instruction.bcc.size() + Instruction.jmp.size(),
-            .carry_clear = comptime Instruction.bcs.size() + Instruction.jmp.size(),
-            .overflow_set = comptime Instruction.bvc.size() + Instruction.jmp.size(),
-            .overflow_clear = comptime Instruction.bvs.size() + Instruction.jmp.size(),
-            .equal = comptime Instruction.bne.size() + Instruction.jmp.size(),
-            .not_equal = comptime Instruction.beq.size() + Instruction.jmp.size(),
-            .plus = comptime Instruction.bmi.size() + Instruction.jmp.size(),
-            .minus = comptime Instruction.bpl.size() + Instruction.jmp.size(),
+            .always = comptime Instruction.jmp.size(.none),
+            .carry_set = comptime Instruction.bcc.size(.none) + Instruction.jmp.size(.none),
+            .carry_clear = comptime Instruction.bcs.size(.none) + Instruction.jmp.size(.none),
+            .overflow_set = comptime Instruction.bvc.size(.none) + Instruction.jmp.size(.none),
+            .overflow_clear = comptime Instruction.bvs.size(.none) + Instruction.jmp.size(.none),
+            .equal = comptime Instruction.bne.size(.none) + Instruction.jmp.size(.none),
+            .not_equal = comptime Instruction.beq.size(.none) + Instruction.jmp.size(.none),
+            .plus = comptime Instruction.bmi.size(.none) + Instruction.jmp.size(.none),
+            .minus = comptime Instruction.bpl.size(.none) + Instruction.jmp.size(.none),
         });
 
         // Interativly lower to short-form
@@ -639,7 +639,17 @@ const FunctionBuilder = struct {
                             relative_offset.* += long_sizes.get(other_reloc.type);
                         }
                     } else {
-                        relative_offset.* += info.instr.size();
+                        const size_type = info.instr.sizeType();
+                        const size_mode = switch (size_type) {
+                            .none => .none,
+                            .mem => info.mem_size,
+                            .idx => info.idx_size,
+                        };
+                        if (size_type != .none) {
+                            std.debug.assert(size_mode != .none);
+                        }
+
+                        relative_offset.* += info.instr.size(size_mode);
                     }
                 }
                 if (target_idx <= source_idx) {
@@ -671,7 +681,17 @@ const FunctionBuilder = struct {
                         offset += long_sizes.get(other_reloc.type);
                     }
                 } else {
-                    offset += info.instr.size();
+                    const size_type = info.instr.sizeType();
+                    const size_mode = switch (size_type) {
+                        .none => .none,
+                        .mem => info.mem_size,
+                        .idx => info.idx_size,
+                    };
+                    if (size_type != .none) {
+                        std.debug.assert(size_mode != .none);
+                    }
+
+                    offset += info.instr.size(size_mode);
                 }
             }
 
@@ -703,7 +723,7 @@ const FunctionBuilder = struct {
                     .minus => .{ .bmi = @intCast(relative_offset) },
                 };
             } else {
-                const jmp_size = comptime InstructionType.jmp.size();
+                const jmp_size = comptime Opcode.jmp.size(.none);
                 info.instr = switch (reloc.type) {
                     .always => .{ .jmp = undefined },
                     .carry_set => .{ .bcc = jmp_size },
