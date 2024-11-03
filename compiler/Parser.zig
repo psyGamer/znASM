@@ -211,45 +211,39 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
             break;
         }
 
+        const start_idx = p.index;
+
         // Call
-        const call = p.parseCallStatement() catch |err| switch (err) {
-            error.ParseFailed => null_node,
-            else => |e| return e,
-        };
+        const call = try p.parseCallStatement();
         if (call != null_node) {
             try p.scratch.append(p.allocator, call);
             continue;
         }
+        p.index = start_idx;
 
         // While
-        const @"while" = p.parseWhileStatement() catch |err| switch (err) {
-            error.ParseFailed => null_node,
-            else => |e| return e,
-        };
+        const @"while" = try p.parseWhileStatement();
         if (@"while" != null_node) {
             try p.scratch.append(p.allocator, @"while");
             continue;
         }
+        p.index = start_idx;
 
         // Instruction
-        const instr = p.parseInstruction() catch |err| switch (err) {
-            error.ParseFailed => null_node,
-            else => |e| return e,
-        };
+        const instr = try p.parseInstruction();
         if (instr != null_node) {
             try p.scratch.append(p.allocator, instr);
             continue;
         }
+        p.index = start_idx;
 
         // Label
-        const label = p.parseLabel() catch |err| switch (err) {
-            error.ParseFailed => null_node,
-            else => |e| return e,
-        };
+        const label = try p.parseLabel();
         if (label != null_node) {
             try p.scratch.append(p.allocator, label);
             continue;
         }
+        p.index = start_idx;
 
         return p.fail(.expected_statement);
     }
@@ -265,12 +259,9 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
 
 /// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
 fn parseInstruction(p: *Parser) ParseError!NodeIndex {
-    const start_idx = p.index;
-    errdefer p.index = start_idx;
-
     const ident_opcode = p.eatToken(.ident) orelse return null_node;
     _ = p.eatToken(.ident) orelse p.eatToken(.int_literal);
-    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
+    _ = p.eatToken(.new_line) orelse return null_node;
 
     return try p.addNode(.{
         .tag = .instruction,
@@ -281,12 +272,9 @@ fn parseInstruction(p: *Parser) ParseError!NodeIndex {
 
 /// Label <- IDENTIFIER COLON NEW_LINE
 fn parseLabel(p: *Parser) ParseError!NodeIndex {
-    const start_idx = p.index;
-    errdefer p.index = start_idx;
-
     const ident_name = p.eatToken(.ident) orelse return null_node;
-    _ = p.eatToken(.colon) orelse return error.ParseFailed;
-    _ = p.eatToken(.new_line) orelse return error.ParseFailed;
+    _ = p.eatToken(.colon) orelse return null_node;
+    _ = p.eatToken(.new_line) orelse return null_node;
 
     return try p.addNode(.{
         .tag = .label,
@@ -299,14 +287,12 @@ fn parseLabel(p: *Parser) ParseError!NodeIndex {
 ///
 /// ExprList <- (Expr COMMA)* Expr?
 fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
-    const start_idx = p.index;
-    errdefer p.index = start_idx;
-
     const expr_start = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(expr_start);
 
-    const ident_name = p.eatToken(.builtin_ident) orelse p.eatToken(.ident) orelse return error.ParseFailed;
-    _ = p.eatToken(.lparen) orelse return error.ParseFailed;
+    const ident_name = p.eatToken(.builtin_ident) orelse p.eatToken(.ident) orelse return null_node;
+    _ = p.eatToken(.lparen) orelse return null_node;
+
     while (true) {
         if (p.eatToken(.rparen)) |_| break;
 
@@ -341,7 +327,7 @@ fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
 /// WhiteStatement
 ///     <- KEYWORD_while LPAREN KEYWORD_true RPAREN Block
 fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
-    const keyword_while = p.eatToken(.keyword_while) orelse return error.ParseFailed;
+    const keyword_while = p.eatToken(.keyword_while) orelse return null_node;
     _ = try p.expectToken(.lparen);
     _ = try p.expectToken(.keyword_true);
     _ = try p.expectToken(.rparen);
