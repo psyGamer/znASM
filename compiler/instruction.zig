@@ -5,6 +5,8 @@ pub const Instruction = union(Opcode) {
     /// depending on the current register mode
     pub const Imm816 = packed union { imm8: u8, imm16: u16 };
 
+    pub const Addr16 = enum(u16) { _ };
+
     /// State of the Status Flags Register
     pub const StatusRegister = packed struct(u8) {
         carry: bool = false,
@@ -79,7 +81,7 @@ pub const Instruction = union(Opcode) {
     /// Store Zero to Memory (Direct Page)
     stz_dp: u8,
     /// Store Zero to Memory (Absolute)
-    stz_addr16: u16,
+    stz_addr16: Addr16,
     /// Store Zero to Memory (Direct Page, X Indexed)
     stz_dp_idx_x: u8,
     /// Store Zero to Memory (Absolute, X Indexed)
@@ -88,21 +90,21 @@ pub const Instruction = union(Opcode) {
     /// Store Accumulator to Memory (Direct Page)
     sta_addr8: u8,
     /// Store Accumulator to Memory (Absolute)
-    sta_addr16: u16,
+    sta_addr16: Addr16,
     /// Store Accumulator to Memory (Long)
     sta_addr24: u24,
 
     /// Store Index Register X to Memory (Direct Page)
     stx_addr8: u8,
     /// Store Index Register X to Memory (Absolute)
-    stx_addr16: u16,
+    stx_addr16: Addr16,
     /// Store Index Register X to Memory (Direct Page, Y Indexed)
     stx_addr8_idx_y: u8,
 
     /// Store Index Register Y to Memory (Direct Page)
     sty_addr8: u8,
     /// Store Index Register Y to Memory (Absolute)
-    sty_addr16: u16,
+    sty_addr16: Addr16,
     /// Store Index Register Y to Memory (Direct Page, X Indexed)
     sty_addr8_idx_x: u8,
 
@@ -223,6 +225,10 @@ pub const Instruction = union(Opcode) {
                         const value = @field(instr, field.name).imm16;
                         try writer.writeInt(u16, value, .little);
                     }
+                } else if (field.type == Addr16) {
+                    std.debug.assert(size_mode != .none);
+
+                    try writer.writeInt(u16, @intFromEnum(@field(instr, field.name)), .little);
                 } else {
                     std.debug.assert(size_mode == .none);
 
@@ -383,7 +389,7 @@ pub const Opcode = enum(u8) {
     /// Checks which size-type is used for this opcode
     pub fn sizeType(instr: Opcode) Instruction.SizeType {
         return switch (instr) {
-            .lda, .cmp => .mem,
+            .lda, .cmp, .sta_addr16 => .mem,
             .ldx, .cpx, .ldy, .cpy => .idx,
             else => .none,
         };

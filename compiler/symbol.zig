@@ -64,9 +64,27 @@ pub const Symbol = union(enum) {
         /// `const_def` node of this symbol
         node: Ast.NodeIndex,
     };
+    pub const Variable = struct {
+        is_pub: bool,
+
+        /// Minimum offset into Work-RAM
+        wram_offset_min: u17,
+        /// Maximum offset into Work-RAM
+        wram_offset_max: u17,
+
+        /// Offset into Work-RAM
+        wram_offset: u17 = undefined,
+
+        /// Type if this constant value
+        type: TypeSymbol,
+
+        /// `const_def` node of this symbol
+        node: Ast.NodeIndex,
+    };
 
     function: Function,
     constant: Constant,
+    variable: Variable,
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
@@ -82,6 +100,7 @@ pub const Symbol = union(enum) {
             .constant => |const_sym| {
                 allocator.free(const_sym.value);
             },
+            .variable => {},
         }
     }
 };
@@ -101,13 +120,27 @@ pub const TypeSymbol = union(enum) {
     /// Simple type with no extra annotations
     raw: Payload,
 
-    pub fn format(value: TypeSymbol, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (value) {
+    /// Calculates the size of this type in bytes
+    pub fn size(type_sym: TypeSymbol) u16 {
+        switch (type_sym) {
+            .raw => |payload| return payloadSize(payload),
+        }
+    }
+    fn payloadSize(payload: Payload) u16 {
+        return switch (payload) {
+            .signed_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
+            .unsigned_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
+            .comptime_int => unreachable,
+        };
+    }
+
+    pub fn format(type_sym: TypeSymbol, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (type_sym) {
             .raw => |payload| return formatPayload(payload, writer),
         }
     }
-    fn formatPayload(value: Payload, writer: anytype) !void {
-        return switch (value) {
+    fn formatPayload(payload: Payload, writer: anytype) !void {
+        return switch (payload) {
             .signed_int => |bits| writer.print("i{d}", .{bits}),
             .unsigned_int => |bits| writer.print("u{d}", .{bits}),
             .comptime_int => writer.writeAll("comptime_int"),

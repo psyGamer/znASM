@@ -76,6 +76,11 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                         break :get_opcode curr_opcode;
                     }
                 }
+                if (field.type == Instruction.Addr16) {
+                    if (anal.ast.areTokens(anal.ast.node_tokens[node_idx] + 1, &.{ .ident, .new_line })) {
+                        break :get_opcode curr_opcode;
+                    }
+                }
 
                 if (curr_opcode == .bra or
                     curr_opcode == .jmp or curr_opcode == .jml or curr_opcode == .jsr or curr_opcode == .jsl)
@@ -109,28 +114,28 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
 
             const operand_token = anal.ast.node_tokens[node_idx] + 1;
 
+            const size_type = opcode.sizeType();
+            const curr_size = switch (size_type) {
+                .mem => anal.mem_size,
+                .idx => anal.idx_size,
+                .none => .none,
+            };
+
+            if (size_type != .none and curr_size == .none) {
+                try anal.sema.errors.append(anal.sema.allocator, .{
+                    .tag = .undefined_size_mode,
+                    .type = .err,
+                    .ast = anal.ast,
+                    .token = operand_token,
+                    .extra = .{ .size_type = size_type },
+                });
+                return error.AnalyzeFailed;
+            }
+
             if (field.type == void) {
                 break :get_instr .{ @unionInit(Instruction, field.name, {}), null };
             }
             if (field.type == Instruction.Imm816) {
-                const size_type = opcode.sizeType();
-                const curr_size = switch (size_type) {
-                    .mem => anal.mem_size,
-                    .idx => anal.idx_size,
-                    .none => unreachable,
-                };
-
-                if (curr_size == .none) {
-                    try anal.sema.errors.append(anal.sema.allocator, .{
-                        .tag = .undefined_size_mode,
-                        .type = .err,
-                        .ast = anal.ast,
-                        .token = operand_token,
-                        .extra = .{ .size_type = size_type },
-                    });
-                    return;
-                }
-
                 if (anal.ast.token_tags[operand_token] == .int_literal) {
                     if (curr_size == .@"8bit") {
                         const value = try anal.sema.parseInt(u8, anal.ast, operand_token);
@@ -206,6 +211,74 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                                 .extra = .{ .expected_symbol = value_sym },
                             });
                             return error.AnalyzeFailed;
+                        },
+                    }
+                }
+            }
+            if (field.type == Instruction.Addr16) {
+                if (anal.ast.token_tags[operand_token] == .ident and anal.ast.token_tags[operand_token + 1] == .new_line) {
+                    const value_sym_loc: SymbolLocation = .{
+                        .module = anal.symbol_location.module,
+                        .name = anal.ast.parseIdentifier(operand_token),
+                    };
+                    const value_sym = anal.sema.lookupSymbol(value_sym_loc) orelse {
+                        try anal.sema.errors.append(anal.sema.allocator, .{
+                            .tag = .undefined_symbol,
+                            .type = .err,
+                            .ast = anal.ast,
+                            .token = operand_token,
+                        });
+                        return error.AnalyzeFailed;
+                    };
+
+                    switch (value_sym) {
+                        .variable => |var_sym| {
+                            if (curr_size == .@"8bit") {
+                                if (var_sym.type != .raw or var_sym.type.raw != .unsigned_int or var_sym.type.raw.unsigned_int > 8) {
+                                    try anal.sema.errors.append(anal.sema.allocator, .{
+                                        .tag = .expected_type,
+                                        .type = .err,
+                                        .ast = anal.ast,
+                                        .token = operand_token,
+                                        .extra = .{ .expected_type = .{
+                                            .expected = .{ .raw = .{ .unsigned_int = 8 } },
+                                            .actual = var_sym.type,
+                                        } },
+                                    });
+                                    return error.AnalyzeFailed;
+                                }
+                            } else if (curr_size == .@"16bit") {
+                                if (var_sym.type != .raw or var_sym.type.raw != .unsigned_int or var_sym.type.raw.unsigned_int > 16) {
+                                    try anal.sema.errors.append(anal.sema.allocator, .{
+                                        .tag = .expected_type,
+                                        .type = .err,
+                                        .ast = anal.ast,
+                                        .token = operand_token,
+                                        .extra = .{ .expected_type = .{
+                                            .expected = .{ .raw = .{ .unsigned_int = 8 } },
+                                            .actual = var_sym.type,
+                                        } },
+                                    });
+                                    return error.AnalyzeFailed;
+                                }
+                            }
+
+                            break :get_instr .{ @unionInit(Instruction, field.name, undefined), .{
+                                .type = .addr16,
+                                .target_sym = value_sym_loc,
+                                .target_offset = 0,
+                            } };
+                        },
+                        else => {
+                            @panic("TODO: error");
+                            // try anal.sema.errors.append(anal.sema.allocator, .{
+                            //     .tag = .expected_const_var_symbol,
+                            //     .type = .err,
+                            //     .ast = anal.ast,
+                            //     .token = operand_token,
+                            //     .extra = .{ .expected_symbol = value_sym },
+                            // });
+                            // return error.AnalyzeFailed;
                         },
                     }
                 }

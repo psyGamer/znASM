@@ -22,6 +22,11 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         const_def,
 
+        /// `data` is `var_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        var_def,
+
         /// `main_token` is the `int_literal` of bank
         bank_attr,
 
@@ -77,6 +82,9 @@ pub const Node = struct {
             value: NodeIndex,
             extra: ExtraIndex,
         },
+        var_def: struct {
+            extra: ExtraIndex,
+        },
         while_statement: struct {
             condition: NodeIndex,
             block: NodeIndex,
@@ -94,6 +102,12 @@ pub const Node = struct {
         doc_comment_end: NodeIndex,
     };
     pub const ConstDefData = struct {
+        type: NodeIndex,
+        bank_attr: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
+    };
+    pub const VarDefData = struct {
         type: NodeIndex,
         bank_attr: NodeIndex,
         doc_comment_start: NodeIndex,

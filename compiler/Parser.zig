@@ -39,7 +39,7 @@ const null_node = Ast.null_node;
 
 const ParseError = error{ParseFailed} || std.mem.Allocator.Error;
 
-/// Root <- ModuleDef (FnDef)*
+/// Root <- ModuleDef (FnDef | ConstDef | VarDef)*
 pub fn parseRoot(p: *Parser) ParseError!void {
     const tld_start = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(tld_start);
@@ -100,6 +100,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
+        // Variable Definition
+        const var_def = try p.parseVarDef(doc_comments);
+        if (var_def != null_node) {
+            try p.scratch.append(p.allocator, var_def);
+            continue;
+        }
+
         return p.fail(.expected_toplevel);
     }
 
@@ -146,7 +153,7 @@ fn parseFnDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// ConstDef <- (KEYWORD_pub)? KEYWORD_const IDENTIFIER COLON TypeExpr (BankAttr)? EQUAL Expr
+/// ConstDef <- (KEYWORD_pub)? KEYWORD_const IDENTIFIER COLON TypeExpr (BankAttr)? EQUAL Expr NEW_LINE
 fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_const = p.eatToken(.keyword_const) orelse return null_node;
@@ -167,6 +174,30 @@ fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
         .data = .{ .const_def = .{
             .value = value_expr,
             .extra = try p.writeExtraData(Ast.Node.ConstDefData, .{
+                .type = type_expr,
+                .bank_attr = bank_attr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
+        } },
+    });
+}
+
+/// VarDef <- (KEYWORD_pub)? KEYWORD_var IDENTIFIER COLON TypeExpr (BankAttr)? NEW_LINE
+fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_var = p.eatToken(.keyword_var) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.colon);
+    const type_expr = try p.parseTypeExpr();
+    const bank_attr = try p.parseBankAttr();
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .var_def,
+        .main_token = keyword_var,
+        .data = .{ .var_def = .{
+            .extra = try p.writeExtraData(Ast.Node.VarDefData, .{
                 .type = type_expr,
                 .bank_attr = bank_attr,
                 .doc_comment_start = doc_comments.extra_start,

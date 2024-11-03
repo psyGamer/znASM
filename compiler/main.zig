@@ -8,13 +8,13 @@ const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
 const CodeGen = @import("CodeGen.zig");
+const Linker = @import("Linker.zig");
 const Rom = @import("Rom.zig");
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 
 // Required to execute tests
 comptime {
     _ = Lexer;
-    // _ = Ast;
 }
 
 pub const std_options: std.Options = .{
@@ -144,27 +144,11 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     defer sema.deinit(allocator);
 
     // Generate code
-    var codegen: CodeGen = .{
-        .mapping_mode = .lorom, // TODO: Configurable
-        .sema = &sema,
-        .allocator = allocator,
-    };
-    defer codegen.deinit();
+    try CodeGen.process(&sema);
 
-    try codegen.generate();
-    try codegen.generateBanks();
-
-    if (try codegen.resolveRelocations() == false) {
-        return 1;
-    }
-
-    const banks = try codegen.allocateBanks();
-    defer {
-        for (banks) |bank| {
-            allocator.free(bank.data);
-        }
-        allocator.free(banks);
-    }
+    // Link assembly together
+    var linker = try Linker.process(&sema) orelse return 1;
+    defer linker.deinit();
 
     // Generate ROM
     const fallback_vector: SymbolLocation = .{ .module = "builtin", .name = "empty_vector" };
@@ -173,7 +157,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .title = rom_name,
             // TODO: Configurable Mode / Chipset / Country / Version
             .mode = .{
-                .map = codegen.mapping_mode,
+                .map = sema.mapping_mode,
                 .speed = .fast,
             },
             .chipset = .{
@@ -186,18 +170,18 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .rom_version = 0,
         },
         .vectors = .{
-            .native_cop = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_cop orelse fallback_vector)),
-            .native_brk = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_brk orelse fallback_vector)),
-            .native_abort = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_abort orelse fallback_vector)), // Unused
-            .native_nmi = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_nmi orelse fallback_vector)),
-            .native_irq = @truncate(codegen.symbolLocation(sema.interrupt_vectors.native_irq orelse fallback_vector)),
-            .emulation_cop = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_cop orelse fallback_vector)),
-            .emulation_abort = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_abort orelse fallback_vector)), // Unused
-            .emulation_nmi = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_nmi orelse fallback_vector)),
-            .emulation_reset = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_reset orelse fallback_vector)),
-            .emulation_irqbrk = @truncate(codegen.symbolLocation(sema.interrupt_vectors.emulation_irqbrk orelse fallback_vector)),
+            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop orelse fallback_vector)),
+            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk orelse fallback_vector)),
+            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort orelse fallback_vector)), // Unused
+            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi orelse fallback_vector)),
+            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq orelse fallback_vector)),
+            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop orelse fallback_vector)),
+            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort orelse fallback_vector)), // Unused
+            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi orelse fallback_vector)),
+            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset orelse fallback_vector)),
+            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk orelse fallback_vector)),
         },
-        .banks = banks,
+        .banks = linker.rom_bank_data,
     };
     rom.computeRomSize();
 
@@ -222,9 +206,9 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
         const cdl_file = try std.fs.cwd().createFile(cdl_file_path, .{});
         defer cdl_file.close();
 
-        try codegen.writeMlbSymbols(mlb_file.writer());
+        try linker.writeMlbSymbols(mlb_file.writer());
 
-        const cdl_data = try codegen.generateCdlData(rom_data);
+        const cdl_data = try linker.generateCdlData(rom_data);
         defer allocator.free(cdl_data);
         try cdl_file.writeAll(cdl_data);
     }
