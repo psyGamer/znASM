@@ -24,7 +24,7 @@ pub const std_options: std.Options = .{
 
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    // defer std.debug.assert(gpa.deinit() == .ok);
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     var arg_iter = if (target_os == .windows)
@@ -106,8 +106,6 @@ pub fn main() !u8 {
 }
 
 fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const u8, source_files: []const []const u8) !u8 {
-    const stderr = std.io.getStdErr();
-    const tty_config = std.io.tty.detectConfig(stderr);
     // Parse all files into modules
     var modules: std.ArrayListUnmanaged(Module) = .{};
     defer {
@@ -118,12 +116,10 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Built-in module
-    const builtin_module: Module = try .init(allocator, try allocator.dupeZ(u8, @embedFile("builtin.znasm")), "<builtin>");
-    std.debug.assert(try builtin_module.ast.detectErrors(stderr.writer(), tty_config) == false);
-    try modules.append(allocator, builtin_module);
+    try modules.append(allocator, try Module.init(allocator, try allocator.dupeZ(u8, @embedFile("builtin.znasm")), "<builtin>") orelse unreachable);
 
     // User modules
-    var hasErrors = false;
+    var has_errors = false;
     for (source_files) |src| {
         std.log.debug("Parsing file '{s}'...", .{src});
 
@@ -133,25 +129,19 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
         const src_data = try src_file.readToEndAllocOptions(allocator, std.math.maxInt(usize), null, @alignOf(u8), 0);
         errdefer allocator.free(src_data);
 
-        const module: Module = try .init(allocator, src_data, src);
-        if (try module.ast.detectErrors(stderr.writer(), tty_config)) {
-            hasErrors = true;
-        } else {
-            try modules.append(allocator, module);
-        }
+        try modules.append(allocator, try Module.init(allocator, src_data, src) orelse {
+            has_errors = true;
+            continue;
+        });
     }
 
-    if (hasErrors) {
+    if (has_errors) {
         return 1;
     }
 
     // Run semantic analysis
-    var sema = try Sema.process(allocator, modules.items, .lorom);
+    var sema = try Sema.process(allocator, modules.items, .lorom) orelse return 1;
     defer sema.deinit(allocator);
-
-    if (try sema.detectErrors(stderr.writer(), tty_config)) {
-        return 1;
-    }
 
     // Generate code
     var codegen: CodeGen = .{
@@ -159,14 +149,22 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
         .sema = &sema,
         .allocator = allocator,
     };
-    try codegen.generate();
+    defer codegen.deinit();
 
+    try codegen.generate();
     try codegen.generateBanks();
+
     if (try codegen.resolveRelocations() == false) {
         return 1;
     }
 
     const banks = try codegen.allocateBanks();
+    defer {
+        for (banks) |bank| {
+            allocator.free(bank.data);
+        }
+        allocator.free(banks);
+    }
 
     // Generate ROM
     const fallback_vector: SymbolLocation = .{ .module = "builtin", .name = "empty_vector" };

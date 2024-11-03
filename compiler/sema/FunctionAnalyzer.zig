@@ -16,13 +16,13 @@ const Error = Sema.AnalyzeError;
 ast: *const Ast,
 sema: *Sema,
 
-func: *Symbol.Function,
-sym_loc: SymbolLocation,
+symbol: *Symbol.Function,
+symbol_location: SymbolLocation,
 
 ir: std.ArrayListUnmanaged(Ir) = .empty,
 
 /// Size of the A-Register / Memory instructions
-mem_size: Instruction.SizeMode = .none,
+mem_size: Instruction.SizeMode = .@"8bit",
 /// Size of the X/Y-Registers
 idx_size: Instruction.SizeMode = .none,
 
@@ -68,8 +68,13 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                 if (field.type == void and anal.ast.isToken(anal.ast.node_tokens[node_idx] + 1, .new_line)) {
                     break :get_opcode curr_opcode;
                 }
-                if (field.type == Instruction.Imm816 and anal.ast.areTokens(anal.ast.node_tokens[node_idx] + 1, &.{ .int_literal, .new_line })) {
-                    break :get_opcode curr_opcode;
+                if (field.type == Instruction.Imm816) {
+                    if (anal.ast.areTokens(anal.ast.node_tokens[node_idx] + 1, &.{ .int_literal, .new_line })) {
+                        break :get_opcode curr_opcode;
+                    }
+                    if (anal.ast.areTokens(anal.ast.node_tokens[node_idx] + 1, &.{ .ident, .new_line })) {
+                        break :get_opcode curr_opcode;
+                    }
                 }
 
                 if (curr_opcode == .bra or
@@ -125,13 +130,84 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                     });
                     return;
                 }
-                if (curr_size == .@"8bit") {
-                    const value = try anal.sema.parseInt(u8, anal.ast, operand_token);
-                    break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = value }), null };
+
+                if (anal.ast.token_tags[operand_token] == .int_literal) {
+                    if (curr_size == .@"8bit") {
+                        const value = try anal.sema.parseInt(u8, anal.ast, operand_token);
+                        break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = value }), null };
+                    }
+                    if (curr_size == .@"16bit") {
+                        const value = try anal.sema.parseInt(u16, anal.ast, operand_token);
+                        break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm16 = value }), null };
+                    }
                 }
-                if (curr_size == .@"16bit") {
-                    const value = try anal.sema.parseInt(u16, anal.ast, operand_token);
-                    break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm16 = value }), null };
+
+                if (anal.ast.token_tags[operand_token] == .ident and anal.ast.token_tags[operand_token + 1] == .new_line) {
+                    const value_sym = anal.sema.lookupSymbol(.{
+                        .module = anal.symbol_location.module,
+                        .name = anal.ast.parseIdentifier(operand_token),
+                    }) orelse {
+                        try anal.sema.errors.append(anal.sema.allocator, .{
+                            .tag = .undefined_symbol,
+                            .type = .err,
+                            .ast = anal.ast,
+                            .token = operand_token,
+                        });
+                        return error.AnalyzeFailed;
+                    };
+
+                    switch (value_sym) {
+                        .constant => |const_sym| {
+                            if (curr_size == .@"8bit") {
+                                if (const_sym.type != .raw or const_sym.type.raw != .unsigned_int or const_sym.type.raw.unsigned_int > 8) {
+                                    try anal.sema.errors.append(anal.sema.allocator, .{
+                                        .tag = .expected_type,
+                                        .type = .err,
+                                        .ast = anal.ast,
+                                        .token = operand_token,
+                                        .extra = .{ .expected_type = .{
+                                            .expected = .{ .raw = .{ .unsigned_int = 8 } },
+                                            .actual = const_sym.type,
+                                        } },
+                                    });
+                                    return error.AnalyzeFailed;
+                                }
+
+                                const value: u8 = @bitCast(const_sym.value[0..@sizeOf(u8)].*);
+                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = value }), null };
+                            }
+                            if (curr_size == .@"16bit") {
+                                if (const_sym.type != .raw or const_sym.type.raw != .unsigned_int or const_sym.type.raw.unsigned_int > 16) {
+                                    try anal.sema.errors.append(anal.sema.allocator, .{
+                                        .tag = .expected_type,
+                                        .type = .err,
+                                        .ast = anal.ast,
+                                        .token = operand_token,
+                                        .extra = .{ .expected_type = .{
+                                            .expected = .{ .raw = .{ .unsigned_int = 8 } },
+                                            .actual = const_sym.type,
+                                        } },
+                                    });
+                                    return error.AnalyzeFailed;
+                                }
+
+                                const value: u16 = @bitCast(const_sym.value[0..@sizeOf(u16)].*);
+                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm16 = value }), null };
+                            }
+
+                            unreachable;
+                        },
+                        else => {
+                            try anal.sema.errors.append(anal.sema.allocator, .{
+                                .tag = .expected_const_var_symbol,
+                                .type = .err,
+                                .ast = anal.ast,
+                                .token = operand_token,
+                                .extra = .{ .expected_symbol = value_sym },
+                            });
+                            return error.AnalyzeFailed;
+                        },
+                    }
                 }
             }
 
@@ -145,7 +221,7 @@ pub fn handleInstruction(anal: *Analyzer, node_idx: NodeIndex) Error!void {
                         .jml, .jsl => .addr24,
                         else => unreachable,
                     },
-                    .target_sym = .parse(anal.ast.parseIdentifier(operand_token), anal.sym_loc.module),
+                    .target_sym = .parse(anal.ast.parseIdentifier(operand_token), anal.symbol_location.module),
                     .target_offset = 0,
                 } };
             }
@@ -164,7 +240,7 @@ pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) Error!void {
     const label_token = anal.ast.node_tokens[node_idx];
     const label = anal.ast.parseIdentifier(label_token);
 
-    if (anal.sema.lookupSymbol(.{ .module = anal.sym_loc.module, .name = label })) |existing_sym| {
+    if (anal.sema.lookupSymbol(.{ .module = anal.symbol_location.module, .name = label })) |existing_sym| {
         try anal.sema.errors.append(anal.sema.allocator, .{
             .tag = .duplicate_label,
             .type = .err,
@@ -172,7 +248,7 @@ pub fn handleLabel(anal: *Analyzer, node_idx: NodeIndex) Error!void {
             .token = label_token,
         });
         try anal.sema.errors.append(anal.sema.allocator, .{
-            .tag = .existing_sym,
+            .tag = .existing_symbol,
             .type = .note,
             .ast = anal.ast,
             .token = anal.ast.node_tokens[

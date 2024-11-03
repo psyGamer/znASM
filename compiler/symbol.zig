@@ -28,51 +28,89 @@ pub const SymbolLocation = struct {
 };
 
 pub const Symbol = union(enum) {
-    pub const Variable = struct {
-        type: SymbolLocation,
-        is_const: bool,
-        is_pub: bool,
-
-        bank: ?u8,
-        addr_min: ?u16,
-        addr_max: ?u16,
-
-        node: Ast.NodeIndex,
-    };
     pub const Function = struct {
         is_pub: bool,
 
         /// Memory-mapped target bank
         bank: u8,
-
-        /// Intermediate representation for instructions
-        ir: []const Ir = &.{},
-        /// Named indices to target instructions
-        labels: []const struct { []const u8, u16 } = &.{},
-        /// Higher-level instruction data
-        instructions: []InstructionInfo = &.{},
-        /// Raw assembly data
-        assembly_data: []u8 = &.{},
-
         /// Offset into the target bank
         bank_offset: u16 = undefined,
+
+        /// Intermediate representation for instructions
+        ir: []const Ir,
+        /// Named indices to target instructions
+        labels: []const struct { []const u8, u16 },
+        /// Higher-level instruction data
+        instructions: []InstructionInfo,
+        /// Raw assembly data
+        assembly_data: []u8,
 
         /// `fn_def` node of this symbol
         node: Ast.NodeIndex,
     };
+    pub const Constant = struct {
+        is_pub: bool,
 
-    variable: Variable,
+        /// Memory-mapped target bank
+        bank: u8,
+        /// Offset into the target bank
+        bank_offset: u16 = undefined,
+
+        /// Type if this constant value
+        type: TypeSymbol,
+        /// Byte representation of the value
+        value: []const u8,
+
+        /// `const_def` node of this symbol
+        node: Ast.NodeIndex,
+    };
+
     function: Function,
+    constant: Constant,
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
-            .variable => {},
-            .function => |*fn_sym| {
+            .function => |fn_sym| {
+                for (fn_sym.ir) |ir| {
+                    ir.deinit(allocator);
+                }
+                allocator.free(fn_sym.ir);
+                allocator.free(fn_sym.labels);
+                allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
-                // fn_sym.ir.deinit(allocator);
-                // fn_sym.code.deinit(allocator);
-                // fn_sym.relocs.deinit(allocator);
+            },
+            .constant => |const_sym| {
+                allocator.free(const_sym.value);
             },
         }
+    }
+};
+
+pub const TypeSymbol = union(enum) {
+    // Backing types for comptime variables
+    pub const ComptimeIntValue = i64;
+
+    const Payload = union(enum) {
+        // Payload indicates bit-size
+        signed_int: u16,
+        unsigned_int: u16,
+        // Payload indicates value
+        comptime_int: ComptimeIntValue,
+    };
+
+    /// Simple type with no extra annotations
+    raw: Payload,
+
+    pub fn format(value: TypeSymbol, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (value) {
+            .raw => |payload| return formatPayload(payload, writer),
+        }
+    }
+    fn formatPayload(value: Payload, writer: anytype) !void {
+        return switch (value) {
+            .signed_int => |bits| writer.print("i{d}", .{bits}),
+            .unsigned_int => |bits| writer.print("u{d}", .{bits}),
+            .comptime_int => writer.writeAll("comptime_int"),
+        };
     }
 };

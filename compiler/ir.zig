@@ -1,4 +1,5 @@
 //! Intermediate representation for program logic
+const std = @import("std");
 const Instruction = @import("instruction.zig").Instruction;
 const Relocation = @import("CodeGen.zig").Relocation;
 const BranchRelocation = @import("CodeGen.zig").BranchRelocation;
@@ -16,4 +17,11 @@ pub const Ir = struct {
 
     tag: Tag,
     node: NodeIndex,
+
+    pub fn deinit(ir: Ir, allocator: std.mem.Allocator) void {
+        switch (ir.tag) {
+            .label => |name| allocator.free(name),
+            else => {},
+        }
+    }
 };

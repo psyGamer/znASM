@@ -94,6 +94,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
+        // Constant Definition
+        const const_def = try p.parseConstDef(doc_comments);
+        if (const_def != null_node) {
+            try p.scratch.append(p.allocator, const_def);
+            continue;
+        }
+
         return p.fail(.expected_toplevel);
     }
 
@@ -132,6 +139,36 @@ fn parseFnDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
         .data = .{ .fn_def = .{
             .block = block,
             .extra = try p.writeExtraData(Ast.Node.FnDefData, .{
+                .bank_attr = bank_attr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
+        } },
+    });
+}
+
+/// ConstDef <- (KEYWORD_pub)? KEYWORD_const IDENTIFIER COLON TypeExpr (BankAttr)? EQUAL Expr
+fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_const = p.eatToken(.keyword_const) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.colon);
+    const type_expr = try p.parseTypeExpr();
+    const bank_attr = try p.parseBankAttr();
+    _ = try p.expectToken(.equal);
+    const value_expr = try p.parseExpr();
+    if (value_expr == null_node) {
+        return p.fail(.expected_expr);
+    }
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .const_def,
+        .main_token = keyword_const,
+        .data = .{ .const_def = .{
+            .value = value_expr,
+            .extra = try p.writeExtraData(Ast.Node.ConstDefData, .{
+                .type = type_expr,
                 .bank_attr = bank_attr,
                 .doc_comment_start = doc_comments.extra_start,
                 .doc_comment_end = doc_comments.extra_end,
@@ -301,19 +338,6 @@ fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Expr <- (IDENTIFIER)
-fn parseExpr(p: *Parser) ParseError!NodeIndex {
-    if (p.eatToken(.ident)) |ident| {
-        return try p.addNode(.{
-            .tag = .expr_ident,
-            .main_token = ident,
-            .data = undefined,
-        });
-    }
-
-    return null_node;
-}
-
 /// WhiteStatement
 ///     <- KEYWORD_while LPAREN KEYWORD_true RPAREN Block
 fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
@@ -332,6 +356,39 @@ fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
             .block = block,
         } },
     });
+}
+
+/// Expr <- (IDENTIFIER | INT_LITERAL)
+fn parseExpr(p: *Parser) ParseError!NodeIndex {
+    if (p.eatToken(.ident)) |ident| {
+        return try p.addNode(.{
+            .tag = .expr_ident,
+            .main_token = ident,
+            .data = undefined,
+        });
+    }
+    if (p.eatToken(.int_literal)) |literal| {
+        return try p.addNode(.{
+            .tag = .expr_value,
+            .main_token = literal,
+            .data = undefined,
+        });
+    }
+
+    return null_node;
+}
+
+/// TypeExpr <- (IDENTIFIER)
+fn parseTypeExpr(p: *Parser) ParseError!NodeIndex {
+    if (p.eatToken(.ident)) |ident| {
+        return try p.addNode(.{
+            .tag = .type_ident,
+            .main_token = ident,
+            .data = undefined,
+        });
+    }
+
+    return null_node;
 }
 
 // Helper functions

@@ -13,6 +13,7 @@ const InstructionType = @import("instruction.zig").InstructionType;
 const Relocation = @import("CodeGen.zig").Relocation;
 const Ir = @import("ir.zig").Ir;
 const Symbol = symbol.Symbol;
+const TypeSymbol = symbol.TypeSymbol;
 const SymbolLocation = symbol.SymbolLocation;
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const Sema = @This();
@@ -28,25 +29,32 @@ pub const Error = struct {
         // Extra: node
         duplicate_symbol,
         duplicate_label,
-        existing_sym,
+        existing_symbol,
         existing_label,
+        undefined_symbol,
+        undefined_label,
         missing_reset_vector,
         invalid_vector_name,
         invalid_opcode,
         invalid_builtin,
+        int_bitwidth_too_large,
         // Extra: vector
         duplicate_vector,
         // Extra: bank
         invalid_vector_bank,
         // Extra: size_type
         undefined_size_mode,
-        // Extra: max_bit_size
+        // Extra: int_size
         value_too_large,
         invalid_number,
         // Extra: arguments
         expected_arguments,
         // Extra: expected_token
         expected_token,
+        // Extra: expected_type
+        expected_type,
+        // Extra: expected_symbol
+        expected_const_var_symbol,
     };
 
     tag: Tag,
@@ -64,12 +72,20 @@ pub const Error = struct {
             actual: u8,
         },
         size_type: Instruction.SizeType,
-        max_bit_size: u16,
+        int_size: struct {
+            is_signed: bool,
+            bits: u16,
+        },
         arguments: struct {
             expected: u8,
             actual: u8,
         },
         expected_token: Token.Tag,
+        expected_type: struct {
+            expected: TypeSymbol,
+            actual: TypeSymbol,
+        },
+        expected_symbol: std.meta.Tag(Symbol),
     } = .{ .none = {} },
 
     pub fn getNotes(err: Error) u32 {
@@ -103,7 +119,10 @@ errors: std.ArrayListUnmanaged(Error) = .empty,
 interrupt_vectors: InterruptVectors = .{},
 allocator: std.mem.Allocator,
 
-pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: MappingMode) !Sema {
+pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: MappingMode) !?Sema {
+    const stderr = std.io.getStdErr();
+    const tty_config = std.io.tty.detectConfig(stderr);
+
     var sema: Sema = .{
         .modules = modules,
         .mapping_mode = mapping_mode,
@@ -125,17 +144,47 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
         });
     }
 
-    // Analyse symbols
+    if (try sema.detectErrors(stderr.writer(), tty_config)) {
+        return null;
+    }
+
+    // Analyse symbols in the order: variables / constants -> functions,
+    // to preserve the dependency graph
     const symbol_slice = sema.symbols.slice();
-    for (symbol_slice.items(.sym), symbol_slice.items(.loc)) |*sym, loc| {
-        const module_idx: ModuleIndex = @intCast(sema.symbol_map.getIndex(loc.module).?);
+    const symbols = symbol_slice.items(.sym);
+    const locations = symbol_slice.items(.loc);
+
+    // Variables / Constants
+    for (symbols, locations) |*sym, loc| {
         switch (sym.*) {
-            .function => sema.analyzeFunction(loc, module_idx, &sym.function) catch |err| switch (err) {
-                error.AnalyzeFailed => std.log.err("Failed to analyze function {}", .{loc}),
-                else => |e| return e,
+            .constant => {
+                const module_idx: ModuleIndex = @intCast(sema.symbol_map.getIndex(loc.module).?);
+                sema.analyzeConstant(loc, module_idx, &sym.constant) catch |err| switch (err) {
+                    error.AnalyzeFailed => std.log.err("Failed to analyze constant {}", .{loc}),
+                    else => |e| return e,
+                };
             },
-            else => @panic("unsupported"),
+            else => {},
         }
+    }
+    if (try sema.detectErrors(stderr.writer(), tty_config)) {
+        return null;
+    }
+    // Functions
+    for (symbols, locations) |*sym, loc| {
+        switch (sym.*) {
+            .function => {
+                const module_idx: ModuleIndex = @intCast(sema.symbol_map.getIndex(loc.module).?);
+                sema.analyzeFunction(loc, module_idx, &sym.function) catch |err| switch (err) {
+                    error.AnalyzeFailed => std.log.err("Failed to analyze function {}", .{loc}),
+                    else => |e| return e,
+                };
+            },
+            else => {},
+        }
+    }
+    if (try sema.detectErrors(stderr.writer(), tty_config)) {
+        return null;
     }
 
     return sema;
@@ -204,56 +253,76 @@ pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.t
 pub fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
     const highlight = "bold bright_magenta";
 
-    switch (err.tag) {
-        .duplicate_symbol => return rich.print(writer, tty_config, "Found duplicate symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
-        .duplicate_label => return rich.print(writer, tty_config, "Found duplicate label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
-        .missing_reset_vector => return rich.print(writer, tty_config, "Interrupt vector [" ++ highlight ++ "]@emulation_reset [reset]is not defined", .{}),
-        .invalid_vector_name => return rich.print(writer, tty_config, "Unknown interrupt vector [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
-        .invalid_opcode => return rich.print(writer, tty_config, "Invalid instruction opcode [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
-        .invalid_builtin => return rich.print(writer, tty_config, "Invalid built-in function [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
-        .existing_sym => return writer.writeAll("Symbol already defined here"),
-        .existing_label => return writer.writeAll("Label already defiend here"),
+    return switch (err.tag) {
+        .duplicate_symbol => rich.print(writer, tty_config, "Found duplicate symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .duplicate_label => rich.print(writer, tty_config, "Found duplicate label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .existing_symbol => writer.writeAll("Symbol already defined here"),
+        .existing_label => writer.writeAll("Label already defiend here"),
+        .undefined_symbol => rich.print(writer, tty_config, "Use of undefined symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .undefined_label => rich.print(writer, tty_config, "Use of undefined label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .missing_reset_vector => rich.print(writer, tty_config, "Interrupt vector [" ++ highlight ++ "]@emulation_reset [reset]is not defined", .{}),
+        .invalid_vector_name => rich.print(writer, tty_config, "Unknown interrupt vector [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .invalid_opcode => rich.print(writer, tty_config, "Invalid instruction opcode [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .invalid_builtin => rich.print(writer, tty_config, "Invalid built-in function [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .int_bitwidth_too_large => rich.print(writer, tty_config, "Bit-width of primitive integer type [" ++ highlight ++ "]{s}[reset] exceedes maximum bit-width of [" ++ highlight ++ "]{d}", .{
+            err.ast.tokenSource(err.token),
+            max_int_bitwidth,
+        }),
 
-        .duplicate_vector => return rich.print(writer, tty_config, "Found duplicate interrupt vector [" ++ highlight ++ "]{s}", .{@tagName(err.extra.vector)}),
+        .duplicate_vector => rich.print(writer, tty_config, "Found duplicate interrupt vector [" ++ highlight ++ "]{s}", .{@tagName(err.extra.vector)}),
 
-        .invalid_vector_bank => return rich.print(
+        .invalid_vector_bank => rich.print(
             writer,
             tty_config,
             "Expected interrupt vector [" ++ highlight ++ "]{s} [reset]to be located in bank [" ++ highlight ++ "]${x}[reset], but got [" ++ highlight ++ "]${x}",
             .{ err.ast.tokenSource(err.extra.bank.fn_name), memory_map.getRealBank(sema.mapping_mode, 0x00), err.extra.bank.actual },
         ),
 
-        .undefined_size_mode => return rich.print(writer, tty_config, "Size-mode is undefined for [" ++ highlight ++ "]{s}", .{switch (err.extra.size_type) {
+        .undefined_size_mode => rich.print(writer, tty_config, "Size-mode is undefined for [" ++ highlight ++ "]{s}", .{switch (err.extra.size_type) {
             .none => unreachable,
             .mem => "A-Register / Memory access",
             .idx => "X/Y-Registers",
         }}),
 
-        .value_too_large => return rich.print(
+        .value_too_large => rich.print(
             writer,
             tty_config,
-            "The value [" ++ highlight ++ "]{!} [reset]is too large to fit into a [" ++ highlight ++ "]{}-bit number",
-            .{ err.ast.parseIntLiteral(u64, err.token), err.extra.max_bit_size },
+            "The value [" ++ highlight ++ "]{!} [reset]is too large to fit into {s} [" ++ highlight ++ "]{s} {}-bit number",
+            .{
+                err.ast.parseIntLiteral(u64, err.token),
+                if (err.extra.int_size.is_signed) "a" else "an",
+                if (err.extra.int_size.is_signed) "signed" else "unsigned",
+                err.extra.int_size.bits,
+            },
         ),
-        .invalid_number => return rich.print(
+        .invalid_number => rich.print(
             writer,
             tty_config,
-            "The value [" ++ highlight ++ "]{s} [reset]is not a valid [" ++ highlight ++ "]{}-bit number",
-            .{ err.ast.tokenSource(err.token), err.extra.max_bit_size },
+            "The value [" ++ highlight ++ "]{s} [reset]is not a valid [" ++ highlight ++ "]{s} {}-bit number",
+            .{ err.ast.tokenSource(err.token), if (err.extra.int_size.is_signed) "signed" else "unsigned", err.extra.int_size.bits },
         ),
 
-        .expected_arguments => return rich.print(
+        .expected_arguments => rich.print(
             writer,
             tty_config,
             "Expected [" ++ highlight ++ "]{d} argument{s}[reset], found [" ++ highlight ++ "]{d}",
             .{ err.extra.arguments.expected, if (err.extra.arguments.expected == 1) "" else "s", err.extra.arguments.actual },
         ),
 
-        .expected_token => return rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_token => rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
             err.extra.expected_token.symbol(),
             err.ast.token_tags[err.token].symbol(),
         }),
-    }
+
+        .expected_type => rich.print(writer, tty_config, "Expected value of type [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+            err.extra.expected_type.expected,
+            err.extra.expected_type.actual,
+        }),
+
+        .expected_const_var_symbol => rich.print(writer, tty_config, "Expected symbol to [" ++ highlight ++ "]constant or variable[reset], found [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.expected_symbol),
+        }),
+    };
 }
 
 pub const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
@@ -271,7 +340,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
             .module => {
                 module.name = ast.parseIdentifier(token_idx);
             },
-            .fn_def => {
+            .fn_def, .const_def => {
                 const sym_loc: SymbolLocation = .{
                     .module = module.name.?,
                     .name = ast.parseIdentifier(token_idx + 1),
@@ -285,13 +354,13 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                         .token = token_idx + 1,
                     });
                     try sema.errors.append(sema.allocator, .{
-                        .tag = .existing_sym,
+                        .tag = .existing_symbol,
                         .type = .note,
                         .ast = ast,
                         .token = ast.node_tokens[
                             switch (existing_sym) {
                                 .function => |existing_func| existing_func.node,
-                                else => @panic("TODO"),
+                                .constant => |existing_const| existing_const.node,
                             }
                         ],
                     });
@@ -299,7 +368,12 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                     return;
                 }
 
-                sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx)) catch |err| switch (err) {
+                const result = switch (ast.node_tags[node_idx]) {
+                    .fn_def => sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx)),
+                    .const_def => sema.gatherConstantSymbol(sym_loc, module_idx, @intCast(node_idx)),
+                    else => unreachable,
+                };
+                result catch |err| switch (err) {
                     error.AnalyzeFailed => {
                         std.log.err("Failed to gather symbol of {}", .{sym_loc});
                         continue;
@@ -314,7 +388,6 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
 
 fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: NodeIndex) !void {
     const ast = &sema.modules[module_idx].ast;
-
     const fn_def = ast.node_data[node_idx].fn_def;
     const data = ast.extraData(Ast.Node.FnDefData, fn_def.extra);
 
@@ -329,8 +402,13 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
         .function = .{
             .is_pub = ast.token_tags[ast.node_tokens[node_idx] - 1] == .keyword_pub,
             .bank = bank,
-
             .node = node_idx,
+
+            // To be determined during analyzation
+            .ir = &.{},
+            .labels = &.{},
+            .instructions = &.{},
+            .assembly_data = &.{},
         },
     });
 
@@ -348,13 +426,13 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
 
                 const existing_sym = sema.lookupSymbol(existing_loc).?;
                 try sema.errors.append(sema.allocator, .{
-                    .tag = .existing_sym,
+                    .tag = .existing_symbol,
                     .type = .note,
                     .ast = ast,
                     .token = ast.node_tokens[
                         switch (existing_sym) {
                             .function => |existing_func| existing_func.node,
-                            else => @panic("TODO"),
+                            .constant => |existing_const| existing_const.node,
                         }
                     ],
                 });
@@ -390,21 +468,180 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
         });
     }
 }
+fn gatherConstantSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
+    const ast = &sema.modules[module_idx].ast;
+    const const_def = ast.node_data[node_idx].const_def;
+    const data = ast.extraData(Ast.Node.ConstDefData, const_def.extra);
 
-fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, func: *Symbol.Function) AnalyzeError!void {
+    const bank: u8 = if (data.bank_attr == Ast.null_node)
+        memory_map.getRealBank(sema.mapping_mode, 0x00)
+    else
+        memory_map.getRealBank(sema.mapping_mode, try sema.parseInt(u8, ast, ast.node_tokens[data.bank_attr]));
+
+    const const_token = ast.node_tokens[node_idx];
+    _ = const_token; // autofix
+
+    try sema.createSymbol(sym_loc, .{
+        .constant = .{
+            .is_pub = ast.token_tags[ast.node_tokens[node_idx] - 1] == .keyword_pub,
+            .bank = bank,
+            .node = node_idx,
+
+            // To be determined during analyzation
+            .type = undefined,
+            .value = &.{},
+        },
+    });
+}
+
+fn analyzeFunction(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, func_sym: *Symbol.Function) AnalyzeError!void {
     var analyzer: @import("sema/FunctionAnalyzer.zig") = .{
         .ast = &sema.modules[module_idx].ast,
         .sema = sema,
-        .func = func,
-        .sym_loc = sym_loc,
+        .symbol = func_sym,
+        .symbol_location = sym_loc,
     };
-    try analyzer.handleFnDef(func.node);
+    try analyzer.handleFnDef(func_sym.node);
 
     std.log.debug("IR for {s}::{s}", .{ sym_loc.module, sym_loc.name });
     for (analyzer.ir.items) |ir| {
         std.log.debug(" - {}", .{ir});
     }
-    func.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
+    func_sym.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
+}
+fn analyzeConstant(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, const_sym: *Symbol.Constant) AnalyzeError!void {
+    const ast = &sema.modules[module_idx].ast;
+    const const_def = ast.node_data[const_sym.node].const_def;
+    const data = ast.extraData(Ast.Node.ConstDefData, const_def.extra);
+
+    const_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
+    const_sym.value = try sema.resolveExprValue(ast, const_def.value, const_sym.type, sym_loc.module);
+}
+
+const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
+const max_int_bitwidth = 16;
+
+fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
+    _ = current_module; // autofix
+    switch (ast.node_tags[node_idx]) {
+        .type_ident => {
+            const token_idx = ast.node_tokens[node_idx];
+            const ident_name = ast.tokenSource(token_idx);
+
+            if (primitives.get(ident_name)) |primitive| {
+                return primitive;
+            }
+            if (ident_name[0] == 'i' or ident_name[0] == 'u') {
+                var is_int = true;
+                for (ident_name[1..]) |c| switch (c) {
+                    '0'...'9' => {},
+                    else => {
+                        is_int = false;
+                        break;
+                    },
+                };
+
+                if (is_int) {
+                    const bits = std.fmt.parseInt(u16, ident_name[1..], 10) catch {
+                        try sema.errors.append(sema.allocator, .{
+                            .tag = .int_bitwidth_too_large,
+                            .type = .err,
+                            .ast = ast,
+                            .token = token_idx,
+                        });
+                        return error.AnalyzeFailed;
+                    };
+                    if (bits > max_int_bitwidth) {
+                        try sema.errors.append(sema.allocator, .{
+                            .tag = .int_bitwidth_too_large,
+                            .type = .err,
+                            .ast = ast,
+                            .token = token_idx,
+                        });
+                        return error.AnalyzeFailed;
+                    }
+
+                    if (ident_name[0] == 'i') {
+                        return .{ .raw = .{ .signed_int = bits } };
+                    } else {
+                        return .{ .raw = .{ .unsigned_int = bits } };
+                    }
+                }
+            }
+
+            // TODO: Resolve custom types
+            try sema.errors.append(sema.allocator, .{
+                .tag = .undefined_symbol,
+                .type = .err,
+                .ast = ast,
+                .token = token_idx,
+            });
+            return error.AnalyzeFailed;
+        },
+        else => unreachable,
+    }
+}
+fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_type: TypeSymbol, current_module: []const u8) ![]const u8 {
+    _ = current_module; // autofix
+    switch (ast.node_tags[node_idx]) {
+        .expr_ident => {
+            @panic("TODO");
+        },
+        .expr_value => {
+            const value_ident = ast.node_tokens[node_idx];
+            const value = try sema.parseInt(TypeSymbol.ComptimeIntValue, ast, value_ident);
+
+            if (target_type != .raw or (target_type.raw != .signed_int and target_type.raw != .unsigned_int and target_type.raw != .comptime_int)) {
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .expected_type,
+                    .type = .err,
+                    .ast = ast,
+                    .token = value_ident,
+                    .extra = .{ .expected_type = .{
+                        .expected = target_type,
+                        .actual = .{ .raw = .{ .comptime_int = value } },
+                    } },
+                });
+                std.log.err("HUH {}", .{sema.errors.items.len});
+                return error.AnalyzeFailed;
+            }
+
+            // Validate size
+            if (target_type.raw != .comptime_int) {
+                const is_signed = target_type.raw == .signed_int;
+                const bits = switch (target_type.raw) {
+                    .signed_int => |bits| bits,
+                    .unsigned_int => |bits| bits,
+                    .comptime_int => unreachable,
+                };
+
+                const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(i64, 1) << @intCast(bits - 1));
+                const max: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else (@as(i64, 1) << @intCast(bits - @intFromBool(is_signed))) - 1;
+
+                if (value < min or value > max) {
+                    try sema.errors.append(sema.allocator, .{
+                        .tag = .value_too_large,
+                        .type = .err,
+                        .ast = ast,
+                        .token = value_ident,
+                        .extra = .{ .int_size = .{
+                            .is_signed = is_signed,
+                            .bits = bits,
+                        } },
+                    });
+                    return error.AnalyzeFailed;
+                }
+
+                const byte_size = std.mem.alignForward(u16, bits, 8) / 8;
+                return try sema.allocator.dupe(u8, std.mem.asBytes(&value)[0..byte_size]);
+            } else {
+                return try sema.allocator.dupe(u8, std.mem.asBytes(&value));
+            }
+        },
+        else => unreachable,
+    }
+    // const target_ident = try anal.sema.expectToken(anal.ast, target_node, .ident);
+    // const target_name = anal.ast.tokenSource(target_ident);
 }
 
 fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {
@@ -438,7 +675,10 @@ pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.T
             .type = .err,
             .ast = ast,
             .token = token_idx,
-            .extra = .{ .max_bit_size = 16 },
+            .extra = .{ .int_size = .{
+                .is_signed = @typeInfo(T).int.signedness == .signed,
+                .bits = @typeInfo(T).int.bits,
+            } },
         });
         return error.AnalyzeFailed;
     };

@@ -8,9 +8,11 @@ pub const Token = struct {
         new_line,
         eof,
 
+        period,
         comma,
         colon,
         semicolon,
+        equal,
         lparen,
         rparen,
         lbracket,
@@ -26,6 +28,8 @@ pub const Token = struct {
         keyword_module,
         keyword_pub,
         keyword_fn,
+        keyword_var,
+        keyword_const,
         keyword_true,
         keyword_false,
         keyword_if,
@@ -44,9 +48,11 @@ pub const Token = struct {
                 .doc_comment,
                 => null,
 
+                .period => ".",
                 .comma => ",",
                 .colon => ":",
                 .semicolon => ";",
+                .equal => "=",
                 .lparen => "(",
                 .rparen => ")",
                 .lbracket => "[",
@@ -57,6 +63,8 @@ pub const Token = struct {
                 .keyword_module => "module",
                 .keyword_pub => "pub",
                 .keyword_fn => "fn",
+                .keyword_var => "var",
+                .keyword_const => "const",
                 .keyword_true => "true",
                 .keyword_false => "false",
                 .keyword_if => "if",
@@ -96,6 +104,8 @@ pub const Token = struct {
         .{ "module", .keyword_module },
         .{ "pub", .keyword_pub },
         .{ "fn", .keyword_fn },
+        .{ "var", .keyword_var },
+        .{ "const", .keyword_const },
         .{ "true", .keyword_true },
         .{ "false", .keyword_false },
         .{ "if", .keyword_if },
@@ -182,6 +192,11 @@ pub fn next(lexer: *Lexer) Token {
                     state = .bin_int;
                 },
 
+                '.' => {
+                    token.tag = .period;
+                    lexer.index += 1;
+                    break;
+                },
                 ',' => {
                     token.tag = .comma;
                     lexer.index += 1;
@@ -194,6 +209,11 @@ pub fn next(lexer: *Lexer) Token {
                 },
                 ';' => {
                     token.tag = .semicolon;
+                    lexer.index += 1;
+                    break;
+                },
+                '=' => {
+                    token.tag = .equal;
                     lexer.index += 1;
                     break;
                 },

@@ -99,7 +99,15 @@ pub fn generate(gen: *CodeGen) !void {
             label.* = .{ label_name, index };
         }
         sym.function.labels = labels;
+        builder.labels.deinit(gen.allocator);
     }
+}
+
+pub fn deinit(gen: *CodeGen) void {
+    for (gen.banks.values()) |*bank_data| {
+        bank_data.deinit(gen.allocator);
+    }
+    gen.banks.deinit(gen.allocator);
 }
 
 /// Returns the memory-mapped location of a symbol
@@ -108,8 +116,8 @@ pub fn symbolLocation(gen: CodeGen, symbol_loc: SymbolLocation) u24 {
     const symbol = gen.sema.symbols.items(.sym)[symbol_idx];
 
     return switch (symbol) {
-        .variable => @panic("TODO"),
         .function => |func_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, func_sym.bank, func_sym.bank_offset),
+        .constant => |const_sym| memory_map.bankOffsetToAddr(gen.mapping_mode, const_sym.bank, const_sym.bank_offset),
     };
 }
 
@@ -288,12 +296,12 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
             defer if (!is_vector) gen.allocator.free(debug_sym_name);
 
             switch (symbol) {
-                .function => |func| {
-                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func.node]].start;
+                .function => |func_sym| {
+                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func_sym.node]].start;
 
-                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
+                    const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func_sym.bank) + func_sym.bank_offset;
 
-                    for (func.instructions, 0..) |info, info_idx| {
+                    for (func_sym.instructions, 0..) |info, info_idx| {
                         defer {
                             for (comments.items) |comment| {
                                 gen.allocator.free(comment);
@@ -303,7 +311,7 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
 
                         // Document comments
                         if (info_idx == 0) {
-                            const fn_def = module.ast.node_data[func.node].fn_def;
+                            const fn_def = module.ast.node_data[func_sym.node].fn_def;
                             const data = module.ast.extraData(Ast.Node.FnDefData, fn_def.extra);
 
                             for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
@@ -350,7 +358,7 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
                             // Function label
                             try writer.print("SnesPrgRom:{x}:{s}", .{ func_offset + info.offset, debug_sym_name });
                         } else {
-                            for (func.labels) |label| {
+                            for (func_sym.labels) |label| {
                                 const name, const idx = label;
                                 if (info_idx == idx) {
                                     // Jump label (prefixed to be unique)
@@ -376,7 +384,23 @@ pub fn writeMlbSymbols(gen: CodeGen, writer: std.fs.File.Writer) !void {
                         try writer.writeByte('\n');
                     }
                 },
-                else => @panic("Unsupported"),
+                .constant => |const_sym| {
+                    // Document comments
+                    const const_def = module.ast.node_data[const_sym.node].const_def;
+                    const data = module.ast.extraData(Ast.Node.ConstDefData, const_def.extra);
+
+                    for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
+                        const node_idx = module.ast.extra_data[extra_idx];
+                        const token_idx = module.ast.node_tokens[node_idx];
+                        std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                        const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
+
+                        var iter: WordWrapIter = .{ .line = doc_comment };
+                        while (iter.next()) |line| {
+                            try comments.append(gen.allocator, try std.fmt.allocPrint(gen.allocator, "   {s}", .{line}));
+                        }
+                    }
+                },
             }
         }
     }
@@ -414,11 +438,11 @@ pub fn generateCdlData(gen: CodeGen, rom: []const u8) ![]const u8 {
 
     for (gen.sema.symbols.items(.sym)) |sym| {
         switch (sym) {
-            .function => |func| {
-                const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func.bank) + func.bank_offset;
-                for (func.instructions, 0..) |info, info_idx| {
+            .function => |func_sym| {
+                const func_offset = memory_map.bankToRomOffset(gen.mapping_mode, func_sym.bank) + func_sym.bank_offset;
+                for (func_sym.instructions, 0..) |info, info_idx| {
                     const has_label_target = get_label: {
-                        for (func.labels) |label| {
+                        for (func_sym.labels) |label| {
                             _, const idx = label;
                             if (info_idx == idx) {
                                 break :get_label true;
@@ -437,7 +461,10 @@ pub fn generateCdlData(gen: CodeGen, rom: []const u8) ![]const u8 {
                     };
                 }
             },
-            else => @panic("Unsupported"),
+            .constant => |const_sym| {
+                _ = const_sym; // autofix
+                // TODO
+            },
         }
     }
 
@@ -458,7 +485,7 @@ const FunctionBuilder = struct {
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
     /// Size of the A-Register / Memory instructions
-    mem_size: Instruction.SizeMode = .none,
+    mem_size: Instruction.SizeMode = .@"8bit",
     /// Size of the X/Y-Registers
     idx_size: Instruction.SizeMode = .none,
 

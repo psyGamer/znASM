@@ -18,6 +18,11 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         fn_def,
 
+        /// `data` is `const_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        const_def,
+
         /// `main_token` is the `int_literal` of bank
         bank_attr,
 
@@ -40,6 +45,11 @@ pub const Node = struct {
 
         /// `main_token` is the `identifier` of the expression
         expr_ident,
+        /// `main_token` is the `int_literal` value of the expression
+        expr_value,
+
+        /// `main_token` is the `identifier` of the type
+        type_ident,
     };
 
     tag: Tag,
@@ -64,6 +74,10 @@ pub const Node = struct {
             block: NodeIndex,
             extra: ExtraIndex,
         },
+        const_def: struct {
+            value: NodeIndex,
+            extra: ExtraIndex,
+        },
         while_statement: struct {
             condition: NodeIndex,
             block: NodeIndex,
@@ -76,6 +90,12 @@ pub const Node = struct {
     };
 
     pub const FnDefData = struct {
+        bank_attr: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
+    };
+    pub const ConstDefData = struct {
+        type: NodeIndex,
         bank_attr: NodeIndex,
         doc_comment_start: NodeIndex,
         doc_comment_end: NodeIndex,
@@ -168,6 +188,8 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []
         .token_locs = token_locs,
         .allocator = allocator,
     };
+    defer parser.scratch.deinit(allocator);
+
     errdefer parser.nodes.deinit(allocator);
     errdefer parser.errors.deinit(allocator);
 
@@ -200,6 +222,7 @@ pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []
 pub fn deinit(tree: *Ast, allocator: std.mem.Allocator) void {
     tree.token_slice.deinit(allocator);
     tree.node_slice.deinit(allocator);
+    allocator.free(tree.extra_data);
     allocator.free(tree.errors);
 }
 
