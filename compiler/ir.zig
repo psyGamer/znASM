@@ -11,6 +11,10 @@ pub const Ir = struct {
             instr: Instruction,
             reloc: ?Relocation,
         },
+        change_size: struct {
+            target: Instruction.SizeType,
+            mode: Instruction.SizeMode,
+        },
         label: []const u8,
         branch: BranchRelocation,
     };

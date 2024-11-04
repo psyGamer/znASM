@@ -5,6 +5,7 @@ pub const Instruction = union(Opcode) {
     /// depending on the current register mode
     pub const Imm816 = packed union { imm8: u8, imm16: u16 };
 
+    /// 16-bit Absolute address
     pub const Addr16 = enum(u16) { _ };
 
     /// State of the Status Flags Register
@@ -13,14 +14,14 @@ pub const Instruction = union(Opcode) {
         zero: bool = false,
         irq_disable: bool = false,
         decimal: bool = false,
-        xy_8bit: bool = false,
-        a_8bit: bool = false,
+        idx_8bit: bool = false,
+        mem_8bit: bool = false,
         overflow: bool = false,
         negative: bool = false,
     };
 
     /// Defines which size to use for Imm816 instructions
-    /// Should always be none for non-Imm816 instructions
+    /// Should always be `none` for non-Imm816 instructions
     pub const SizeMode = enum { none, @"8bit", @"16bit" };
 
     /// Used size-type of an instruction

@@ -465,7 +465,6 @@ fn expectToken(p: *Parser, tag: Token.Tag) ParseError!TokenIndex {
     if (p.token_tags[p.index] != tag) {
         try p.errors.append(p.allocator, .{
             .tag = .expected_token,
-            .is_note = false,
             .token = p.index,
             .extra = .{ .expected_tag = tag },
         });
@@ -479,7 +478,6 @@ fn fail(p: *Parser, tag: Error.Tag) ParseError {
     try p.errors.append(p.allocator, .{
         .tag = tag,
         .token = p.index,
-        .is_note = false,
     });
     return error.ParseFailed;
 }
@@ -489,7 +487,6 @@ fn warn(p: *Parser, tag: Error.Tag) !void {
     try p.errors.append(p.allocator, .{
         .tag = tag,
         .token = p.index,
-        .is_note = false,
     });
 }
 

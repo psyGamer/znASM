@@ -129,7 +129,7 @@ pub const Error = struct {
     tag: Tag,
 
     /// Notes are associated with the previous error
-    is_note: bool,
+    is_note: bool = false,
 
     /// True if `token` points to the token before the token causing an issue.
     token_is_prev: bool = false,

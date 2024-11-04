@@ -112,7 +112,7 @@ const FunctionBuilder = struct {
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
     /// Size of the A-Register / Memory instructions
-    mem_size: Instruction.SizeMode = .@"8bit",
+    mem_size: Instruction.SizeMode = .none,
     /// Size of the X/Y-Registers
     idx_size: Instruction.SizeMode = .none,
 
@@ -120,6 +120,7 @@ const FunctionBuilder = struct {
         for (b.symbol.ir) |ir| {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
+                .change_size => try b.handleChangeSize(ir),
                 .label => try b.handleLabel(ir),
                 .branch => try b.handleBranch(ir),
             }
@@ -140,6 +141,46 @@ const FunctionBuilder = struct {
 
             .source = ir.node,
         });
+    }
+    fn handleChangeSize(b: *FunctionBuilder, ir: Ir) !void {
+        const change_size = ir.tag.change_size;
+
+        const curr_mode = switch (change_size.target) {
+            .mem => b.mem_size,
+            .idx => b.idx_size,
+            .none => unreachable,
+        };
+        if (change_size.mode == curr_mode) {
+            return;
+        }
+
+        const flags: Instruction.StatusRegister = .{
+            .mem_8bit = change_size.target == .mem,
+            .idx_8bit = change_size.target == .idx,
+        };
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = switch (change_size.mode) {
+                .@"8bit" => .{ .sep = flags },
+                .@"16bit" => .{ .rep = flags },
+                .none => unreachable,
+            },
+            .offset = undefined,
+
+            .reloc = null,
+            .branch_reloc = null,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+
+        switch (change_size.target) {
+            .mem => b.mem_size = change_size.mode,
+            .idx => b.idx_size = change_size.mode,
+            .none => unreachable,
+        }
     }
     fn handleLabel(b: *FunctionBuilder, ir: Ir) !void {
         try b.labels.put(b.sema.allocator, ir.tag.label, @intCast(b.instructions.items.len));
