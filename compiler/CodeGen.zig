@@ -181,27 +181,109 @@ const FunctionBuilder = struct {
     fn handleLoad(b: *FunctionBuilder, ir: Ir) !void {
         const load = ir.tag.load;
 
-        const instr: Instruction = switch (load.target) {
+        const instr: Instruction, const reloc: ?Relocation = switch (load.target) {
             .a8, .a16 => switch (load.value) {
-                .immediate => |value| .{ .lda = if (load.target == .a8)
+                .immediate => |value| .{ .{ .lda_imm = if (load.target == .a8)
                     .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
                 else
-                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } },
-                .symbol => |symbol| {
-                    _ = symbol; // autofix
-                    // TODO: Handle symbol in another bank
-                    @panic("TODO");
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+
+                .symbol => |sym_loc| b: {
+                    const sym = b.sema.lookupSymbol(sym_loc).?.*;
+                    break :b switch (sym) {
+                        .function => unreachable,
+                        .constant => .{ .{ .lda_imm = if (load.target == .a8)
+                            .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
+                        else
+                            .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
+
+                        .variable => if (b.sema.isSymbolAccessibleInBank(sym, b.symbol.bank))
+                            .{ .{ .lda_addr16 = undefined }, .{
+                                .type = .addr16,
+                                .target_sym = sym_loc,
+                                .target_offset = load.source_offset,
+                            } }
+                        else
+                            .{ .{ .lda_addr24 = undefined }, .{
+                                .type = .addr24,
+                                .target_sym = sym_loc,
+                                .target_offset = load.source_offset,
+                            } },
+                    };
                 },
-                .register => |register| {
-                    _ = register; // autofix
-                    @panic("TODO");
+                .register => |register| switch (register) {
+                    .a8, .a16 => unreachable,
+                    .x8, .x16 => .{ .txa, null },
+                    .y8, .y16 => .{ .tya, null },
                 },
             },
-            else => @panic("TODO"),
+            .x8, .x16 => switch (load.value) {
+                .immediate => |value| .{ .{ .ldx_imm = if (load.target == .x8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                else
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+
+                .symbol => |sym_loc| b: {
+                    const sym = b.sema.lookupSymbol(sym_loc).?.*;
+                    break :b switch (sym) {
+                        .function => unreachable,
+                        .constant => .{ .{ .ldx_imm = if (load.target == .x8)
+                            .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
+                        else
+                            .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
+
+                        .variable => if (b.sema.isSymbolAccessibleInBank(sym, b.symbol.bank))
+                            .{ .{ .ldx_addr16 = undefined }, .{
+                                .type = .addr16,
+                                .target_sym = sym_loc,
+                                .target_offset = load.source_offset,
+                            } }
+                        else
+                            unreachable,
+                    };
+                },
+                .register => |register| switch (register) {
+                    .a8, .a16 => .{ .tax, null },
+                    .x8, .x16 => unreachable,
+                    .y8, .y16 => .{ .tyx, null },
+                },
+            },
+            .y8, .y16 => switch (load.value) {
+                .immediate => |value| .{ .{ .ldy_imm = if (load.target == .y8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                else
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+
+                .symbol => |sym_loc| b: {
+                    const sym = b.sema.lookupSymbol(sym_loc).?.*;
+                    break :b switch (sym) {
+                        .function => unreachable,
+                        .constant => .{ .{ .ldy_imm = if (load.target == .y8)
+                            .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
+                        else
+                            .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
+
+                        .variable => if (b.sema.isSymbolAccessibleInBank(sym, b.symbol.bank))
+                            .{ .{ .ldy_addr16 = undefined }, .{
+                                .type = .addr16,
+                                .target_sym = sym_loc,
+                                .target_offset = load.source_offset,
+                            } }
+                        else
+                            unreachable,
+                    };
+                },
+                .register => |register| switch (register) {
+                    .a8, .a16 => .{ .tay, null },
+                    .x8, .x16 => .{ .txy, null },
+                    .y8, .y16 => unreachable,
+                },
+            },
         };
 
         try b.instructions.append(b.sema.allocator, .{
             .instr = instr,
+            .reloc = reloc,
 
             .mem_size = b.mem_size,
             .idx_size = b.idx_size,
@@ -211,17 +293,39 @@ const FunctionBuilder = struct {
     }
     fn handleStore(b: *FunctionBuilder, ir: Ir) !void {
         const store = ir.tag.store;
+        const target_symbol = b.sema.lookupSymbol(store.target).?;
 
         const instr: Instruction, const reloc: ?Relocation = switch (store.source) {
-            .a8, .a16 => b: {
-                // TODO: Handle symbol in another bank
-                break :b .{ .{ .sta_addr16 = undefined }, .{
+            .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.symbol.bank))
+                .{ .{ .sta_addr16 = undefined }, .{
                     .type = .addr16,
                     .target_sym = store.target,
                     .target_offset = store.target_offset,
-                } };
-            },
-            else => @panic("TODO"),
+                } }
+            else
+                .{ .{ .sta_addr24 = undefined }, .{
+                    .type = .addr24,
+                    .target_sym = store.target,
+                    .target_offset = store.target_offset,
+                } },
+
+            .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.symbol.bank))
+                .{ .{ .stx_addr16 = undefined }, .{
+                    .type = .addr16,
+                    .target_sym = store.target,
+                    .target_offset = store.target_offset,
+                } }
+            else
+                unreachable,
+
+            .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.symbol.bank))
+                .{ .{ .sty_addr16 = undefined }, .{
+                    .type = .addr16,
+                    .target_sym = store.target,
+                    .target_offset = store.target_offset,
+                } }
+            else
+                unreachable,
         };
 
         try b.instructions.append(b.sema.allocator, .{

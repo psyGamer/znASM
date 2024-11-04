@@ -644,6 +644,18 @@ pub fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?*Symbol {
     }
     return null;
 }
+/// Checks if the symbol is accessible in the specified bank
+pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
+    return switch (sym) {
+        .function,
+        => |fn_sym| memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.bankOffsetToAddr(sema.mapping_mode, fn_sym.bank, 0), bank),
+        .constant,
+        => |const_sym| memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.bankOffsetToAddr(sema.mapping_mode, const_sym.bank, 0), bank),
+        .variable,
+        => |var_sym| memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.wramOffsetToAddr(var_sym.wram_offset_min), bank) and
+            memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.wramOffsetToAddr(var_sym.wram_offset_max), bank),
+    };
+}
 
 /// Tries parsing an integer and reports an error on failure
 pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.TokenIndex) AnalyzeError!T {

@@ -72,12 +72,28 @@ pub const Instruction = union(Opcode) {
     /// Return Long from Subroutine
     rtl: void,
 
-    /// Load Accumulator from Memory
-    lda: Imm816,
-    /// Load Index Register X from Memory
-    ldx: Imm816,
-    /// Load Index Register Y from Memory
-    ldy: Imm816,
+    /// Load Accumulator from Memory (Immediate)
+    lda_imm: Imm816,
+    /// Load Accumulator from Memory (Direct Page)
+    lda_dp: u8,
+    /// Load Accumulator from Memory (Absolute)
+    lda_addr16: Addr16,
+    /// Load Accumulator from Memory (Long)
+    lda_addr24: u24,
+
+    /// Load Index Register X from Memory (Immediate)
+    ldx_imm: Imm816,
+    /// Load Index Register X from Memory (Direct Page)
+    ldx_dp: u8,
+    /// Load Index Register X from Memory (Absolute)
+    ldx_addr16: Addr16,
+
+    /// Load Index Register Y from Memory (Immediate)
+    ldy_imm: Imm816,
+    /// Load Index Register Y from Memory (Direct Page)
+    ldy_dp: u8,
+    /// Load Index Register Y from Memory (Absolute)
+    ldy_addr16: Addr16,
 
     /// Store Zero to Memory (Direct Page)
     stz_dp: u8,
@@ -86,7 +102,7 @@ pub const Instruction = union(Opcode) {
     /// Store Zero to Memory (Direct Page, X Indexed)
     stz_dp_idx_x: u8,
     /// Store Zero to Memory (Absolute, X Indexed)
-    stz_addr16_idx_x: u16,
+    stz_addr16_idx_x: Addr16,
 
     /// Store Accumulator to Memory (Direct Page)
     sta_addr8: u8,
@@ -283,9 +299,18 @@ pub const Opcode = enum(u8) {
     rts = 0x60,
     rtl = 0x6B,
 
-    lda = 0xA9,
-    ldx = 0xA2,
-    ldy = 0xA0,
+    lda_imm = 0xA9,
+    lda_dp = 0xA5,
+    lda_addr16 = 0xAD,
+    lda_addr24 = 0xAF,
+
+    ldx_imm = 0xA2,
+    ldx_dp = 0xA6,
+    ldx_addr16 = 0xAE,
+
+    ldy_imm = 0xA0,
+    ldy_dp = 0xA4,
+    ldy_addr16 = 0xAC,
 
     stz_dp = 0x64,
     stz_addr16 = 0x9C,
@@ -390,8 +415,24 @@ pub const Opcode = enum(u8) {
     /// Checks which size-type is used for this opcode
     pub fn sizeType(instr: Opcode) Instruction.SizeType {
         return switch (instr) {
-            .lda, .cmp, .sta_addr16 => .mem,
-            .ldx, .cpx, .ldy, .cpy => .idx,
+            .lda_imm,
+            .lda_dp,
+            .lda_addr16,
+            .lda_addr24,
+            .sta_addr16,
+            .cmp,
+            => .mem,
+
+            .ldx_imm,
+            .ldx_dp,
+            .ldx_addr16,
+            .ldy_imm,
+            .ldy_dp,
+            .ldy_addr16,
+            .cpx,
+            .cpy,
+            => .idx,
+
             else => .none,
         };
     }

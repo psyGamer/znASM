@@ -427,7 +427,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 .load = .{
                     .target = register_type,
                     .value = value_expr,
-                    // .source_offset = offset,
+                    .source_offset = offset,
                 },
             },
             .node = node_idx,
