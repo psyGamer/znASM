@@ -41,6 +41,7 @@ pub fn handleBlock(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         switch (ana.ast.node_tags[child_idx]) {
             .instruction => try ana.handleInstruction(child_idx),
             .label => try ana.handleLabel(child_idx),
+            .assign_statement => try ana.handleAssign(child_idx),
             .call_statement => try ana.handleCall(child_idx),
             .while_statement => try ana.handleWhile(child_idx),
             else => unreachable,
@@ -133,6 +134,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             if (field.type == void) {
                 break :get_instr .{ @unionInit(Instruction, field.name, {}), null };
             }
+
             if (field.type == Instruction.Imm816) {
                 if (ana.ast.token_tags[operand_token] == .int_literal) {
                     if (curr_size == .@"8bit") {
@@ -146,19 +148,8 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
 
                 if (ana.ast.token_tags[operand_token] == .ident and ana.ast.token_tags[operand_token + 1] == .new_line) {
-                    const value_sym = ana.sema.lookupSymbol(.{
-                        .module = ana.symbol_location.module,
-                        .name = ana.ast.parseIdentifier(operand_token),
-                    }) orelse {
-                        try ana.sema.errors.append(ana.sema.allocator, .{
-                            .tag = .undefined_symbol,
-                            .ast = ana.ast,
-                            .token = operand_token,
-                        });
-                        return error.AnalyzeFailed;
-                    };
-
-                    switch (value_sym) {
+                    const value_sym, _ = try ana.sema.resolveSymbolLocation(ana.ast, operand_token, ana.symbol_location.module);
+                    switch (value_sym.*) {
                         .constant => |const_sym| {
                             if (curr_size == .@"8bit") {
                                 if (const_sym.type != .raw or const_sym.type.raw != .unsigned_int or const_sym.type.raw.unsigned_int > 8) {
@@ -174,8 +165,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                     return error.AnalyzeFailed;
                                 }
 
-                                const value: u8 = @bitCast(const_sym.value[0..@sizeOf(u8)].*);
-                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = value }), null };
+                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = const_sym.value.resolve(u8, ana.sema) }), null };
                             }
                             if (curr_size == .@"16bit") {
                                 if (const_sym.type != .raw or const_sym.type.raw != .unsigned_int or const_sym.type.raw.unsigned_int > 16) {
@@ -191,20 +181,21 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                     return error.AnalyzeFailed;
                                 }
 
-                                const value_ptr: *const u16 = @ptrCast(@alignCast(const_sym.value.ptr));
-                                // Mask-out undefined values for smaller types
-                                const value: u16 = value_ptr.* & @as(u16, std.math.maxInt(u16)) >> @intCast((@sizeOf(u16) -| const_sym.value.len) * 8);
-                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm16 = value }), null };
+                                break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm16 = const_sym.value.resolve(u16, ana.sema) }), null };
                             }
 
                             unreachable;
+                        },
+                        .variable => |var_sym| {
+                            _ = var_sym; // autofix
+                            @panic("TODO");
                         },
                         else => {
                             try ana.sema.errors.append(ana.sema.allocator, .{
                                 .tag = .expected_const_var_symbol,
                                 .ast = ana.ast,
                                 .token = operand_token,
-                                .extra = .{ .expected_symbol = value_sym },
+                                .extra = .{ .actual_symbol = value_sym.* },
                             });
                             return error.AnalyzeFailed;
                         },
@@ -226,7 +217,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                         return error.AnalyzeFailed;
                     };
 
-                    switch (value_sym) {
+                    switch (value_sym.*) {
                         .variable => |var_sym| {
                             if (curr_size == .@"8bit") {
                                 if (var_sym.type != .raw or var_sym.type.raw != .unsigned_int or var_sym.type.raw.unsigned_int > 8) {
@@ -259,18 +250,16 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                             break :get_instr .{ @unionInit(Instruction, field.name, undefined), .{
                                 .type = .addr16,
                                 .target_sym = value_sym_loc,
-                                .target_offset = 0,
                             } };
                         },
                         else => {
-                            @panic("TODO: error");
-                            // try ana.sema.errors.append(ana.sema.allocator, .{
-                            //     .tag = .expected_const_var_symbol,
-                            //     .ast = ana.ast,
-                            //     .token = operand_token,
-                            //     .extra = .{ .expected_symbol = value_sym },
-                            // });
-                            // return error.AnalyzeFailed;
+                            try ana.sema.errors.append(ana.sema.allocator, .{
+                                .tag = .expected_var_symbol,
+                                .ast = ana.ast,
+                                .token = operand_token,
+                                .extra = .{ .actual_symbol = value_sym.* },
+                            });
+                            return error.AnalyzeFailed;
                         },
                     }
                 }
@@ -287,7 +276,6 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                         else => unreachable,
                     },
                     .target_sym = .parse(ana.ast.parseIdentifier(operand_token), ana.symbol_location.module),
-                    .target_offset = 0,
                 } };
             }
 
@@ -316,7 +304,7 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             .is_note = true,
             .ast = ana.ast,
             .token = ana.ast.node_tokens[
-                switch (existing_sym) {
+                switch (existing_sym.*) {
                     .function => |existing_func| existing_func.node,
                     else => @panic("TODO"),
                 }
@@ -350,6 +338,109 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         .tag = .{ .label = try ana.sema.allocator.dupe(u8, label) },
         .node = node_idx,
     });
+}
+
+fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
+    const data = ana.ast.node_data[node_idx].assign_statement;
+
+    const target_ident = ana.ast.node_tokens[node_idx];
+    const target_symbol, const target_symbol_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
+    const target_type = switch (target_symbol.*) {
+        .constant => |const_sym| const_sym.type,
+        .variable => |var_sym| var_sym.type,
+        else => {
+            try ana.sema.errors.append(ana.sema.allocator, .{
+                .tag = .expected_const_var_symbol,
+                .ast = ana.ast,
+                .token = target_ident,
+                .extra = .{ .actual_symbol = target_symbol.* },
+            });
+            return error.AnalyzeFailed;
+        },
+    };
+
+    const value_expr = try ana.sema.resolveExprValue(ana.ast, data.value, target_type, ana.symbol_location.module);
+
+    const register_type = get_register: {
+        if (value_expr != .register) {
+            if (data.intermediate_register == Ast.null_token) {
+                try ana.sema.errors.append(ana.sema.allocator, .{
+                    .tag = .expected_intermediate_register,
+                    .ast = ana.ast,
+                    .token = ana.ast.node_tokens[data.value],
+                });
+                return error.AnalyzeFailed;
+            }
+
+            const register_name = ana.ast.tokenSource(data.intermediate_register);
+            break :get_register std.meta.stringToEnum(Sema.RegisterType, register_name) orelse {
+                try ana.sema.errors.append(ana.sema.allocator, .{
+                    .tag = .invalid_register,
+                    .ast = ana.ast,
+                    .token = data.intermediate_register,
+                });
+                return error.AnalyzeFailed;
+            };
+        } else {
+            break :get_register value_expr.register;
+        }
+    };
+
+    const register_size: u8 = switch (register_type) {
+        .a8, .x8, .y8 => 1,
+        .a16, .x16, .y16 => 2,
+    };
+
+    const target_size = target_type.size();
+    if (target_size % register_size != 0) {
+        try ana.sema.errors.append(ana.sema.allocator, .{
+            .tag = .expected_register_size,
+            .ast = ana.ast,
+            .token = data.intermediate_register,
+            .extra = .{ .expected_register_size = .{
+                .expected = target_size * 8,
+                .actual = register_size * 8,
+            } },
+        });
+        return error.AnalyzeFailed;
+    }
+
+    try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(target_size, register_size) * 2);
+    ana.ir.appendAssumeCapacity(.{
+        .tag = .{ .change_size = .{
+            .target = switch (register_type) {
+                .a8, .a16 => .mem,
+                .x8, .x16, .y8, .y16 => .idx,
+            },
+            .mode = switch (register_type) {
+                .a8, .x8, .y8 => .@"8bit",
+                .a16, .x16, .y16 => .@"16bit",
+            },
+        } },
+        .node = node_idx,
+    });
+
+    var offset: u16 = 0;
+    while (offset < target_size) : (offset += register_size) {
+        ana.ir.appendAssumeCapacity(.{
+            .tag = .{
+                .load = .{
+                    .target = register_type,
+                    .value = value_expr,
+                    // .source_offset = offset,
+                },
+            },
+            .node = node_idx,
+        });
+        ana.ir.appendAssumeCapacity(.{
+            .tag = .{ .store = .{
+                .source = register_type,
+                .target = target_symbol_loc,
+                .target_offset = offset,
+            } },
+            .node = node_idx,
+        });
+    }
 }
 
 fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {

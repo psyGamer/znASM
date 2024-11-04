@@ -6,6 +6,7 @@ const Node = Ast.Node;
 const NodeIndex = Ast.NodeIndex;
 const Module = @import("Module.zig");
 const Symbol = @import("symbol.zig").Symbol;
+const TypeSymbol = @import("symbol.zig").TypeSymbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const Sema = @import("Sema.zig");
 const Instruction = @import("instruction.zig").Instruction;
@@ -30,7 +31,7 @@ pub const Relocation = struct {
 
     type: Type,
     target_sym: SymbolLocation,
-    target_offset: u16,
+    target_offset: u16 = 0,
 };
 /// Branches need to be relocated to point to their label and use the short / long form
 pub const BranchRelocation = struct {
@@ -53,10 +54,10 @@ pub const BranchRelocation = struct {
 pub const InstructionInfo = struct {
     instr: Instruction,
     /// Offset from the start of the function. Only defined once the assembly as been emitted
-    offset: u16,
+    offset: u16 = undefined,
 
-    reloc: ?Relocation,
-    branch_reloc: ?BranchRelocation,
+    reloc: ?Relocation = null,
+    branch_reloc: ?BranchRelocation = null,
 
     /// Size of the A-Register / Memory instructions
     mem_size: Instruction.SizeMode,
@@ -121,8 +122,10 @@ const FunctionBuilder = struct {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
                 .change_size => try b.handleChangeSize(ir),
-                .label => try b.handleLabel(ir),
+                .load => try b.handleLoad(ir),
+                .store => try b.handleStore(ir),
                 .branch => try b.handleBranch(ir),
+                .label => try b.handleLabel(ir),
             }
         }
     }
@@ -131,10 +134,7 @@ const FunctionBuilder = struct {
         const instruction = ir.tag.instruction;
         try b.instructions.append(b.sema.allocator, .{
             .instr = instruction.instr,
-            .offset = undefined,
-
             .reloc = instruction.reloc,
-            .branch_reloc = null,
 
             .mem_size = b.mem_size,
             .idx_size = b.idx_size,
@@ -165,10 +165,6 @@ const FunctionBuilder = struct {
                 .@"16bit" => .{ .rep = flags },
                 .none => unreachable,
             },
-            .offset = undefined,
-
-            .reloc = null,
-            .branch_reloc = null,
 
             .mem_size = b.mem_size,
             .idx_size = b.idx_size,
@@ -182,15 +178,68 @@ const FunctionBuilder = struct {
             .none => unreachable,
         }
     }
+    fn handleLoad(b: *FunctionBuilder, ir: Ir) !void {
+        const load = ir.tag.load;
+
+        const instr: Instruction = switch (load.target) {
+            .a8, .a16 => switch (load.value) {
+                .immediate => |value| .{ .lda = if (load.target == .a8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                else
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } },
+                .symbol => |symbol| {
+                    _ = symbol; // autofix
+                    // TODO: Handle symbol in another bank
+                    @panic("TODO");
+                },
+                .register => |register| {
+                    _ = register; // autofix
+                    @panic("TODO");
+                },
+            },
+            else => @panic("TODO"),
+        };
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = instr,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+    }
+    fn handleStore(b: *FunctionBuilder, ir: Ir) !void {
+        const store = ir.tag.store;
+
+        const instr: Instruction, const reloc: ?Relocation = switch (store.source) {
+            .a8, .a16 => b: {
+                // TODO: Handle symbol in another bank
+                break :b .{ .{ .sta_addr16 = undefined }, .{
+                    .type = .addr16,
+                    .target_sym = store.target,
+                    .target_offset = store.target_offset,
+                } };
+            },
+            else => @panic("TODO"),
+        };
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = instr,
+            .reloc = reloc,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+    }
     fn handleLabel(b: *FunctionBuilder, ir: Ir) !void {
         try b.labels.put(b.sema.allocator, ir.tag.label, @intCast(b.instructions.items.len));
     }
     fn handleBranch(b: *FunctionBuilder, ir: Ir) !void {
         try b.instructions.append(b.sema.allocator, .{
             .instr = undefined,
-            .offset = undefined,
-
-            .reloc = null,
             .branch_reloc = ir.tag.branch,
 
             .mem_size = b.mem_size,
@@ -415,10 +464,7 @@ const FunctionBuilder = struct {
                 } else {
                     try b.instructions.insert(b.sema.allocator, source_idx + 1, .{
                         .instr = .{ .jmp = undefined },
-                        .offset = undefined,
-
                         .reloc = jmp_reloc,
-                        .branch_reloc = null,
 
                         .mem_size = info.mem_size,
                         .idx_size = info.idx_size,

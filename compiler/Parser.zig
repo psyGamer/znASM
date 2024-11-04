@@ -243,6 +243,14 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
 
         const start_idx = p.index;
 
+        // Asignment
+        const assign = try p.parseAssignStatement();
+        if (assign != null_node) {
+            try p.scratch.append(p.allocator, assign);
+            continue;
+        }
+        p.index = start_idx;
+
         // Call
         const call = try p.parseCallStatement();
         if (call != null_node) {
@@ -313,6 +321,37 @@ fn parseLabel(p: *Parser) ParseError!NodeIndex {
     });
 }
 
+/// AssignStatement <- IDENTIFIER (DOUBLE_COLON IDENTIFIER)? EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
+fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
+    const ident_target = p.eatToken(.ident) orelse return null_node;
+    if (p.eatToken(.double_colon)) |_| {
+        _ = try p.expectToken(.ident);
+    }
+
+    _ = p.eatToken(.equal) orelse return null_node;
+
+    const expr_value = try p.parseExpr();
+    if (expr_value == null_node) {
+        return p.fail(.expected_expr);
+    }
+
+    const ident_register = if (p.eatToken(.colon)) |_|
+        try p.expectToken(.ident)
+    else
+        Ast.null_token;
+
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .assign_statement,
+        .main_token = ident_target,
+        .data = .{ .assign_statement = .{
+            .value = expr_value,
+            .intermediate_register = ident_register,
+        } },
+    });
+}
+
 /// CallStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN NEW_LINE
 ///
 /// ExprList <- (Expr COMMA)* Expr?
@@ -326,12 +365,12 @@ fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
     while (true) {
         if (p.eatToken(.rparen)) |_| break;
 
-        const param = try p.parseExpr();
-        if (param == null_node) {
+        const expr_param = try p.parseExpr();
+        if (expr_param == null_node) {
             return p.fail(.expected_expr);
         }
 
-        try p.scratch.append(p.allocator, param);
+        try p.scratch.append(p.allocator, expr_param);
 
         switch (p.token_tags[p.index]) {
             .comma => p.index += 1,

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Ast = @import("Ast.zig");
 const Ir = @import("ir.zig").Ir;
+const ExpressionValue = @import("Sema.zig").ExpressionValue;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
@@ -56,10 +57,10 @@ pub const Symbol = union(enum) {
         /// Offset into the target bank
         bank_offset: u16 = undefined,
 
-        /// Type if this constant value
+        /// Type of this constant
         type: TypeSymbol,
-        /// Byte representation of the value
-        value: []const u8,
+        /// Value of this constant
+        value: ExpressionValue,
 
         /// `const_def` node of this symbol
         node: Ast.NodeIndex,
@@ -75,7 +76,7 @@ pub const Symbol = union(enum) {
         /// Offset into Work-RAM
         wram_offset: u17 = undefined,
 
-        /// Type if this constant value
+        /// Type if this variable
         type: TypeSymbol,
 
         /// `const_def` node of this symbol
@@ -97,9 +98,7 @@ pub const Symbol = union(enum) {
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },
-            .constant => |const_sym| {
-                allocator.free(const_sym.value);
-            },
+            .constant => {},
             .variable => {},
         }
     }
@@ -107,7 +106,10 @@ pub const Symbol = union(enum) {
 
 pub const TypeSymbol = union(enum) {
     // Backing types for comptime variables
-    pub const ComptimeIntValue = i64;
+    // Allows representing up both u64/i64
+    pub const ComptimeIntValue = i65;
+    /// Useful when working with just the bytes
+    pub const UnsignedComptimeIntValue = u65;
 
     const Payload = union(enum) {
         // Payload indicates bit-size

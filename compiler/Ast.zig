@@ -34,6 +34,10 @@ pub const Node = struct {
         /// `main_token` is the `lbrace`
         block,
 
+        /// `data` is `assign_statement`
+        /// `main_token` is the `identifier` of the target
+        assign_statement,
+
         /// `main_token` is the `identifier` of the target
         call_statement,
 
@@ -84,6 +88,10 @@ pub const Node = struct {
         },
         var_def: struct {
             extra: ExtraIndex,
+        },
+        assign_statement: struct {
+            value: NodeIndex,
+            intermediate_register: TokenIndex,
         },
         while_statement: struct {
             condition: NodeIndex,

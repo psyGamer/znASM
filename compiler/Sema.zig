@@ -24,6 +24,26 @@ pub const SymbolMap = std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnma
 
 pub const ModuleIndex = u32;
 
+pub const RegisterType = enum { a8, a16, x8, x16, y8, y16 };
+
+/// Represents a parsed value of an expression
+pub const ExpressionValue = union(enum) {
+    immediate: TypeSymbol.ComptimeIntValue,
+    symbol: SymbolLocation,
+    register: RegisterType,
+
+    pub fn resolve(expr: ExpressionValue, comptime T: type, sema: *const Sema) T {
+        return switch (expr) {
+            .immediate => |value| @intCast(value),
+            .symbol => |sym| switch (sema.lookupSymbol(sym).?.*) {
+                .function, .variable => unreachable,
+                .constant => |const_sym| @intCast(const_sym.value.resolve(T, sema)),
+            },
+            .register => unreachable,
+        };
+    }
+};
+
 pub const Error = struct {
     pub const Tag = enum {
         // Extra: node
@@ -40,7 +60,9 @@ pub const Error = struct {
         invalid_rom_bank,
         invalid_ram_bank,
         invalid_size_mode,
+        invalid_register,
         int_bitwidth_too_large,
+        expected_intermediate_register,
         // Extra: vector
         duplicate_vector,
         // Extra: bank
@@ -56,8 +78,11 @@ pub const Error = struct {
         expected_token,
         // Extra: expected_type
         expected_type,
-        // Extra: expected_symbol
+        // Extra: actual_symbol
+        expected_var_symbol,
         expected_const_var_symbol,
+        // Extra: expected_register_size
+        expected_register_size,
     };
 
     tag: Tag,
@@ -89,7 +114,11 @@ pub const Error = struct {
             expected: TypeSymbol,
             actual: TypeSymbol,
         },
-        expected_symbol: std.meta.Tag(Symbol),
+        actual_symbol: std.meta.Tag(Symbol),
+        expected_register_size: struct {
+            expected: u16,
+            actual: u16,
+        },
     } = .{ .none = {} },
 };
 
@@ -239,7 +268,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
                         .is_note = true,
                         .ast = ast,
                         .token = ast.node_tokens[
-                            switch (existing_sym) {
+                            switch (existing_sym.*) {
                                 .function => |existing_func| existing_func.node,
                                 .constant => |existing_const| existing_const.node,
                                 .variable => |existing_var| existing_var.node,
@@ -322,7 +351,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                     .is_note = true,
                     .ast = ast,
                     .token = ast.node_tokens[
-                        switch (existing_sym) {
+                        switch (existing_sym.*) {
                             .function => |existing_func| existing_func.node,
                             .constant => |existing_const| existing_const.node,
                             .variable => |existing_var| existing_var.node,
@@ -387,7 +416,7 @@ fn gatherConstantSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
 
             // To be determined during analyzation
             .type = undefined,
-            .value = &.{},
+            .value = undefined,
         },
     });
 }
@@ -473,7 +502,8 @@ fn analyzeVariable(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex
 }
 
 const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
-const max_int_bitwidth = 16;
+// const max_int_bitwidth = @bitSizeOf(TypeSymbol.ComptimeIntValue) - 1;
+const max_int_bitwidth = 65535;
 
 fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
     _ = current_module; // autofix
@@ -532,7 +562,11 @@ fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module
         else => unreachable,
     }
 }
-fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_type: TypeSymbol, current_module: []const u8) ![]const u8 {
+
+// Helper functions
+
+/// Resolves an expression into a parsed value
+pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_type: TypeSymbol, current_module: []const u8) !ExpressionValue {
     _ = current_module; // autofix
     switch (ast.node_tags[node_idx]) {
         .expr_ident => {
@@ -552,45 +586,43 @@ fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_ty
                         .actual = .{ .raw = .{ .comptime_int = value } },
                     } },
                 });
-                std.log.err("HUH {}", .{sema.errors.items.len});
                 return error.AnalyzeFailed;
             }
 
             // Validate size
             if (target_type.raw != .comptime_int) {
                 const is_signed = target_type.raw == .signed_int;
+                _ = is_signed; // autofix
                 const bits = switch (target_type.raw) {
                     .signed_int => |bits| bits,
                     .unsigned_int => |bits| bits,
                     .comptime_int => unreachable,
                 };
+                _ = bits; // autofix
 
-                const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(i64, 1) << @intCast(bits - 1));
-                const max: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else (@as(i64, 1) << @intCast(bits - @intFromBool(is_signed))) - 1;
+                // const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - 1));
+                // const max: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else (@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - @intFromBool(is_signed))) -% 1;
 
-                if (value < min or value > max) {
-                    try sema.errors.append(sema.allocator, .{
-                        .tag = .value_too_large,
-                        .ast = ast,
-                        .token = value_ident,
-                        .extra = .{ .int_size = .{
-                            .is_signed = is_signed,
-                            .bits = bits,
-                        } },
-                    });
-                    return error.AnalyzeFailed;
-                }
+                // if (value < min or value > max) {
+                //     try sema.errors.append(sema.allocator, .{
+                //         .tag = .value_too_large,
+                //         .ast = ast,
+                //         .token = value_ident,
+                //         .extra = .{ .int_size = .{
+                //             .is_signed = is_signed,
+                //             .bits = bits,
+                //         } },
+                //     });
+                //     return error.AnalyzeFailed;
+                // }
 
-                const byte_size = std.mem.alignForward(u16, bits, 8) / 8;
-                return try sema.allocator.dupe(u8, std.mem.asBytes(&value)[0..byte_size]);
-            } else {
-                return try sema.allocator.dupe(u8, std.mem.asBytes(&value));
+                return .{ .immediate = value };
             }
+
+            return .{ .immediate = value };
         },
         else => unreachable,
     }
-    // const target_ident = try anal.sema.expectToken(anal.ast, target_node, .ident);
-    // const target_name = anal.ast.tokenSource(target_ident);
 }
 
 fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {
@@ -604,10 +636,10 @@ fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {
 }
 
 /// Searches for the specified symbol
-pub fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?Symbol {
+pub fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?*Symbol {
     if (sema.symbol_map.get(sym_loc.module)) |module_symbols| {
         if (module_symbols.get(sym_loc.name)) |sym_idx| {
-            return sema.symbols.items(.sym)[sym_idx];
+            return &sema.symbols.items(.sym)[sym_idx];
         }
     }
     return null;
@@ -632,6 +664,55 @@ pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.T
     };
 }
 
+/// Parse either a `name` or `module::name` symbol location
+pub fn parseSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!SymbolLocation {
+    if (ast.token_tags[token_idx] != .ident) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .expected_token,
+            .ast = ast,
+            .token = token_idx,
+            .extra = .{ .expected_token = .ident },
+        });
+        return error.AnalyzeFailed;
+    }
+
+    if (ast.token_tags[token_idx + 1] == .double_colon) {
+        if (ast.token_tags[token_idx + 2] != .ident) {
+            try sema.errors.append(sema.allocator, .{
+                .tag = .expected_token,
+                .ast = ast,
+                .token = token_idx + 2,
+                .extra = .{ .expected_token = .ident },
+            });
+            return error.AnalyzeFailed;
+        }
+
+        return .{
+            .module = ast.tokenSource(token_idx),
+            .name = ast.tokenSource(token_idx + 2),
+        };
+    } else {
+        return .{
+            .module = current_module,
+            .name = ast.tokenSource(token_idx),
+        };
+    }
+}
+/// Resolves a `name` or `module::name` into the associated symbol
+pub fn resolveSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!struct { *Symbol, SymbolLocation } {
+    const sym_loc = try sema.parseSymbolLocation(ast, token_idx, current_module);
+
+    if (sema.lookupSymbol(sym_loc)) |sym|
+        return .{ sym, sym_loc };
+
+    try sema.errors.append(sema.allocator, .{
+        .tag = .undefined_symbol,
+        .ast = ast,
+        .token = token_idx,
+    });
+    return error.AnalyzeFailed;
+}
+
 pub fn expectToken(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, tag: Token.Tag) AnalyzeError!Ast.TokenIndex {
     const token_idx = ast.node_tokens[node_idx];
 
@@ -647,6 +728,8 @@ pub fn expectToken(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, tag: Token
 
     return token_idx;
 }
+
+// Error handling
 
 pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.tty.Config) !bool {
     std.debug.lockStdErr();
@@ -702,7 +785,10 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .duplicate_label => rich.print(writer, tty_config, "Found duplicate label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .existing_symbol => writer.writeAll("Symbol already defined here"),
         .existing_label => writer.writeAll("Label already defiend here"),
-        .undefined_symbol => rich.print(writer, tty_config, "Use of undefined symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
+        .undefined_symbol => if (err.ast.token_tags[err.token + 1] == .double_colon)
+            rich.print(writer, tty_config, "Use of undefined symbol [" ++ highlight ++ "]{s}::{s}", .{ err.ast.tokenSource(err.token), err.ast.tokenSource(err.token + 2) })
+        else
+            rich.print(writer, tty_config, "Use of undefined symbol [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .undefined_label => rich.print(writer, tty_config, "Use of undefined label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .missing_reset_vector => rich.print(writer, tty_config, "Interrupt vector [" ++ highlight ++ "]@emulation_reset [reset]is not defined", .{}),
         .invalid_vector_name => rich.print(writer, tty_config, "Unknown interrupt vector [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
@@ -711,10 +797,12 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .invalid_rom_bank => rich.print(writer, tty_config, "Invalid ROM bank [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .invalid_ram_bank => rich.print(writer, tty_config, "Invalid RAM bank [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .invalid_size_mode => rich.print(writer, tty_config, "Invalid size-mode [" ++ highlight ++ "]{s}[reset], expected [" ++ highlight ++ "]8 [reset]or [" ++ highlight ++ "]16", .{err.ast.tokenSource(err.token)}),
+        .invalid_register => rich.print(writer, tty_config, "Invalid register type [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .int_bitwidth_too_large => rich.print(writer, tty_config, "Bit-width of primitive integer type [" ++ highlight ++ "]{s}[reset] exceedes maximum bit-width of [" ++ highlight ++ "]{d}", .{
             err.ast.tokenSource(err.token),
             max_int_bitwidth,
         }),
+        .expected_intermediate_register => rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]intermediate register[reset], to hold [" ++ highlight ++ "]non-zero [reset]or [" ++ highlight ++ "]non-register[reset] values", .{err.ast.tokenSource(err.token)}),
 
         .duplicate_vector => rich.print(writer, tty_config, "Found duplicate interrupt vector [" ++ highlight ++ "]{s}", .{@tagName(err.extra.vector)}),
 
@@ -766,8 +854,16 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             err.extra.expected_type.actual,
         }),
 
-        .expected_const_var_symbol => rich.print(writer, tty_config, "Expected symbol to [" ++ highlight ++ "]constant or variable[reset], found [" ++ highlight ++ "]{s}", .{
-            @tagName(err.extra.expected_symbol),
+        .expected_var_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]variable[reset], found [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.actual_symbol),
+        }),
+        .expected_const_var_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]constant or variable[reset], found [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.actual_symbol),
+        }),
+
+        .expected_register_size => rich.print(writer, tty_config, "Expected register size to evenly divide [" ++ highlight ++ "]{d}-bit value[reset], found [" ++ highlight ++ "]{d}-bit register", .{
+            err.extra.expected_register_size.expected,
+            err.extra.expected_register_size.actual,
         }),
     };
 }

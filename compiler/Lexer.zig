@@ -11,6 +11,7 @@ pub const Token = struct {
         period,
         comma,
         colon,
+        double_colon,
         semicolon,
         equal,
         lparen,
@@ -51,6 +52,7 @@ pub const Token = struct {
                 .period => ".",
                 .comma => ",",
                 .colon => ":",
+                .double_colon => "::",
                 .semicolon => ";",
                 .equal => "=",
                 .lparen => "(",
@@ -126,6 +128,7 @@ pub fn next(lexer: *Lexer) Token {
         start,
         ident,
         slash,
+        colon,
         comment,
         doc_comment,
         dec_int,
@@ -157,10 +160,6 @@ pub fn next(lexer: *Lexer) Token {
 
         switch (state) {
             .start => switch (c) {
-                '/' => {
-                    state = .slash;
-                },
-
                 ' ', '\t' => {
                     token.loc.start = lexer.index + 1;
                 },
@@ -192,6 +191,9 @@ pub fn next(lexer: *Lexer) Token {
                     state = .bin_int;
                 },
 
+                '/' => {
+                    state = .slash;
+                },
                 '.' => {
                     token.tag = .period;
                     lexer.index += 1;
@@ -203,9 +205,7 @@ pub fn next(lexer: *Lexer) Token {
                     break;
                 },
                 ':' => {
-                    token.tag = .colon;
-                    lexer.index += 1;
-                    break;
+                    state = .colon;
                 },
                 ';' => {
                     token.tag = .semicolon;
@@ -270,6 +270,18 @@ pub fn next(lexer: *Lexer) Token {
                     state = .comment;
                 },
                 else => break,
+            },
+
+            .colon => switch (c) {
+                ':' => {
+                    token.tag = .double_colon;
+                    lexer.index += 1;
+                    break;
+                },
+                else => {
+                    token.tag = .colon;
+                    break;
+                },
             },
 
             .comment => switch (c) {
