@@ -44,84 +44,6 @@ pub const ExpressionValue = union(enum) {
     }
 };
 
-pub const Error = struct {
-    pub const Tag = enum {
-        // Extra: node
-        duplicate_symbol,
-        duplicate_label,
-        existing_symbol,
-        existing_label,
-        undefined_symbol,
-        undefined_label,
-        missing_reset_vector,
-        invalid_vector_name,
-        invalid_opcode,
-        invalid_builtin,
-        invalid_rom_bank,
-        invalid_ram_bank,
-        invalid_size_mode,
-        invalid_register,
-        int_bitwidth_too_large,
-        expected_intermediate_register,
-        // Extra: vector
-        duplicate_vector,
-        // Extra: bank
-        invalid_vector_bank,
-        // Extra: size_type
-        undefined_size_mode,
-        // Extra: int_size
-        value_too_large,
-        invalid_number,
-        // Extra: arguments
-        expected_arguments,
-        // Extra: expected_token
-        expected_token,
-        // Extra: expected_type
-        expected_type,
-        // Extra: actual_symbol
-        expected_var_symbol,
-        expected_const_var_symbol,
-        // Extra: expected_register_size
-        expected_register_size,
-    };
-
-    tag: Tag,
-
-    /// Notes are associated with the previous error
-    is_note: bool = false,
-
-    ast: *const Ast,
-    token: Ast.TokenIndex,
-
-    extra: union {
-        none: void,
-        vector: std.meta.FieldEnum(InterruptVectors),
-        bank: struct {
-            fn_name: Ast.TokenIndex,
-            actual: u8,
-        },
-        size_type: Instruction.SizeType,
-        int_size: struct {
-            is_signed: bool,
-            bits: u16,
-        },
-        arguments: struct {
-            expected: u8,
-            actual: u8,
-        },
-        expected_token: Token.Tag,
-        expected_type: struct {
-            expected: TypeSymbol,
-            actual: TypeSymbol,
-        },
-        actual_symbol: std.meta.Tag(Symbol),
-        expected_register_size: struct {
-            expected: u16,
-            actual: u16,
-        },
-    } = .{ .none = {} },
-};
-
 const InterruptVectors = struct {
     native_cop: ?SymbolLocation = null,
     native_brk: ?SymbolLocation = null,
@@ -768,6 +690,85 @@ pub fn expectToken(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, tag: Token
 
 // Error handling
 
+pub const Error = struct {
+    pub const Tag = enum {
+        // Extra: node
+        duplicate_symbol,
+        duplicate_label,
+        existing_symbol,
+        existing_label,
+        undefined_symbol,
+        undefined_label,
+        missing_reset_vector,
+        invalid_vector_name,
+        invalid_opcode,
+        invalid_builtin,
+        invalid_rom_bank,
+        invalid_ram_bank,
+        invalid_size_mode,
+        invalid_register,
+        int_bitwidth_too_large,
+        expected_intermediate_register,
+        // Extra: vector
+        duplicate_vector,
+        // Extra: bank
+        invalid_vector_bank,
+        // Extra: size_type
+        undefined_size_mode,
+        // Extra: int_size
+        value_too_large,
+        invalid_number,
+        // Extra: arguments
+        expected_arguments,
+        // Extra: expected_token
+        expected_token,
+        // Extra: expected_type
+        expected_type,
+        // Extra: actual_symbol
+        expected_var_symbol,
+        expected_const_var_symbol,
+        expected_fn_symbol,
+        // Extra: expected_register_size
+        expected_register_size,
+    };
+
+    tag: Tag,
+
+    /// Notes are associated with the previous error
+    is_note: bool = false,
+
+    ast: *const Ast,
+    token: Ast.TokenIndex,
+
+    extra: union {
+        none: void,
+        vector: std.meta.FieldEnum(InterruptVectors),
+        bank: struct {
+            fn_name: Ast.TokenIndex,
+            actual: u8,
+        },
+        size_type: Instruction.SizeType,
+        int_size: struct {
+            is_signed: bool,
+            bits: u16,
+        },
+        arguments: struct {
+            expected: u8,
+            actual: u8,
+        },
+        expected_token: Token.Tag,
+        expected_type: struct {
+            expected: TypeSymbol,
+            actual: TypeSymbol,
+        },
+        actual_symbol: std.meta.Tag(Symbol),
+        expected_register_size: struct {
+            expected: u16,
+            actual: u16,
+        },
+    } = .{ .none = {} },
+};
+
 pub fn detectErrors(sema: Sema, writer: std.fs.File.Writer, tty_config: std.io.tty.Config) !bool {
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
@@ -895,6 +896,9 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             @tagName(err.extra.actual_symbol),
         }),
         .expected_const_var_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]constant or variable[reset], found [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.actual_symbol),
+        }),
+        .expected_fn_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]function[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
 

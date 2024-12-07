@@ -477,7 +477,26 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     } else {
         // Function / macro call
-        @panic("TODO");
+        const sym, const sym_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
+
+        switch (sym.*) {
+            .function => {
+                try ana.ir.append(ana.sema.allocator, .{
+                    .tag = .{ .call = .{ .target = sym_loc } },
+                    .node = node_idx,
+                });
+            },
+            // TODO: Support macros
+            else => {
+                try ana.sema.errors.append(ana.sema.allocator, .{
+                    .tag = .expected_fn_symbol,
+                    .ast = ana.ast,
+                    .token = ana.ast.node_tokens[node_idx],
+                    .extra = .{ .actual_symbol = sym.* },
+                });
+                return error.AnalyzeFailed;
+            },
+        }
     }
 }
 

@@ -18,6 +18,7 @@ pub const Ir = struct {
             target: Instruction.SizeType,
             mode: Instruction.SizeMode,
         },
+
         load: struct {
             target: RegisterType,
             value: ExpressionValue,
@@ -25,6 +26,11 @@ pub const Ir = struct {
         },
         store: struct {
             source: RegisterType,
+            target: SymbolLocation,
+            target_offset: u16 = 0,
+        },
+
+        call: struct {
             target: SymbolLocation,
             target_offset: u16 = 0,
         },

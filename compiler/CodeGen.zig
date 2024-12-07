@@ -124,6 +124,7 @@ const FunctionBuilder = struct {
                 .change_size => try b.handleChangeSize(ir),
                 .load => try b.handleLoad(ir),
                 .store => try b.handleStore(ir),
+                .call => try b.handleCall(ir),
                 .branch => try b.handleBranch(ir),
                 .label => try b.handleLabel(ir),
             }
@@ -340,6 +341,27 @@ const FunctionBuilder = struct {
     }
     fn handleLabel(b: *FunctionBuilder, ir: Ir) !void {
         try b.labels.put(b.sema.allocator, ir.tag.label, @intCast(b.instructions.items.len));
+    }
+    fn handleCall(b: *FunctionBuilder, ir: Ir) !void {
+        const call = ir.tag.call;
+        const target_symbol = b.sema.lookupSymbol(call.target).?;
+
+        // TODO: Support long jumps
+        std.debug.assert(target_symbol.function.bank == b.symbol.bank);
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = .{ .jsr = undefined },
+            .reloc = .{
+                .type = .addr16,
+                .target_sym = call.target,
+                .target_offset = call.target_offset,
+            },
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
     }
     fn handleBranch(b: *FunctionBuilder, ir: Ir) !void {
         try b.instructions.append(b.sema.allocator, .{
