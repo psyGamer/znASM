@@ -80,6 +80,76 @@ pub const all = [_]BuiltinFn{
         .param_count = 1,
         .handler_fn = branchHandler(.minus),
     },
+    .{
+        .name = "@pushValue",
+        .param_count = 1,
+        .handler_fn = pushValueHandler,
+    },
+    .{
+        .name = "@pushA",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.pha),
+    },
+    .{
+        .name = "@pushX",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.phx),
+    },
+    .{
+        .name = "@pushY",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.phy),
+    },
+    .{
+        .name = "@pushDataBank",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.phb),
+    },
+    .{
+        .name = "@pushDirectPage",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.phd),
+    },
+    .{
+        .name = "@pushProgramBank",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.phk),
+    },
+    .{
+        .name = "@pushProcessorStatus",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.php),
+    },
+    .{
+        .name = "@pullA",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.pla),
+    },
+    .{
+        .name = "@pullX",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.plx),
+    },
+    .{
+        .name = "@pullY",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.ply),
+    },
+    .{
+        .name = "@pullDataBank",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.plb),
+    },
+    .{
+        .name = "@pullDirectPage",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.pld),
+    },
+    .{
+        .name = "@pullProcessorStatus",
+        .param_count = 0,
+        .handler_fn = instructionHandler(.plp),
+    },
 };
 
 fn sizeHandler(comptime target: Instruction.SizeType) HandlerFn {
@@ -135,4 +205,32 @@ fn branchHandler(comptime branch_type: BranchRelocation.Type) HandlerFn {
             });
         }
     }.handler;
+}
+
+fn instructionHandler(comptime instruction: Instruction) HandlerFn {
+    return struct {
+        pub fn handler(ana: *Analyzer, node_idx: NodeIndex, _: []const NodeIndex) Sema.AnalyzeError!void {
+            try ana.ir.append(ana.sema.allocator, .{
+                .tag = .{ .instruction = .{
+                    .instr = instruction,
+                    .reloc = null,
+                } },
+                .node = node_idx,
+            });
+        }
+    }.handler;
+}
+
+fn pushValueHandler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
+    const size_node = params[0];
+    const size_expr = try ana.sema.resolveExprValue(ana.ast, size_node, .{ .raw = .{ .unsigned_int = 16 } }, ana.symbol_location.module);
+    const size_value = size_expr.resolve(u16, ana.sema);
+
+    try ana.ir.append(ana.sema.allocator, .{
+        .tag = .{ .instruction = .{
+            .instr = .{ .pea = size_value },
+            .reloc = null,
+        } },
+        .node = node_idx,
+    });
 }
