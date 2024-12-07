@@ -122,6 +122,33 @@ pub const TypeSymbol = union(enum) {
     /// Simple type with no extra annotations
     raw: Payload,
 
+    /// Checks if `type_sym` is assigable to `other_sym`
+    pub fn isAssignableTo(type_sym: TypeSymbol, other_sym: TypeSymbol) bool {
+        if (std.meta.activeTag(type_sym) != std.meta.activeTag(other_sym)) {
+            return false;
+        }
+
+        switch (type_sym) {
+            .raw => |payload| {
+                const other_payload = other_sym.raw;
+
+                switch (payload) {
+                    .signed_int => |bits| switch (other_payload) {
+                        .signed_int => |other_bits| return other_bits >= bits,
+                        .unsigned_int => return false,
+                        .comptime_int => unreachable, // Cannot assign to a comptime_int
+                    },
+                    .unsigned_int => |bits| switch (other_payload) {
+                        .signed_int => |other_bits| return other_bits > bits,
+                        .unsigned_int => |other_bits| return other_bits >= bits,
+                        .comptime_int => unreachable, // Cannot assign to a comptime_int
+                    },
+                    .comptime_int => return true, // Depends on the size of the value
+                }
+            },
+        }
+    }
+
     /// Calculates the size of this type in bytes
     pub fn size(type_sym: TypeSymbol) u16 {
         switch (type_sym) {

@@ -430,12 +430,12 @@ fn gatherVariableSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
     else
         try sema.parseInt(u8, ast, ast.node_tokens[data.bank_attr]);
 
-    // Choose addr-range default based on bank, but don't implictly put variables into the zeropage
+    // Choose addr-range default based on bank
     const offset_min: u17, const offset_max: u17 = switch (bank) {
-        // LoRAM mirrors
+        // LoRAM mirrors (avoid zero-page)
         0x00...0x3F, 0x80...0xBF => .{ 0x00100, 0x01fff },
-        // LoRAM + HiRAM
-        0x7E => .{ 0x00100, 0x0ffff },
+        // LoRAM + HiRAM (avoid shared LoRAM)
+        0x7E => .{ 0x02000, 0x0ffff },
         // ExHiRAM
         0x7F => .{ 0x10000, 0x1ffff },
         else => {
@@ -503,7 +503,7 @@ fn analyzeVariable(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex
 
 const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
 // const max_int_bitwidth = @bitSizeOf(TypeSymbol.ComptimeIntValue) - 1;
-const max_int_bitwidth = 65535;
+const max_int_bitwidth = 64;
 
 fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
     _ = current_module; // autofix
@@ -567,20 +567,47 @@ fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module
 
 /// Resolves an expression into a parsed value
 pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_type: TypeSymbol, current_module: []const u8) !ExpressionValue {
-    _ = current_module; // autofix
     switch (ast.node_tags[node_idx]) {
         .expr_ident => {
-            @panic("TODO");
+            const source_symbol_ident = ast.node_tokens[node_idx];
+            const source_symbol, const source_symbol_loc = try sema.resolveSymbolLocation(ast, source_symbol_ident, current_module);
+
+            const source_type = switch (source_symbol.*) {
+                .constant => |const_sym| const_sym.type,
+                .variable => |var_sym| var_sym.type,
+                else => {
+                    try sema.errors.append(sema.allocator, .{
+                        .tag = .expected_const_var_symbol,
+                        .ast = ast,
+                        .token = source_symbol_ident,
+                        .extra = .{ .actual_symbol = source_symbol.* },
+                    });
+                    return error.AnalyzeFailed;
+                },
+            };
+
+            // Validate type
+            if (!source_type.isAssignableTo(target_type)) {
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .expected_type,
+                    .ast = ast,
+                    .token = source_symbol_ident,
+                    .extra = .{ .expected_type = .{ .expected = target_type, .actual = source_type } },
+                });
+                return error.AnalyzeFailed;
+            }
+
+            return .{ .symbol = source_symbol_loc };
         },
         .expr_value => {
-            const value_ident = ast.node_tokens[node_idx];
-            const value = try sema.parseInt(TypeSymbol.ComptimeIntValue, ast, value_ident);
+            const value_lit = ast.node_tokens[node_idx];
+            const value = try sema.parseInt(TypeSymbol.ComptimeIntValue, ast, value_lit);
 
             if (target_type != .raw or (target_type.raw != .signed_int and target_type.raw != .unsigned_int and target_type.raw != .comptime_int)) {
                 try sema.errors.append(sema.allocator, .{
                     .tag = .expected_type,
                     .ast = ast,
-                    .token = value_ident,
+                    .token = value_lit,
                     .extra = .{ .expected_type = .{
                         .expected = target_type,
                         .actual = .{ .raw = .{ .comptime_int = value } },
@@ -592,29 +619,27 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
             // Validate size
             if (target_type.raw != .comptime_int) {
                 const is_signed = target_type.raw == .signed_int;
-                _ = is_signed; // autofix
                 const bits = switch (target_type.raw) {
                     .signed_int => |bits| bits,
                     .unsigned_int => |bits| bits,
                     .comptime_int => unreachable,
                 };
-                _ = bits; // autofix
 
-                // const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - 1));
-                // const max: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else (@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - @intFromBool(is_signed))) -% 1;
+                const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - 1));
+                const max: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else (@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - @intFromBool(is_signed))) -% 1;
 
-                // if (value < min or value > max) {
-                //     try sema.errors.append(sema.allocator, .{
-                //         .tag = .value_too_large,
-                //         .ast = ast,
-                //         .token = value_ident,
-                //         .extra = .{ .int_size = .{
-                //             .is_signed = is_signed,
-                //             .bits = bits,
-                //         } },
-                //     });
-                //     return error.AnalyzeFailed;
-                // }
+                if (value < min or value > max) {
+                    try sema.errors.append(sema.allocator, .{
+                        .tag = .value_too_large,
+                        .ast = ast,
+                        .token = value_lit,
+                        .extra = .{ .int_size = .{
+                            .is_signed = is_signed,
+                            .bits = bits,
+                        } },
+                    });
+                    return error.AnalyzeFailed;
+                }
 
                 return .{ .immediate = value };
             }
@@ -861,7 +886,7 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             err.ast.token_tags[err.token].symbol(),
         }),
 
-        .expected_type => rich.print(writer, tty_config, "Expected value of type [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_type => rich.print(writer, tty_config, "Expected value of type [" ++ highlight ++ "]{}[reset], found [" ++ highlight ++ "]{}", .{
             err.extra.expected_type.expected,
             err.extra.expected_type.actual,
         }),
