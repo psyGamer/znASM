@@ -5,10 +5,12 @@ const Sema = @import("../Sema.zig");
 const Ir = @import("../ir.zig").Ir;
 const Symbol = @import("../symbol.zig").Symbol;
 const SymbolLocation = @import("../symbol.zig").SymbolLocation;
+const TypeSymbol = @import("../symbol.zig").TypeSymbol;
 const Instruction = @import("../instruction.zig").Instruction;
 const Opcode = @import("../instruction.zig").Opcode;
 const Relocation = @import("../CodeGen.zig").Relocation;
 const BuiltinFn = @import("BuiltinFn.zig");
+const BuiltinVar = @import("BuiltinVar.zig");
 
 const Analyzer = @This();
 const Error = Sema.AnalyzeError;
@@ -344,18 +346,42 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     const data = ana.ast.node_data[node_idx].assign_statement;
 
     const target_ident = ana.ast.node_tokens[node_idx];
-    const target_symbol, const target_symbol_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
-    const target_type = switch (target_symbol.*) {
-        .constant => |const_sym| const_sym.type,
-        .variable => |var_sym| var_sym.type,
-        else => {
-            try ana.sema.errors.append(ana.sema.allocator, .{
-                .tag = .expected_const_var_symbol,
-                .ast = ana.ast,
-                .token = target_ident,
-                .extra = .{ .actual_symbol = target_symbol.* },
-            });
-            return error.AnalyzeFailed;
+
+    const target: union(enum) { builtin: BuiltinVar, symbol: SymbolLocation } = get_target: {
+        if (ana.ast.token_tags[target_ident] == .builtin_ident) {
+            // Built-in variable
+            if (BuiltinVar.get(ana.ast.parseIdentifier(target_ident))) |builtin| {
+                break :get_target .{ .builtin = builtin };
+            } else {
+                try ana.sema.errors.append(ana.sema.allocator, .{
+                    .tag = .invalid_builtin,
+                    .ast = ana.ast,
+                    .token = ana.ast.node_tokens[node_idx],
+                });
+                return error.AnalyzeFailed;
+            }
+        } else {
+            _, const target_symbol_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
+            break :get_target .{ .symbol = target_symbol_loc };
+        }
+    };
+    const target_type = get_type: switch (target) {
+        .builtin => |builtin| break :get_type builtin.type,
+        .symbol => |sym_loc| {
+            const target_symbol = ana.sema.lookupSymbol(sym_loc).?;
+            break :get_type switch (target_symbol.*) {
+                .constant => |const_sym| const_sym.type,
+                .variable => |var_sym| var_sym.type,
+                else => {
+                    try ana.sema.errors.append(ana.sema.allocator, .{
+                        .tag = .expected_const_var_symbol,
+                        .ast = ana.ast,
+                        .token = target_ident,
+                        .extra = .{ .actual_symbol = target_symbol.* },
+                    });
+                    return error.AnalyzeFailed;
+                },
+            };
         },
     };
 
@@ -364,12 +390,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     const register_type = get_register: {
         if (value_expr != .register) {
             if (data.intermediate_register == Ast.null_token) {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_intermediate_register,
-                    .ast = ana.ast,
-                    .token = ana.ast.node_tokens[data.value],
-                });
-                return error.AnalyzeFailed;
+                break :get_register null;
             }
 
             const register_name = ana.ast.tokenSource(data.intermediate_register);
@@ -386,7 +407,16 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     };
 
-    const register_size: u8 = switch (register_type) {
+    if (register_type == null) {
+        try ana.sema.errors.append(ana.sema.allocator, .{
+            .tag = .expected_intermediate_register,
+            .ast = ana.ast,
+            .token = ana.ast.node_tokens[data.value],
+        });
+        return error.AnalyzeFailed;
+    }
+
+    const register_size: u8 = switch (register_type.?) {
         .a8, .x8, .y8 => 1,
         .a16, .x16, .y16 => 2,
     };
@@ -405,14 +435,50 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         return error.AnalyzeFailed;
     }
 
+    if (target == .builtin) {
+        if (target.builtin.require_exact) {
+            // Validate size
+            const value = value_expr.resolve(TypeSymbol.ComptimeIntValue, ana.sema);
+            switch (register_type.?) {
+                .a8, .x8, .y8 => if (value < std.math.minInt(u8) or value > std.math.maxInt(u8)) {
+                    try ana.sema.errors.append(ana.sema.allocator, .{
+                        .tag = .value_too_large,
+                        .ast = ana.ast,
+                        .token = ana.ast.node_tokens[data.value],
+                        .extra = .{ .int_size = .{
+                            .is_signed = false,
+                            .bits = 8,
+                        } },
+                    });
+                    return error.AnalyzeFailed;
+                },
+                .a16, .x16, .y16 => if (value < std.math.minInt(u16) or value > std.math.maxInt(u16)) {
+                    try ana.sema.errors.append(ana.sema.allocator, .{
+                        .tag = .value_too_large,
+                        .ast = ana.ast,
+                        .token = ana.ast.node_tokens[data.value],
+                        .extra = .{ .int_size = .{
+                            .is_signed = false,
+                            .bits = 16,
+                        } },
+                    });
+                    return error.AnalyzeFailed;
+                },
+            }
+        }
+
+        try target.builtin.write(ana, node_idx, value_expr, register_type);
+        return;
+    }
+
     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(target_size, register_size) * 2);
     ana.ir.appendAssumeCapacity(.{
         .tag = .{ .change_size = .{
-            .target = switch (register_type) {
+            .target = switch (register_type.?) {
                 .a8, .a16 => .mem,
                 .x8, .x16, .y8, .y16 => .idx,
             },
-            .mode = switch (register_type) {
+            .mode = switch (register_type.?) {
                 .a8, .x8, .y8 => .@"8bit",
                 .a16, .x16, .y16 => .@"16bit",
             },
@@ -425,7 +491,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         ana.ir.appendAssumeCapacity(.{
             .tag = .{
                 .load = .{
-                    .target = register_type,
+                    .target = register_type.?,
                     .value = value_expr,
                     .source_offset = offset,
                 },
@@ -434,8 +500,8 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         });
         ana.ir.appendAssumeCapacity(.{
             .tag = .{ .store = .{
-                .source = register_type,
-                .target = target_symbol_loc,
+                .source = register_type.?,
+                .target = target.symbol,
                 .target_offset = offset,
             } },
             .node = node_idx,

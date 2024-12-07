@@ -321,9 +321,9 @@ fn parseLabel(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// AssignStatement <- IDENTIFIER (DOUBLE_COLON IDENTIFIER)? EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
+/// AssignStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) (DOUBLE_COLON IDENTIFIER)? EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
 fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
-    const ident_target = p.eatToken(.ident) orelse return null_node;
+    const ident_target = p.eatToken(.ident) orelse p.eatToken(.builtin_ident) orelse return null_node;
     if (p.eatToken(.double_colon)) |_| {
         _ = try p.expectToken(.ident);
     }

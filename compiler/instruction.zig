@@ -27,14 +27,6 @@ pub const Instruction = union(Opcode) {
     /// Used size-type of an instruction
     pub const SizeType = enum { none, mem, idx };
 
-    // TODO
-    ora: void,
-    @"and": void,
-    eor: void,
-    adc: void,
-    bit: void,
-    sbc: void,
-
     /// Branch Always
     bra: i8,
     /// Branch Always Long
@@ -132,6 +124,68 @@ pub const Instruction = union(Opcode) {
     /// Compare Index Register Y with Memory
     cpy: Imm816,
 
+    /// Test Memory Bits against Accumulator (Immediate)
+    bit_imm: Imm816,
+    /// Test Memory Bits against Accumulator (Absolute)
+    bit_addr16: Addr16,
+
+    /// Test and Reset Memory Bits Against Accumulator (Absolute)
+    trb_addr16: Addr16,
+    /// Test and Reset Memory Bits Against Accumulator (Direct Page)
+    trb_dp: u8,
+    /// Test and Set Memory Bits Against Accumulator (Absolute)
+    tsb_addr16: Addr16,
+    /// Test and Set Memory Bits Against Accumulator (Direct Page)
+    tsb_dp: u8,
+
+    /// AND Accumulator with Memory (Immediate)
+    and_imm: Imm816,
+    /// AND Accumulator with Memory (Absolute)
+    and_addr16: Addr16,
+    /// AND Accumulator with Memory (Long)
+    and_addr24: u24,
+    /// OR Accumulator with Memory (Immediate)
+    ora_imm: Imm816,
+    /// OR Accumulator with Memory (Absolute)
+    ora_addr16: Addr16,
+    /// OR Accumulator with Memory (Long)
+    ora_addr24: u24,
+    /// XOR Accumulator with Memory (Immediate)
+    eor_imm: Imm816,
+    /// XOR Accumulator with Memory (Absolute)
+    eor_addr16: Addr16,
+    /// XOR Accumulator with Memory (Long)
+    eor_addr24: u24,
+    /// Add with Carry (Immediate)
+    adc_imm: Imm816,
+    /// Add with Carry (Absolute)
+    adc_addr16: Addr16,
+    /// Add with Carry (Long)
+    adc_addr24: u24,
+    /// Subtract with Borrow from Accumulator (Immediate)
+    sbc_imm: Imm816,
+    /// Subtract with Borrow from Accumulator (Absolute)
+    sbc_addr16: Addr16,
+    /// Subtract with Borrow from Accumulator (Long)
+    sbc_addr24: u24,
+
+    /// Arithmetic Shift Left (Accumulator)
+    asl_accum: void,
+    /// Arithmetic Shift Left (Absolute)
+    asl_addr16: Addr16,
+    /// Logical Shift Right (Accumulator)
+    lsr_accum: void,
+    /// Logical Shift Right (Absolute)
+    lsr_addr16: Addr16,
+    /// Rotate Left (Accumulator)
+    rol_accum: void,
+    /// Rotate Left (Absolute)
+    rol_addr16: Addr16,
+    /// Rotate Right (Accumulator)
+    ror_accum: void,
+    /// Rotate Right (Absolute)
+    ror_addr16: Addr16,
+
     /// Set Carry Flag
     sec: void,
     /// Set Interrupt Disable Flag
@@ -215,6 +269,8 @@ pub const Instruction = union(Opcode) {
     /// Pull Processor Status from Stack
     plp: void,
 
+    /// Software Breakpoint
+    wdm: void,
     /// No Operation
     nop: void,
 
@@ -272,13 +328,6 @@ pub const Instruction = union(Opcode) {
 };
 
 pub const Opcode = enum(u8) {
-    ora = 0x09,
-    @"and" = 0x29,
-    eor = 0x49,
-    adc = 0x69,
-    bit = 0x89,
-    sbc = 0xE9,
-
     bra = 0x80,
     brl = 0x82,
     bcs = 0xB0,
@@ -344,6 +393,39 @@ pub const Opcode = enum(u8) {
     cpx = 0xE0,
     cpy = 0xC0,
 
+    bit_imm = 0x89,
+    bit_addr16 = 0x2C,
+
+    trb_addr16 = 0x1C,
+    trb_dp = 0x14,
+    tsb_addr16 = 0x0C,
+    tsb_dp = 0x04,
+
+    and_imm = 0x29,
+    and_addr16 = 0x2D,
+    and_addr24 = 0x2F,
+    ora_imm = 0x09,
+    ora_addr16 = 0x0D,
+    ora_addr24 = 0x0F,
+    eor_imm = 0x49,
+    eor_addr16 = 0x4D,
+    eor_addr24 = 0x4F,
+    adc_imm = 0x69,
+    adc_addr16 = 0x6D,
+    adc_addr24 = 0x6F,
+    sbc_imm = 0xE9,
+    sbc_addr16 = 0xED,
+    sbc_addr24 = 0xEF,
+
+    asl_accum = 0x0A,
+    asl_addr16 = 0x0E,
+    lsr_accum = 0x4A,
+    lsr_addr16 = 0x4E,
+    rol_accum = 0x2A,
+    rol_addr16 = 0x2E,
+    ror_accum = 0x6A,
+    ror_addr16 = 0x6E,
+
     sec = 0x38,
     sei = 0x78,
     sed = 0xF8,
@@ -389,6 +471,7 @@ pub const Opcode = enum(u8) {
     pld = 0x2B,
     plp = 0x28,
 
+    wdm = 0x42,
     nop = 0xEA,
 
     /// Computes the size of opcode + operands
@@ -415,12 +498,47 @@ pub const Opcode = enum(u8) {
     /// Checks which size-type is used for this opcode
     pub fn sizeType(instr: Opcode) Instruction.SizeType {
         return switch (instr) {
+            .and_imm,
+            .and_addr16,
+            .and_addr24,
+            .ora_imm,
+            .ora_addr16,
+            .ora_addr24,
+            .eor_imm,
+            .eor_addr16,
+            .eor_addr24,
+            .adc_imm,
+            .adc_addr16,
+            .adc_addr24,
+            .sbc_imm,
+            .sbc_addr16,
+            .sbc_addr24,
+            .asl_accum,
+            .asl_addr16,
+            .lsr_accum,
+            .lsr_addr16,
+            .rol_accum,
+            .rol_addr16,
+            .ror_accum,
+            .ror_addr16,
             .lda_imm,
             .lda_dp,
             .lda_addr16,
             .lda_addr24,
+            .sta_addr8,
             .sta_addr16,
+            .sta_addr24,
+            .stz_addr16,
+            .stz_addr16_idx_x,
+            .stz_dp,
+            .stz_dp_idx_x,
             .cmp,
+            .bit_imm,
+            .bit_addr16,
+            .trb_dp,
+            .trb_addr16,
+            .tsb_dp,
+            .tsb_addr16,
             => .mem,
 
             .ldx_imm,
@@ -429,6 +547,12 @@ pub const Opcode = enum(u8) {
             .ldy_imm,
             .ldy_dp,
             .ldy_addr16,
+            .stx_addr8,
+            .stx_addr16,
+            .stx_addr8_idx_y,
+            .sty_addr8,
+            .sty_addr16,
+            .sty_addr8_idx_x,
             .cpx,
             .cpy,
             => .idx,

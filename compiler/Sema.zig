@@ -625,7 +625,7 @@ pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.T
 
 /// Parse either a `name` or `module::name` symbol location
 pub fn parseSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!SymbolLocation {
-    if (ast.token_tags[token_idx] != .ident) {
+    if (ast.token_tags[token_idx] != .ident and ast.token_tags[token_idx] != .builtin_ident) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_token,
             .ast = ast,
@@ -730,6 +730,8 @@ pub const Error = struct {
         expected_fn_symbol,
         // Extra: expected_register_size
         expected_register_size,
+        // Extra: unsupported_register
+        unsupported_register,
     };
 
     tag: Tag,
@@ -765,6 +767,10 @@ pub const Error = struct {
         expected_register_size: struct {
             expected: u16,
             actual: u16,
+        },
+        unsupported_register: struct {
+            register: RegisterType,
+            message: []const u8,
         },
     } = .{ .none = {} },
 };
@@ -905,6 +911,11 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .expected_register_size => rich.print(writer, tty_config, "Expected register size to evenly divide [" ++ highlight ++ "]{d}-bit value[reset], found [" ++ highlight ++ "]{d}-bit register", .{
             err.extra.expected_register_size.expected,
             err.extra.expected_register_size.actual,
+        }),
+
+        .unsupported_register => rich.print(writer, tty_config, "Unsupported [" ++ highlight ++ "]intermediate register {s}[reset], for use with [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.unsupported_register.register),
+            err.extra.unsupported_register.message,
         }),
     };
 }
