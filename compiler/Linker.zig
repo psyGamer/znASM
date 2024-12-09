@@ -511,7 +511,35 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                     try writer.writeByte('\n');
                 },
                 .register => |reg_sym| {
-                    _ = reg_sym; // autofix
+                    defer comments.clearRetainingCapacity();
+
+                    // Document comments
+                    const reg_def = module.ast.node_data[reg_sym.common.node].reg_def;
+                    const data = module.ast.extraData(Ast.Node.RegDefData, reg_def.extra);
+
+                    for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
+                        const node_idx = module.ast.extra_data[extra_idx];
+                        const token_idx = module.ast.node_tokens[node_idx];
+                        std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                        const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
+
+                        var iter: WordWrapIter = .{ .line = doc_comment };
+                        while (iter.next()) |line| {
+                            try comments.append(link.allocator, line);
+                        }
+                    }
+
+                    try writer.print("SnesRegister:{x}:{s}", .{ reg_sym.address, debug_sym_name });
+                    for (comments.items, 0..) |comment, i| {
+                        if (i == 0) {
+                            try writer.writeByte(':');
+                        } else {
+                            try writer.writeAll("\\n");
+                        }
+
+                        try writer.writeAll(comment);
+                    }
+                    try writer.writeByte('\n');
                     // TODO: Write symbols
                 },
                 .@"enum" => |enum_sym| {
