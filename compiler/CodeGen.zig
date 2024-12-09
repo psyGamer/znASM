@@ -210,6 +210,7 @@ const FunctionBuilder = struct {
                                 .target_sym = sym_loc,
                                 .target_offset = load.source_offset,
                             } },
+                        .register => |reg_sym| .{ .{ .lda_addr16 = @enumFromInt(reg_sym.address) }, null },
                     };
                 },
                 .register => |register| switch (register) {
@@ -241,6 +242,7 @@ const FunctionBuilder = struct {
                             } }
                         else
                             unreachable,
+                        .register => |reg_sym| .{ .{ .lda_addr16 = @enumFromInt(reg_sym.address) }, null },
                     };
                 },
                 .register => |register| switch (register) {
@@ -272,6 +274,7 @@ const FunctionBuilder = struct {
                             } }
                         else
                             unreachable,
+                        .register => |reg_sym| .{ .{ .lda_addr16 = @enumFromInt(reg_sym.address) }, null },
                     };
                 },
                 .register => |register| switch (register) {

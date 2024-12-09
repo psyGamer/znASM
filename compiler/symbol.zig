@@ -86,9 +86,27 @@ pub const Symbol = union(enum) {
         /// Offset into Work-RAM
         wram_offset: u17 = undefined,
 
-        /// Type if this variable
+        /// Type of this variable
         type: TypeSymbol,
     };
+    pub const Register = struct {
+        pub const AccessType = enum {
+            /// Write-Only 8-bit
+            w8,
+        };
+
+        /// Commonly shared data between symbols
+        common: Common,
+
+        /// How this register can be accessed
+        access: AccessType,
+
+        /// Bank-independant address of this register
+        address: u16,
+        /// Type of this register
+        type: TypeSymbol,
+    };
+
     pub const Enum = struct {
         pub const Field = struct {
             name: []const u8,
@@ -108,6 +126,8 @@ pub const Symbol = union(enum) {
     function: Function,
     constant: Constant,
     variable: Variable,
+    register: Register,
+
     @"enum": Enum,
 
     pub fn common(sym: *Symbol) *Common {
@@ -115,6 +135,7 @@ pub const Symbol = union(enum) {
             .function => |*fn_sym| &fn_sym.common,
             .constant => |*const_sym| &const_sym.common,
             .variable => |*var_sym| &var_sym.common,
+            .register => |*reg_sym| &reg_sym.common,
             .@"enum" => |*enum_sym| &enum_sym.common,
         };
     }
@@ -132,6 +153,7 @@ pub const Symbol = union(enum) {
             },
             .constant => {},
             .variable => {},
+            .register => {},
             .@"enum" => {
                 allocator.free(sym.@"enum".fields);
             },

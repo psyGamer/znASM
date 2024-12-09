@@ -37,7 +37,7 @@ pub const ExpressionValue = union(enum) {
         return switch (expr) {
             .immediate => |value| @intCast(value),
             .symbol => |sym| switch (sema.lookupSymbol(sym).?.*) {
-                .function, .variable, .@"enum" => unreachable,
+                .function, .variable, .register, .@"enum" => unreachable,
                 .constant => |const_sym| @intCast(const_sym.value.resolve(T, sema)),
             },
             .register => unreachable,
@@ -173,6 +173,7 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
             .fn_def => sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx)),
             .const_def => sema.gatherConstantSymbol(sym_loc, module_idx, @intCast(node_idx)),
             .var_def => sema.gatherVariableSymbol(sym_loc, module_idx, @intCast(node_idx)),
+            .reg_def => sema.gatherRegisterSymbol(sym_loc, module_idx, @intCast(node_idx)),
             .enum_def => sema.gatherEnumSymbol(sym_loc, module_idx, @intCast(node_idx)),
             else => unreachable,
         };
@@ -350,6 +351,29 @@ fn gatherVariableSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         },
     });
 }
+fn gatherRegisterSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
+    const ast = &sema.modules[module_idx].ast;
+    const reg_def = ast.node_data[node_idx].reg_def;
+    const data = ast.extraData(Ast.Node.RegDefData, reg_def.extra);
+
+    const access_type = try sema.parseEnum(Symbol.Register.AccessType, ast, ast.node_tokens[data.access_attr]);
+    const address = try sema.parseInt(u16, ast, data.address);
+
+    try sema.createSymbol(sym_loc, .{
+        .register = .{
+            .common = .{
+                .node = node_idx,
+                .is_pub = ast.token_tags[ast.node_tokens[node_idx] - 1] == .keyword_pub,
+            },
+
+            .access = access_type,
+            .address = address,
+
+            // To be determined during analyzation
+            .type = undefined,
+        },
+    });
+}
 fn gatherEnumSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
     const ast = &sema.modules[module_idx].ast;
     const enum_def = ast.node_data[node_idx].enum_def;
@@ -392,6 +416,7 @@ pub fn analyzeSymbol(sema: *Sema, sym: *Symbol, sym_loc: SymbolLocation, token_i
         .function => |*fn_sym| sema.analyzeFunction(fn_sym, sym_loc, module_idx),
         .constant => |*const_sym| sema.analyzeConstant(const_sym, sym_loc, module_idx),
         .variable => |*var_sym| sema.analyzeVariable(var_sym, sym_loc, module_idx),
+        .register => |*reg_sym| sema.analyzeRegister(reg_sym, sym_loc, module_idx),
         .@"enum" => |*enum_sym| sema.analyzeEnum(enum_sym, sym_loc, module_idx),
     };
 }
@@ -435,6 +460,13 @@ fn analyzeVariable(sema: *Sema, var_sym: *Symbol.Variable, sym_loc: SymbolLocati
     const data = ast.extraData(Ast.Node.VarDefData, var_def.extra);
 
     var_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
+}
+fn analyzeRegister(sema: *Sema, reg_sym: *Symbol.Register, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
+    const ast = &sema.modules[module_idx].ast;
+    const reg_def = ast.node_data[reg_sym.common.node].reg_def;
+    const data = ast.extraData(Ast.Node.RegDefData, reg_def.extra);
+
+    reg_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
 }
 fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
     const ast = &sema.modules[module_idx].ast;
@@ -520,7 +552,7 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
             const sym, const sym_loc = try sema.resolveSymbol(ast, token_idx, current_module);
             const sym_idx = sema.findSymbolIndex(sym_loc);
             switch (sym.*) {
-                .function, .constant, .variable => {
+                .function, .constant, .variable, .register => {
                     try sema.errors.append(sema.allocator, .{
                         .tag = .expected_type_symbol,
                         .ast = ast,
@@ -571,9 +603,10 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
             const source_type = switch (source_symbol.*) {
                 .constant => |const_sym| const_sym.type,
                 .variable => |var_sym| var_sym.type,
+                .register => |reg_sym| reg_sym.type,
                 else => {
                     try sema.errors.append(sema.allocator, .{
-                        .tag = .expected_const_var_symbol,
+                        .tag = .expected_const_var_reg_symbol,
                         .ast = ast,
                         .token = source_symbol_ident,
                         .extra = .{ .actual_symbol = source_symbol.* },
@@ -715,6 +748,7 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
         .variable,
         => |var_sym| memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.wramOffsetToAddr(var_sym.wram_offset_min), bank) and
             memory_map.isAddressAccessibleInBank(sema.mapping_mode, memory_map.wramOffsetToAddr(var_sym.wram_offset_max), bank),
+        .register => true,
         .@"enum" => unreachable,
     };
 }
@@ -752,6 +786,18 @@ pub fn parseInt(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.T
                 .is_signed = @typeInfo(T).int.signedness == .signed,
                 .bits = @typeInfo(T).int.bits,
             } },
+        });
+        return error.AnalyzeFailed;
+    };
+}
+/// Tries parsing an enum and reports an error on failure
+pub fn parseEnum(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.TokenIndex) AnalyzeError!T {
+    return ast.parseEnumLiteral(T, token_idx) catch {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .unknown_field,
+            .ast = ast,
+            .token = token_idx,
+            .extra = .{ .unknown_field = @typeName(T) },
         });
         return error.AnalyzeFailed;
     };
@@ -847,7 +893,7 @@ pub const Error = struct {
         expected_type,
         // Extra: actual_symbol
         expected_var_symbol,
-        expected_const_var_symbol,
+        expected_const_var_reg_symbol,
         expected_fn_symbol,
         expected_type_symbol,
         // Extra: expected_register_size
@@ -856,6 +902,8 @@ pub const Error = struct {
         expected_enum_field_or_decl,
         // Extra: unsupported_register
         unsupported_register,
+        // Extra: unknown_field
+        unknown_field,
     };
 
     tag: Tag,
@@ -897,6 +945,7 @@ pub const Error = struct {
             register: RegisterType,
             message: []const u8,
         },
+        unknown_field: []const u8,
     } = .{ .none = {} },
 };
 
@@ -1024,16 +1073,16 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             err.extra.expected_type.actual,
         }),
 
-        .expected_var_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]variable[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_var_symbol => rich.print(writer, tty_config, "Expected symbol to a [" ++ highlight ++ "]variable[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
-        .expected_const_var_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]constant or variable[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_const_var_reg_symbol => rich.print(writer, tty_config, "Expected symbol to a [" ++ highlight ++ "]constant, variable or register[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
-        .expected_fn_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]function[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_fn_symbol => rich.print(writer, tty_config, "Expected symbol to a [" ++ highlight ++ "]function[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
-        .expected_type_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]type[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_type_symbol => rich.print(writer, tty_config, "Expected symbol to a [" ++ highlight ++ "]type[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
 
@@ -1050,6 +1099,11 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .unsupported_register => rich.print(writer, tty_config, "Unsupported [" ++ highlight ++ "]intermediate register {s}[reset], for use with [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.unsupported_register.register),
             err.extra.unsupported_register.message,
+        }),
+
+        .unknown_field => rich.print(writer, tty_config, "Unknown enum field [" ++ highlight ++ "]{s}[reset], for type [" ++ highlight ++ "]{s}", .{
+            err.ast.tokenSource(err.token)[1..],
+            err.extra.unknown_field,
         }),
     };
 }

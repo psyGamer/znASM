@@ -192,9 +192,13 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                             _ = var_sym; // autofix
                             @panic("TODO");
                         },
+                        .register => |reg_sym| {
+                            _ = reg_sym; // autofix
+                            @panic("TODO");
+                        },
                         else => {
                             try ana.sema.errors.append(ana.sema.allocator, .{
-                                .tag = .expected_const_var_symbol,
+                                .tag = .expected_const_var_reg_symbol,
                                 .ast = ana.ast,
                                 .token = operand_token,
                                 .extra = .{ .actual_symbol = value_sym.* },
@@ -367,9 +371,10 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             break :get_type switch (target_symbol.*) {
                 .constant => |const_sym| const_sym.type,
                 .variable => |var_sym| var_sym.type,
+                .register => |reg_sym| reg_sym.type,
                 else => {
                     try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .expected_const_var_symbol,
+                        .tag = .expected_const_var_reg_symbol,
                         .ast = ana.ast,
                         .token = target_ident,
                         .extra = .{ .actual_symbol = target_symbol.* },

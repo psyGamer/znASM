@@ -107,6 +107,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
+        // Register Definition
+        const reg_def = try p.parseRegDef(doc_comments);
+        if (reg_def != null_node) {
+            try p.scratch.append(p.allocator, reg_def);
+            continue;
+        }
+
         // Enum Definition
         const enum_def = try p.parseEnumDef(doc_comments);
         if (enum_def != null_node) {
@@ -207,6 +214,33 @@ fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
             .extra = try p.writeExtraData(Ast.Node.VarDefData, .{
                 .type = type_expr,
                 .bank_attr = bank_attr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
+        } },
+    });
+}
+
+/// RegDef <- (KEYWORD_pub)? KEYWORD_reg IDENTIFIER COLON TypeExpr AccessAttr EQUAL INT_LITERAL NEW_LINE
+fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_reg = p.eatToken(.keyword_reg) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.colon);
+    const type_expr = try p.parseTypeExpr();
+    const access_attr = try p.parseAccessAttr();
+    _ = try p.expectToken(.equal);
+    const ident_address = try p.expectToken(.int_literal);
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .reg_def,
+        .main_token = keyword_reg,
+        .data = .{ .reg_def = .{
+            .extra = try p.writeExtraData(Ast.Node.RegDefData, .{
+                .type = type_expr,
+                .address = ident_address,
+                .access_attr = access_attr,
                 .doc_comment_start = doc_comments.extra_start,
                 .doc_comment_end = doc_comments.extra_end,
             }),
@@ -330,6 +364,22 @@ fn parseBankAttr(p: *Parser) ParseError!NodeIndex {
 
     return p.addNode(.{
         .tag = .bank_attr,
+        .main_token = int_literal,
+        .data = undefined,
+    });
+}
+/// AccessAttr <- IDENTIFIER LPAREN (ENUM_LITERAL) RPAREN
+fn parseAccessAttr(p: *Parser) ParseError!NodeIndex {
+    const ident_bank = p.eatToken(.ident) orelse return null_node;
+    if (!std.mem.eql(u8, "access", p.source[p.token_locs[ident_bank].start..p.token_locs[ident_bank].end]))
+        return null_node;
+
+    _ = try p.expectToken(.lparen);
+    const int_literal = try p.expectToken(.enum_literal);
+    _ = try p.expectToken(.rparen);
+
+    return p.addNode(.{
+        .tag = .access_attr,
         .main_token = int_literal,
         .data = undefined,
     });

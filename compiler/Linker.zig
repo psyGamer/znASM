@@ -110,6 +110,7 @@ pub fn symbolLocation(link: Linker, symbol_loc: SymbolLocation) u24 {
         .function => |func_sym| memory_map.bankOffsetToAddr(link.mapping_mode, func_sym.bank, func_sym.bank_offset),
         .constant => |const_sym| memory_map.bankOffsetToAddr(link.mapping_mode, const_sym.bank, const_sym.bank_offset),
         .variable => |var_sym| memory_map.wramOffsetToAddr(var_sym.wram_offset),
+        .register => |reg_sym| reg_sym.address,
         .@"enum" => unreachable,
     };
 }
@@ -171,7 +172,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
                     } },
                 });
             },
-            .@"enum" => {},
+            .register, .@"enum" => {}, // Don't require space in the ROM
         }
     }
 }
@@ -497,14 +498,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
                     }
 
-                    const var_size = var_sym.type.size();
-
-                    if (var_size == 1) {
-                        try writer.print("SnesWorkRam:{x}:{s}", .{ var_sym.wram_offset, debug_sym_name });
-                    } else {
-                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_size - 1, debug_sym_name });
-                    }
-
+                    try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size() - 1, debug_sym_name });
                     for (comments.items, 0..) |comment, i| {
                         if (i == 0) {
                             try writer.writeByte(':');
@@ -515,6 +509,10 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         try writer.writeAll(comment);
                     }
                     try writer.writeByte('\n');
+                },
+                .register => |reg_sym| {
+                    _ = reg_sym; // autofix
+                    // TODO: Write symbols
                 },
                 .@"enum" => |enum_sym| {
                     _ = enum_sym; // autofix
@@ -584,7 +582,7 @@ pub fn generateCdlData(link: Linker, rom: []const u8) ![]const u8 {
                 _ = const_sym; // autofix
                 // TODO
             },
-            .variable => {
+            .variable, .register => {
                 // Not in ROM
             },
             .@"enum" => {

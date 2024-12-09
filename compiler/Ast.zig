@@ -40,8 +40,16 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         var_def,
 
+        /// `data` is `var_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        reg_def,
+
         /// `main_token` is the `int_literal` of bank
         bank_attr,
+
+        /// `main_token` is the `enum_literal` of access type
+        access_attr,
 
         /// `data` is `sub_range`
         /// `main_token` is the `lbrace`
@@ -104,6 +112,9 @@ pub const Node = struct {
         var_def: struct {
             extra: ExtraIndex,
         },
+        reg_def: struct {
+            extra: ExtraIndex,
+        },
         enum_def: struct {
             block: NodeIndex,
             extra: ExtraIndex,
@@ -142,6 +153,13 @@ pub const Node = struct {
     pub const VarDefData = struct {
         type: NodeIndex,
         bank_attr: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
+    };
+    pub const RegDefData = struct {
+        type: NodeIndex,
+        address: NodeIndex,
+        access_attr: NodeIndex,
         doc_comment_start: NodeIndex,
         doc_comment_end: NodeIndex,
     };
@@ -280,6 +298,12 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
         else => unreachable,
     };
     return try std.fmt.parseInt(T, int_str[(if (number_base == 10) 0 else 1)..], number_base);
+}
+/// Parses the enum value of an `enum_literal`
+pub fn parseEnumLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
+    std.debug.assert(tree.token_tags[token_idx] == .enum_literal);
+    const enum_str = tree.tokenSource(token_idx);
+    return std.meta.stringToEnum(T, enum_str[1..]) orelse error.UnknownField;
 }
 
 /// Checks if the index is of the specified token tag
