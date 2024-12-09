@@ -305,12 +305,7 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             .tag = .existing_symbol,
             .is_note = true,
             .ast = ana.ast,
-            .token = ana.ast.node_tokens[
-                switch (existing_sym.*) {
-                    .function => |existing_func| existing_func.node,
-                    else => @panic("TODO"),
-                }
-            ],
+            .token = ana.ast.node_tokens[existing_sym.common().node],
         });
         return error.AnalyzeFailed;
     }

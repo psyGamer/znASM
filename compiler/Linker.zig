@@ -155,7 +155,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
 
             try link.errors.append(link.allocator, .{
                 .tag = .no_space_left,
-                .node = var_sym.node,
+                .node = var_sym.common.node,
                 .symbol_location = loc,
                 .extra = .{ .no_space_left = .{
                     .addr_min = memory_map.wramOffsetToAddr(var_sym.wram_offset_min),
@@ -363,7 +363,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
 
             switch (symbol) {
                 .function => |func_sym| {
-                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func_sym.node]].start;
+                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func_sym.common.node]].start;
 
                     const func_offset = memory_map.bankToRomOffset(link.mapping_mode, func_sym.bank) + func_sym.bank_offset;
 
@@ -377,7 +377,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
 
                         // Document comments
                         if (info_idx == 0) {
-                            const fn_def = module.ast.node_data[func_sym.node].fn_def;
+                            const fn_def = module.ast.node_data[func_sym.common.node].fn_def;
                             const data = module.ast.extraData(Ast.Node.FnDefData, fn_def.extra);
 
                             for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
@@ -452,7 +452,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                 },
                 .constant => |const_sym| {
                     // Document comments
-                    const const_def = module.ast.node_data[const_sym.node].const_def;
+                    const const_def = module.ast.node_data[const_sym.common.node].const_def;
                     const data = module.ast.extraData(Ast.Node.ConstDefData, const_def.extra);
 
                     for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
@@ -474,7 +474,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                     defer comments.clearRetainingCapacity();
 
                     // Document comments
-                    const var_def = module.ast.node_data[var_sym.node].var_def;
+                    const var_def = module.ast.node_data[var_sym.common.node].var_def;
                     const data = module.ast.extraData(Ast.Node.VarDefData, var_def.extra);
 
                     for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {

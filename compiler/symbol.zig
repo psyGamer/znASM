@@ -29,8 +29,18 @@ pub const SymbolLocation = struct {
 };
 
 pub const Symbol = union(enum) {
-    pub const Function = struct {
+    pub const Common = struct {
+        /// Parent node
+        node: Ast.NodeIndex,
+        /// Current status for analyzation
+        analyze_status: enum { pending, active, done } = .pending,
+        /// Accessibilty for other modules
         is_pub: bool,
+    };
+
+    pub const Function = struct {
+        /// Commonly shared data between symbols
+        common: Common,
 
         /// Memory-mapped target bank
         bank: u8,
@@ -45,12 +55,10 @@ pub const Symbol = union(enum) {
         instructions: []InstructionInfo,
         /// Raw assembly data
         assembly_data: []u8,
-
-        /// `fn_def` node of this symbol
-        node: Ast.NodeIndex,
     };
     pub const Constant = struct {
-        is_pub: bool,
+        /// Commonly shared data between symbols
+        common: Common,
 
         /// Memory-mapped target bank
         bank: u8,
@@ -61,12 +69,10 @@ pub const Symbol = union(enum) {
         type: TypeSymbol,
         /// Value of this constant
         value: ExpressionValue,
-
-        /// `const_def` node of this symbol
-        node: Ast.NodeIndex,
     };
     pub const Variable = struct {
-        is_pub: bool,
+        /// Commonly shared data between symbols
+        common: Common,
 
         /// Minimum offset into Work-RAM
         wram_offset_min: u17,
@@ -78,9 +84,6 @@ pub const Symbol = union(enum) {
 
         /// Type if this variable
         type: TypeSymbol,
-
-        /// `var_def` node of this symbol
-        node: Ast.NodeIndex,
     };
     pub const Enum = struct {
         pub const Field = struct {
@@ -88,22 +91,29 @@ pub const Symbol = union(enum) {
             value: ExpressionValue,
         };
 
-        is_pub: bool,
+        /// Commonly shared data between symbols
+        common: Common,
 
         /// Backing type of this enum
         backing_type: TypeSymbol,
 
         /// Fields representable by this enum
         fields: []const Field,
-
-        /// `enum_def` node of this symbol
-        node: Ast.NodeIndex,
     };
 
     function: Function,
     constant: Constant,
     variable: Variable,
     @"enum": Enum,
+
+    pub fn common(sym: *Symbol) *Common {
+        return switch (sym.*) {
+            .function => |*fn_sym| &fn_sym.common,
+            .constant => |*const_sym| &const_sym.common,
+            .variable => |*var_sym| &var_sym.common,
+            .@"enum" => |*enum_sym| &enum_sym.common,
+        };
+    }
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
