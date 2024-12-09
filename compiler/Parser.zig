@@ -214,7 +214,7 @@ fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// EmumDef -> (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
+/// EmumDef <- (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
 fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_enum = p.eatToken(.keyword_enum) orelse return null_node;
@@ -238,7 +238,7 @@ fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// EnumBlock -> LBRACE NEW_LINE (EnumField)* RBRACE
+/// EnumBlock <- LBRACE NEW_LINE (EnumField)* RBRACE
 fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
@@ -300,7 +300,7 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// EnumField -> IDENTIFIER EQUAL Expr COMMA NEW_LINE
+/// EnumField <- IDENTIFIER EQUAL Expr COMMA NEW_LINE
 fn parseEnumField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     const ident_name = p.eatToken(.ident) orelse return null_node;
     _ = try p.expectToken(.equal);
@@ -524,7 +524,7 @@ fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Expr <- (IDENTIFIER | INT_LITERAL)
+/// Expr <- (IDENTIFIER | INT_LITERAL | ENUM_LITERAL)
 fn parseExpr(p: *Parser) ParseError!NodeIndex {
     if (p.eatToken(.ident)) |ident| {
         return try p.addNode(.{
@@ -535,7 +535,14 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
     }
     if (p.eatToken(.int_literal)) |literal| {
         return try p.addNode(.{
-            .tag = .expr_value,
+            .tag = .expr_int_value,
+            .main_token = literal,
+            .data = undefined,
+        });
+    }
+    if (p.eatToken(.enum_literal)) |literal| {
+        return try p.addNode(.{
+            .tag = .expr_enum_value,
             .main_token = literal,
             .data = undefined,
         });

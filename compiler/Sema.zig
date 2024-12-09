@@ -102,7 +102,7 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
     inline for (std.meta.fields(InterruptVectors)) |field| {
         if (@field(sema.interrupt_vectors, field.name)) |vector_loc| {
             const vector_sym = sema.lookupSymbol(vector_loc).?;
-            const vector_mod = sema.findSymbolModule(vector_loc);
+            const vector_mod = sema.findSymbolModuleIndex(vector_loc);
 
             sema.analyzeSymbol(vector_sym, vector_loc, Ast.null_token, vector_mod) catch |err| switch (err) {
                 error.AnalyzeFailed => std.log.err("Failed to analyze symbol {}", .{vector_loc}),
@@ -465,7 +465,7 @@ fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, mod
         }
     }
 
-    std.log.info("FIELDS {}", .{fields});
+    enum_sym.fields = try fields.toOwnedSlice(sema.allocator);
 }
 
 const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
@@ -473,7 +473,6 @@ const max_int_bitwidth = 64;
 
 /// Resolves a TypeExpr-node into the associated `TypeSymbol`
 pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
-    _ = current_module; // autofix
     switch (ast.node_tags[node_idx]) {
         .type_ident => {
             const token_idx = ast.node_tokens[node_idx];
@@ -518,25 +517,36 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                 }
             }
 
-            // TODO: Resolve custom types
-            try sema.errors.append(sema.allocator, .{
-                .tag = .undefined_symbol,
-                .ast = ast,
-                .token = token_idx,
-            });
-            return error.AnalyzeFailed;
+            const sym, const sym_loc = try sema.resolveSymbol(ast, token_idx, current_module);
+            const sym_idx = sema.findSymbolIndex(sym_loc);
+            switch (sym.*) {
+                .function, .constant, .variable => {
+                    try sema.errors.append(sema.allocator, .{
+                        .tag = .expected_type_symbol,
+                        .ast = ast,
+                        .token = token_idx,
+                    });
+                    return error.AnalyzeFailed;
+                },
+                .@"enum" => |enum_sym| {
+                    return .{ .raw = .{ .@"enum" = if (enum_sym.backing_type.raw == .signed_int)
+                        .{ .is_signed = true, .bits = enum_sym.backing_type.raw.signed_int, .symbol_index = sym_idx }
+                    else
+                        .{ .is_signed = false, .bits = enum_sym.backing_type.raw.unsigned_int, .symbol_index = sym_idx } } };
+                },
+            }
         },
         else => unreachable,
     }
 }
 
 /// Resolves a `name` or `module::name` into the associated `Symbol`
-pub fn resolveSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!struct { *Symbol, SymbolLocation } {
+pub fn resolveSymbol(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!struct { *Symbol, SymbolLocation } {
     const sym_loc = try sema.parseSymbolLocation(ast, token_idx, current_module);
 
     if (sema.lookupSymbol(sym_loc)) |sym| {
         // Ensure symbol is analyzed
-        try sema.analyzeSymbol(sym, sym_loc, token_idx, sema.findSymbolModule(sym_loc));
+        try sema.analyzeSymbol(sym, sym_loc, token_idx, sema.findSymbolModuleIndex(sym_loc));
 
         return .{ sym, sym_loc };
     }
@@ -556,7 +566,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
     switch (ast.node_tags[node_idx]) {
         .expr_ident => {
             const source_symbol_ident = ast.node_tokens[node_idx];
-            const source_symbol, const source_symbol_loc = try sema.resolveSymbolLocation(ast, source_symbol_ident, current_module);
+            const source_symbol, const source_symbol_loc = try sema.resolveSymbol(ast, source_symbol_ident, current_module);
 
             const source_type = switch (source_symbol.*) {
                 .constant => |const_sym| const_sym.type,
@@ -585,11 +595,12 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
 
             return .{ .symbol = source_symbol_loc };
         },
-        .expr_value => {
+        .expr_int_value => {
             const value_lit = ast.node_tokens[node_idx];
             const value = try sema.parseInt(TypeSymbol.ComptimeIntValue, ast, value_lit);
+            const value_type: TypeSymbol = .{ .raw = .{ .comptime_int = value } };
 
-            if (target_type != .raw or (target_type.raw != .signed_int and target_type.raw != .unsigned_int and target_type.raw != .comptime_int)) {
+            if (!value_type.isAssignableTo(target_type)) {
                 try sema.errors.append(sema.allocator, .{
                     .tag = .expected_type,
                     .ast = ast,
@@ -609,6 +620,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     .signed_int => |bits| bits,
                     .unsigned_int => |bits| bits,
                     .comptime_int => unreachable,
+                    .@"enum" => |backing_type| backing_type.bits,
                 };
 
                 const min: TypeSymbol.ComptimeIntValue = if (bits == 0) 0 else -(@as(TypeSymbol.ComptimeIntValue, 1) << @intCast(bits - 1));
@@ -631,6 +643,43 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
             }
 
             return .{ .immediate = value };
+        },
+        .expr_enum_value => {
+            const value_lit = ast.node_tokens[node_idx];
+            const literal_name = ast.tokenSource(value_lit)[1..];
+
+            switch (target_type) {
+                .raw => |payload| switch (payload) {
+                    .signed_int, .unsigned_int, .comptime_int => {
+                        try sema.errors.append(sema.allocator, .{
+                            .tag = .expected_enum_field_or_decl,
+                            .ast = ast,
+                            .token = value_lit,
+                            .extra = .{ .expected_enum_field_or_decl = target_type },
+                        });
+                        return error.AnalyzeFailed;
+                    },
+                    .@"enum" => |enum_type_sym| {
+                        const enum_sym = sema.symbols.items(.sym)[enum_type_sym.symbol_index].@"enum";
+
+                        for (enum_sym.fields) |field| {
+                            if (std.mem.eql(u8, field.name, literal_name)) {
+                                return field.value;
+                            }
+                        }
+
+                        // Not found
+                        try sema.errors.append(sema.allocator, .{
+                            .tag = .expected_enum_field_or_decl,
+                            .ast = ast,
+                            .token = value_lit,
+                            .extra = .{ .expected_enum_field_or_decl = target_type },
+                        });
+                        return error.AnalyzeFailed;
+                    },
+                },
+            }
+            unreachable;
         },
         else => unreachable,
     }
@@ -670,8 +719,17 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
     };
 }
 
+/// Finds the `SymbolIndex` of the specified symbol location
+pub fn findSymbolIndex(sema: Sema, sym_loc: SymbolLocation) SymbolIndex {
+    for (sema.symbols.items(.loc), 0..) |other_sym_loc, i| {
+        if (std.mem.eql(u8, sym_loc.name, other_sym_loc.name) and std.mem.eql(u8, sym_loc.module, other_sym_loc.module)) {
+            return @intCast(i);
+        }
+    }
+    unreachable;
+}
 /// Finds the `ModuleIndex` of the specified symbol location
-pub fn findSymbolModule(sema: Sema, sym_loc: SymbolLocation) ModuleIndex {
+pub fn findSymbolModuleIndex(sema: Sema, sym_loc: SymbolLocation) ModuleIndex {
     for (sema.modules, 0..) |module, module_idx| {
         if (std.mem.eql(u8, module.name.?, sym_loc.module)) {
             return @intCast(module_idx);
@@ -791,8 +849,11 @@ pub const Error = struct {
         expected_var_symbol,
         expected_const_var_symbol,
         expected_fn_symbol,
+        expected_type_symbol,
         // Extra: expected_register_size
         expected_register_size,
+        // Extra: expected_enum_field_or_decl
+        expected_enum_field_or_decl,
         // Extra: unsupported_register
         unsupported_register,
     };
@@ -831,6 +892,7 @@ pub const Error = struct {
             expected: u16,
             actual: u16,
         },
+        expected_enum_field_or_decl: TypeSymbol,
         unsupported_register: struct {
             register: RegisterType,
             message: []const u8,
@@ -971,10 +1033,18 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .expected_fn_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]function[reset], found [" ++ highlight ++ "]{s}", .{
             @tagName(err.extra.actual_symbol),
         }),
+        .expected_type_symbol => rich.print(writer, tty_config, "Expected symbol to a[" ++ highlight ++ "]type[reset], found [" ++ highlight ++ "]{s}", .{
+            @tagName(err.extra.actual_symbol),
+        }),
 
         .expected_register_size => rich.print(writer, tty_config, "Expected register size to evenly divide [" ++ highlight ++ "]{d}-bit value[reset], found [" ++ highlight ++ "]{d}-bit register", .{
             err.extra.expected_register_size.expected,
             err.extra.expected_register_size.actual,
+        }),
+
+        .expected_enum_field_or_decl => rich.print(writer, tty_config, "Could not find an [" ++ highlight ++ "]enum field[reset] or a [" ++ highlight ++ "]declaration[reset] called [" ++ highlight ++ "]\"{s}\"[reset], on type [" ++ highlight ++ "]{}[reset]", .{
+            err.ast.tokenSource(err.token)[1..],
+            err.extra.expected_enum_field_or_decl,
         }),
 
         .unsupported_register => rich.print(writer, tty_config, "Unsupported [" ++ highlight ++ "]intermediate register {s}[reset], for use with [" ++ highlight ++ "]{s}", .{

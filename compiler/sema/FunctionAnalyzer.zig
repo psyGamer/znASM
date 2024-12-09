@@ -150,7 +150,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
 
                 if (ana.ast.token_tags[operand_token] == .ident and ana.ast.token_tags[operand_token + 1] == .new_line) {
-                    const value_sym, _ = try ana.sema.resolveSymbolLocation(ana.ast, operand_token, ana.symbol_location.module);
+                    const value_sym, _ = try ana.sema.resolveSymbol(ana.ast, operand_token, ana.symbol_location.module);
                     switch (value_sym.*) {
                         .constant => |const_sym| {
                             if (curr_size == .@"8bit") {
@@ -356,7 +356,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 return error.AnalyzeFailed;
             }
         } else {
-            _, const target_symbol_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
+            _, const target_symbol_loc = try ana.sema.resolveSymbol(ana.ast, target_ident, ana.symbol_location.module);
             break :get_target .{ .symbol = target_symbol_loc };
         }
     };
@@ -538,7 +538,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     } else {
         // Function / macro call
-        const sym, const sym_loc = try ana.sema.resolveSymbolLocation(ana.ast, target_ident, ana.symbol_location.module);
+        const sym, const sym_loc = try ana.sema.resolveSymbol(ana.ast, target_ident, ana.symbol_location.module);
 
         switch (sym.*) {
             .function => {

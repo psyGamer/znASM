@@ -22,6 +22,9 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         const_def,
 
+        /// `data` is `enum_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
         enum_def,
 
         /// `data` is `sub_range`
@@ -64,7 +67,9 @@ pub const Node = struct {
         /// `main_token` is the `identifier` of the expression
         expr_ident,
         /// `main_token` is the `int_literal` value of the expression
-        expr_value,
+        expr_int_value,
+        /// `main_token` is the `enum_literal` value of the expression
+        expr_enum_value,
 
         /// `main_token` is the `identifier` of the type
         type_ident,

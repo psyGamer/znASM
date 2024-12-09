@@ -1,7 +1,9 @@
 const std = @import("std");
 const Ast = @import("Ast.zig");
 const Ir = @import("ir.zig").Ir;
-const ExpressionValue = @import("Sema.zig").ExpressionValue;
+const Sema = @import("Sema.zig");
+const ExpressionValue = Sema.ExpressionValue;
+const SymbolIndex = Sema.SymbolIndex;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
@@ -27,6 +29,8 @@ pub const SymbolLocation = struct {
         try writer.writeAll(value.name);
     }
 };
+
+const A = enum(u2) {};
 
 pub const Symbol = union(enum) {
     pub const Common = struct {
@@ -148,6 +152,12 @@ pub const TypeSymbol = union(enum) {
         unsigned_int: u16,
         // Payload indicates value
         comptime_int: ComptimeIntValue,
+
+        @"enum": struct {
+            is_signed: bool,
+            bits: u16,
+            symbol_index: SymbolIndex,
+        },
     };
 
     /// Simple type with no extra annotations
@@ -168,13 +178,24 @@ pub const TypeSymbol = union(enum) {
                         .signed_int => |other_bits| return other_bits >= bits,
                         .unsigned_int => return false,
                         .comptime_int => unreachable, // Cannot assign to a comptime_int
+                        .@"enum" => |other_backing_type| return other_backing_type.is_signed and other_backing_type.bits >= bits,
                     },
                     .unsigned_int => |bits| switch (other_payload) {
                         .signed_int => |other_bits| return other_bits > bits,
                         .unsigned_int => |other_bits| return other_bits >= bits,
                         .comptime_int => unreachable, // Cannot assign to a comptime_int
+                        .@"enum" => |other_backing_type| return other_backing_type.bits + @intFromBool(other_backing_type.is_signed) >= bits,
                     },
                     .comptime_int => return true, // Depends on the size of the value
+                    .@"enum" => |backing_type| switch (other_payload) {
+                        .signed_int => |other_bits| return other_bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
+                        .unsigned_int => |other_bits| return backing_type.is_signed and other_bits >= backing_type.bits,
+                        .comptime_int => unreachable, // Cannot assign to a comptime_int
+                        .@"enum" => |other_backing_type| return if (backing_type.is_signed)
+                            other_backing_type.is_signed and other_backing_type.bits >= backing_type.bits
+                        else
+                            other_backing_type.bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
+                    },
                 }
             },
         }
@@ -191,6 +212,7 @@ pub const TypeSymbol = union(enum) {
             .signed_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
             .unsigned_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
             .comptime_int => unreachable,
+            .@"enum" => |backing_type| std.mem.alignForward(u16, backing_type.bits, 8) / 8,
         };
     }
 
@@ -204,6 +226,10 @@ pub const TypeSymbol = union(enum) {
             .signed_int => |bits| writer.print("i{d}", .{bits}),
             .unsigned_int => |bits| writer.print("u{d}", .{bits}),
             .comptime_int => writer.writeAll("comptime_int"),
+            .@"enum" => |backing_type| if (backing_type.is_signed)
+                writer.print("enum(i{d})", .{backing_type.bits})
+            else
+                writer.print("enum(u{d})", .{backing_type.bits}),
         };
     }
 };

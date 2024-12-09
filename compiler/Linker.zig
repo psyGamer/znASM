@@ -120,52 +120,60 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
     defer link.allocator.free(used_ram);
     @memset(used_ram, false);
 
-    symbol_loop: for (link.sema.symbols.items(.sym), link.sema.symbols.items(.loc)) |*sym, *loc| switch (sym.*) {
-        .function => |*func_sym| {
-            const gop = try link.rom_banks.getOrPut(link.allocator, func_sym.bank);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .empty;
-            }
+    symbol_loop: for (link.sema.symbols.items(.sym), link.sema.symbols.items(.loc)) |*sym, *loc| {
+        // Skip unreferenced symbols
+        if (sym.common().analyze_status == .pending) {
+            continue;
+        }
+        std.debug.assert(sym.common().analyze_status == .done);
 
-            func_sym.bank_offset = @intCast(gop.value_ptr.items.len);
-            try gop.value_ptr.appendSlice(link.allocator, func_sym.assembly_data);
-            std.log.info("asm {x}", .{func_sym.assembly_data});
-        },
-        .constant => |*const_sym| {
-            _ = const_sym; // autofix
-        },
-        .variable => |*var_sym| {
-            // TODO: Place variables from high addr-variance to low addr-variance and from large to small
-            const var_size = var_sym.type.size();
-            const possible = used_ram[var_sym.wram_offset_min..var_sym.wram_offset_max];
-
-            var last_start: u16 = 0;
-            for (possible, 0..) |used, i| {
-                if (used) {
-                    last_start = @intCast(i + 1);
-                    continue;
+        switch (sym.*) {
+            .function => |*func_sym| {
+                const gop = try link.rom_banks.getOrPut(link.allocator, func_sym.bank);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .empty;
                 }
 
-                if (i - last_start + 1 == var_size) {
-                    var_sym.wram_offset = var_sym.wram_offset_min + last_start;
-                    @memset(possible[last_start..(i + 1)], true);
-                    continue :symbol_loop;
-                }
-            }
+                func_sym.bank_offset = @intCast(gop.value_ptr.items.len);
+                try gop.value_ptr.appendSlice(link.allocator, func_sym.assembly_data);
+                std.log.info("asm {x}", .{func_sym.assembly_data});
+            },
+            .constant => |*const_sym| {
+                _ = const_sym; // autofix
+            },
+            .variable => |*var_sym| {
+                // TODO: Place variables from high addr-variance to low addr-variance and from large to small
+                const var_size = var_sym.type.size();
+                const possible = used_ram[var_sym.wram_offset_min..var_sym.wram_offset_max];
 
-            try link.errors.append(link.allocator, .{
-                .tag = .no_space_left,
-                .node = var_sym.common.node,
-                .symbol_location = loc,
-                .extra = .{ .no_space_left = .{
-                    .addr_min = memory_map.wramOffsetToAddr(var_sym.wram_offset_min),
-                    .addr_max = memory_map.wramOffsetToAddr(var_sym.wram_offset_max),
-                    .size = var_size,
-                } },
-            });
-        },
-        .@"enum" => {},
-    };
+                var last_start: u16 = 0;
+                for (possible, 0..) |used, i| {
+                    if (used) {
+                        last_start = @intCast(i + 1);
+                        continue;
+                    }
+
+                    if (i - last_start + 1 == var_size) {
+                        var_sym.wram_offset = var_sym.wram_offset_min + last_start;
+                        @memset(possible[last_start..(i + 1)], true);
+                        continue :symbol_loop;
+                    }
+                }
+
+                try link.errors.append(link.allocator, .{
+                    .tag = .no_space_left,
+                    .node = var_sym.common.node,
+                    .symbol_location = loc,
+                    .extra = .{ .no_space_left = .{
+                        .addr_min = memory_map.wramOffsetToAddr(var_sym.wram_offset_min),
+                        .addr_max = memory_map.wramOffsetToAddr(var_sym.wram_offset_max),
+                        .size = var_size,
+                    } },
+                });
+            },
+            .@"enum" => {},
+        }
+    }
 }
 
 /// Allocate the actual bank-data for the ROM
@@ -489,7 +497,14 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
                     }
 
-                    try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size() - 1, debug_sym_name });
+                    const var_size = var_sym.type.size();
+
+                    if (var_size == 1) {
+                        try writer.print("SnesWorkRam:{x}:{s}", .{ var_sym.wram_offset, debug_sym_name });
+                    } else {
+                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_size - 1, debug_sym_name });
+                    }
+
                     for (comments.items, 0..) |comment, i| {
                         if (i == 0) {
                             try writer.writeByte(':');
