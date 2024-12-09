@@ -39,7 +39,7 @@ const null_node = Ast.null_node;
 
 const ParseError = error{ParseFailed} || std.mem.Allocator.Error;
 
-/// Root <- ModuleDef (FnDef | ConstDef | VarDef)*
+/// Root <- ModuleDef (FnDef | ConstDef | VarDef | EnumDef)*
 pub fn parseRoot(p: *Parser) ParseError!void {
     const tld_start = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(tld_start);
@@ -104,6 +104,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         const var_def = try p.parseVarDef(doc_comments);
         if (var_def != null_node) {
             try p.scratch.append(p.allocator, var_def);
+            continue;
+        }
+
+        // Enum Definition
+        const enum_def = try p.parseEnumDef(doc_comments);
+        if (enum_def != null_node) {
+            try p.scratch.append(p.allocator, enum_def);
             continue;
         }
 
@@ -207,6 +214,110 @@ fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
+/// EmumDef -> (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
+fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_enum = p.eatToken(.keyword_enum) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.lparen);
+    const type_expr = try p.parseTypeExpr();
+    _ = try p.expectToken(.rparen);
+    const enum_block = try p.parseEnumBlock();
+
+    return try p.addNode(.{
+        .tag = .enum_def,
+        .main_token = keyword_enum,
+        .data = .{ .enum_def = .{
+            .block = enum_block,
+            .extra = try p.writeExtraData(Ast.Node.EnumDefData, .{
+                .backing_type = type_expr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
+        } },
+    });
+}
+
+/// EnumBlock -> LBRACE NEW_LINE (EnumField)* RBRACE
+fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    const lbrace = try p.expectToken(.lbrace);
+    _ = try p.expectToken(.new_line);
+
+    var doc_start: ?usize = null;
+    while (true) {
+        const t = p.token_tags[p.index];
+        if (t == .new_line) {
+            p.index += 1;
+            continue;
+        }
+        if (t == .rbrace) {
+            break;
+        }
+        if (t == .doc_comment) {
+            doc_start = doc_start orelse p.scratch.items.len;
+            try p.scratch.append(p.allocator, try p.addNode(.{
+                .tag = .doc_comment,
+                .main_token = p.index,
+                .data = undefined,
+            }));
+            p.index += 1;
+            continue;
+        }
+
+        const doc_comments: Node.SubRange = get_comments: {
+            if (doc_start) |start| {
+                const comments = try p.writeExtraSubRange(p.scratch.items[start..]);
+                p.scratch.shrinkRetainingCapacity(start);
+                doc_start = null;
+                break :get_comments comments;
+            } else {
+                break :get_comments .{ .extra_start = null_node, .extra_end = null_node };
+            }
+        };
+
+        const start_idx = p.index;
+
+        // Enum Field
+        const field = try p.parseEnumField(doc_comments);
+        if (field != null_node) {
+            try p.scratch.append(p.allocator, field);
+            continue;
+        }
+        p.index = start_idx;
+
+        return p.fail(.expected_enum_member);
+    }
+    _ = try p.expectToken(.rbrace);
+    _ = try p.expectToken(.new_line);
+
+    return p.addNode(.{
+        .tag = .enum_block,
+        .main_token = lbrace,
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[scratch_top..]) },
+    });
+}
+
+/// EnumField -> IDENTIFIER EQUAL Expr COMMA NEW_LINE
+fn parseEnumField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    const ident_name = p.eatToken(.ident) orelse return null_node;
+    _ = try p.expectToken(.equal);
+    const expr_value = try p.parseExpr();
+    _ = try p.expectToken(.comma);
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .enum_field,
+        .main_token = ident_name,
+        .data = .{ .enum_field = .{
+            .value = expr_value,
+            .doc_comments = try p.writeExtraData(Node.SubRange, doc_comments),
+        } },
+    });
+}
+
 /// BankAttr <- IDENTIFIER LPAREN (INT_LITERAL) RPAREN
 fn parseBankAttr(p: *Parser) ParseError!NodeIndex {
     const ident_bank = p.eatToken(.ident) orelse return null_node;
@@ -224,7 +335,7 @@ fn parseBankAttr(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Block <- LBRACE NEW_LINE (NEW_NEWLINE | Expr | Instruction | Label)* RBRACE NEW_LINE
+/// Block <- LBRACE NEW_LINE (NEW_LINE | Expr | Instruction | Label)* RBRACE NEW_LINE
 fn parseBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);

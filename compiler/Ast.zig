@@ -22,6 +22,16 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         const_def,
 
+        enum_def,
+
+        /// `data` is `sub_range`
+        /// `main_token` is the `lbrace`
+        enum_block,
+
+        /// `data` is `enum_field`
+        /// `main_token` is the `identifier` of the name
+        enum_field,
+
         /// `data` is `var_def`
         /// `main_token - 1` is the optional `keyword_pub`
         /// `main_token + 1` is the `identifier` of the name
@@ -89,6 +99,15 @@ pub const Node = struct {
         var_def: struct {
             extra: ExtraIndex,
         },
+        enum_def: struct {
+            block: NodeIndex,
+            extra: ExtraIndex,
+        },
+        enum_body: struct {},
+        enum_field: struct {
+            value: NodeIndex,
+            doc_comments: ExtraIndex,
+        },
         assign_statement: struct {
             value: NodeIndex,
             intermediate_register: TokenIndex,
@@ -121,32 +140,11 @@ pub const Node = struct {
         doc_comment_start: NodeIndex,
         doc_comment_end: NodeIndex,
     };
-};
-
-pub const Error = struct {
-    pub const Tag = enum {
-        // Extra: none
-        expected_toplevel,
-        expected_statement,
-        expected_expr,
-        expected_comma_after_arg,
-        // Extra: expected_tag
-        expected_token,
+    pub const EnumDefData = struct {
+        backing_type: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
     };
-
-    tag: Tag,
-
-    /// Notes are associated with the previous error
-    is_note: bool = false,
-
-    /// True if `token` points to the token before the token causing an issue.
-    token_is_prev: bool = false,
-    token: TokenIndex,
-
-    extra: union {
-        none: void,
-        expected_tag: Token.Tag,
-    } = .{ .none = {} },
 };
 
 pub const TokenIndex = u32;
@@ -294,6 +292,35 @@ pub fn areTokens(tree: Ast, token_idx: TokenIndex, tags: []const Token.Tag) bool
         std.mem.eql(Token.Tag, tree.token_tags[token_idx..(token_idx + tags.len)], tags);
 }
 
+// Error handling
+
+pub const Error = struct {
+    pub const Tag = enum {
+        // Extra: none
+        expected_toplevel,
+        expected_statement,
+        expected_expr,
+        expected_comma_after_arg,
+        expected_enum_member,
+        // Extra: expected_tag
+        expected_token,
+    };
+
+    tag: Tag,
+
+    /// Notes are associated with the previous error
+    is_note: bool = false,
+
+    /// True if `token` points to the token before the token causing an issue.
+    token_is_prev: bool = false,
+    token: TokenIndex,
+
+    extra: union {
+        none: void,
+        expected_tag: Token.Tag,
+    } = .{ .none = {} },
+};
+
 pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config) !bool {
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
@@ -332,47 +359,25 @@ pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, er
     const highlight = "bold bright_magenta";
 
     switch (err.tag) {
-        .expected_toplevel => try rich.print(
-            writer,
-            tty_config,
-            "Expected [" ++ highlight ++ "]a top-level definition[reset], found [" ++ highlight ++ "]{s}",
-            .{
-                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
-            },
-        ),
-        .expected_statement => try rich.print(
-            writer,
-            tty_config,
-            "Expected [" ++ highlight ++ "]a statement[reset], found [" ++ highlight ++ "]{s}",
-            .{
-                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
-            },
-        ),
-        .expected_expr => try rich.print(
-            writer,
-            tty_config,
-            "Expected [" ++ highlight ++ "]an expression[reset], found [" ++ highlight ++ "]{s}",
-            .{
-                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
-            },
-        ),
-        .expected_comma_after_arg => try rich.print(
-            writer,
-            tty_config,
-            "Expected [" ++ highlight ++ "]a comma[reset], after an argument, found [" ++ highlight ++ "]{s}",
-            .{
-                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
-            },
-        ),
+        .expected_toplevel => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a top-level definition[reset], found [" ++ highlight ++ "]{s}", .{
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
+        .expected_statement => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a statement[reset], found [" ++ highlight ++ "]{s}", .{
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
+        .expected_expr => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an expression[reset], found [" ++ highlight ++ "]{s}", .{
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
+        .expected_comma_after_arg => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a comma[reset], after an argument, found [" ++ highlight ++ "]{s}", .{
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
+        .expected_enum_member => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an enum member[reset], inside [" ++ highlight ++ "]enum block[reset], found [" ++ highlight ++ "]{s}", .{
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
 
-        .expected_token => try rich.print(
-            writer,
-            tty_config,
-            "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}",
-            .{
-                err.extra.expected_tag.symbol(),
-                tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
-            },
-        ),
+        .expected_token => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+            err.extra.expected_tag.symbol(),
+            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+        }),
     }
 }

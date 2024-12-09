@@ -79,13 +79,31 @@ pub const Symbol = union(enum) {
         /// Type if this variable
         type: TypeSymbol,
 
-        /// `const_def` node of this symbol
+        /// `var_def` node of this symbol
+        node: Ast.NodeIndex,
+    };
+    pub const Enum = struct {
+        pub const Field = struct {
+            name: []const u8,
+            value: ExpressionValue,
+        };
+
+        is_pub: bool,
+
+        /// Backing type of this enum
+        backing_type: TypeSymbol,
+
+        /// Fields representable by this enum
+        fields: []const Field,
+
+        /// `enum_def` node of this symbol
         node: Ast.NodeIndex,
     };
 
     function: Function,
     constant: Constant,
     variable: Variable,
+    @"enum": Enum,
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
@@ -100,6 +118,9 @@ pub const Symbol = union(enum) {
             },
             .constant => {},
             .variable => {},
+            .@"enum" => {
+                allocator.free(sym.@"enum".fields);
+            },
         }
     }
 };
