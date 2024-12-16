@@ -36,10 +36,11 @@ pub const Symbol = union(enum) {
     pub const Common = struct {
         /// Parent node
         node: Ast.NodeIndex,
-        /// Current status for analyzation
-        analyze_status: enum { pending, active, done } = .pending,
         /// Accessibilty for other modules
         is_pub: bool,
+
+        /// Current status for analyzation
+        analyze_status: enum { pending, active, done } = .pending,
     };
 
     pub const Function = struct {

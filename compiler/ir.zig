@@ -19,15 +19,28 @@ pub const Ir = struct {
             mode: Instruction.SizeMode,
         },
 
+        /// Loads the immedate value into the register
+        load_value: struct {
+            register: RegisterType,
+            value: Instruction.Imm816,
+        },
+        /// Loads the variable at the offset into the register
+        load_variable: struct {
+            register: RegisterType,
+            symbol: SymbolLocation,
+            offset: u16 = 0,
+        },
+
         load: struct {
             target: RegisterType,
             value: ExpressionValue,
             source_offset: u16 = 0,
         },
-        store: struct {
-            source: RegisterType,
-            target: SymbolLocation,
-            target_offset: u16 = 0,
+        /// Stores the value of the register into the variable
+        store_variable: struct {
+            register: RegisterType,
+            symbol: SymbolLocation,
+            offset: u16 = 0,
         },
 
         call: struct {

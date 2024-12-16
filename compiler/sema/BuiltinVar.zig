@@ -40,7 +40,7 @@ pub const all = [_]BuiltinVar{
 
 fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: ExpressionValue, register: ?RegisterType) Sema.AnalyzeError!void {
     switch (expr) {
-        .immediate, .symbol => {
+        .value, .variable => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
             ana.ir.appendAssumeCapacity(.{
                 .tag = .{ .change_size = .{
@@ -56,28 +56,36 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 .node = node_idx,
             });
 
-            switch (register.?) {
-                .a16 => {
+            switch (expr) {
+                .value => |value| {
                     ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .load = .{
-                            .target = register.?,
-                            .value = expr,
+                        .tag = .{ .load_value = .{
+                            .register = register.?,
+                            .value = .{ .imm16 = @intCast(value) },
                         } },
                         .node = node_idx,
                     });
+                },
+                .variable => |sym_loc| {
+                    ana.ir.appendAssumeCapacity(.{
+                        .tag = .{ .load_variable = .{
+                            .register = register.?,
+                            .symbol = sym_loc,
+                        } },
+                        .node = node_idx,
+                    });
+                },
+                else => unreachable,
+            }
+
+            switch (register.?) {
+                .a16 => {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .instruction = .{ .instr = .tcs, .reloc = null } },
                         .node = node_idx,
                     });
                 },
                 .x8, .x16 => {
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .load = .{
-                            .target = register.?,
-                            .value = expr,
-                        } },
-                        .node = node_idx,
-                    });
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .instruction = .{ .instr = .txs, .reloc = null } },
                         .node = node_idx,
@@ -127,6 +135,6 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 },
             }
         },
-        .fields => unreachable,
+        .packed_fields => unreachable,
     }
 }

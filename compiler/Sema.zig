@@ -29,38 +29,28 @@ pub const RegisterType = enum { a8, a16, x8, x16, y8, y16 };
 
 /// Represents a parsed value of an expression
 pub const ExpressionValue = union(enum) {
-    const Field = struct {
-        name: []const u8,
+    pub const PackedField = struct {
         value: ExpressionValue,
         bit_offset: u16,
     };
 
-    immediate: TypeSymbol.ComptimeIntValue,
-    symbol: SymbolLocation,
+    value: TypeSymbol.ComptimeIntValue,
+    variable: SymbolLocation,
+    packed_fields: []const PackedField,
     register: RegisterType,
-    fields: []const Field,
 
     pub fn deinit(expr: ExpressionValue, allocator: std.mem.Allocator) void {
         switch (expr) {
-            .immediate, .symbol, .register => {},
-            .fields => |fields| allocator.free(fields),
+            .value, .variable, .register => {},
+            .packed_fields => |fields| allocator.free(fields),
         }
     }
+
     pub fn resolve(expr: ExpressionValue, comptime T: type, sema: *const Sema) T {
+        _ = sema; // autofix
         return switch (expr) {
-            .immediate => |value| @intCast(value),
-            .symbol => |sym| switch (sema.lookupSymbol(sym).?.*) {
-                .function, .variable, .register, .@"packed", .@"enum" => unreachable,
-                .constant => |const_sym| @intCast(const_sym.value.resolve(T, sema)),
-            },
-            .register => unreachable,
-            .fields => |fields| {
-                var value: T = 0;
-                for (fields) |field| {
-                    value |= field.value.resolve(T, sema) << @intCast(field.bit_offset);
-                }
-                return value;
-            },
+            .value => |value| @intCast(value),
+            .variable, .packed_fields, .register => unreachable, // Cannot be determined at compile time
         };
     }
 };
@@ -701,7 +691,11 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                 return error.AnalyzeFailed;
             }
 
-            return .{ .symbol = source_symbol_loc };
+            return switch (source_symbol.*) {
+                .constant => |const_sym| .{ .value = const_sym.value.resolve(TypeSymbol.ComptimeIntValue, sema) },
+                .variable, .register => .{ .variable = source_symbol_loc },
+                else => unreachable,
+            };
         },
         .expr_int_value => {
             const value_lit = ast.node_tokens[node_idx];
@@ -747,11 +741,9 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     });
                     return error.AnalyzeFailed;
                 }
-
-                return .{ .immediate = value };
             }
 
-            return .{ .immediate = value };
+            return .{ .value = value };
         },
         .expr_enum_value => {
             const value_lit = ast.node_tokens[node_idx];
@@ -801,126 +793,127 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
             unreachable;
         },
         .expr_init => {
-            switch (target_type.raw) {
-                .signed_int, .unsigned_int, .comptime_int, .@"enum" => {
-                    try sema.errors.append(sema.allocator, .{
-                        .tag = .expected_type_got_init,
-                        .ast = ast,
-                        .token = ast.node_tokens[node_idx],
-                        .extra = .{ .expected_type_got_init = target_type },
-                    });
-                    return error.AnalyzeFailed;
-                },
-                .@"packed" => {},
-            }
+            unreachable; // TODO
+            // switch (target_type.raw) {
+            //     .signed_int, .unsigned_int, .comptime_int, .@"enum" => {
+            //         try sema.errors.append(sema.allocator, .{
+            //             .tag = .expected_type_got_init,
+            //             .ast = ast,
+            //             .token = ast.node_tokens[node_idx],
+            //             .extra = .{ .expected_type_got_init = target_type },
+            //         });
+            //         return error.AnalyzeFailed;
+            //     },
+            //     .@"packed" => {},
+            // }
 
-            var fields: std.ArrayListUnmanaged(ExpressionValue.Field) = .empty;
+            // var fields: std.ArrayListUnmanaged(ExpressionValue.Field) = .empty;
 
-            // Apply specified values
-            const sub_range = ast.node_data[node_idx].sub_range;
-            for (sub_range.extra_start..sub_range.extra_end) |extra_idx| {
-                const field_idx = ast.extra_data[extra_idx];
-                const field_token = ast.node_tokens[field_idx];
-                const field_data = ast.node_data[field_idx].expr_init_field;
+            // // Apply specified values
+            // const sub_range = ast.node_data[node_idx].sub_range;
+            // for (sub_range.extra_start..sub_range.extra_end) |extra_idx| {
+            //     const field_idx = ast.extra_data[extra_idx];
+            //     const field_token = ast.node_tokens[field_idx];
+            //     const field_data = ast.node_data[field_idx].expr_init_field;
 
-                const field_name = ast.tokenSource(field_token)[1..];
-                const field_type = get_type: {
-                    switch (target_type.raw) {
-                        .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
-                        .@"packed" => |packed_type_sym| {
-                            const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+            //     const field_name = ast.tokenSource(field_token)[1..];
+            //     const field_type = get_type: {
+            //         switch (target_type.raw) {
+            //             .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
+            //             .@"packed" => |packed_type_sym| {
+            //                 const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
 
-                            for (packed_sym.fields) |field| {
-                                if (std.mem.eql(u8, field.name, field_name)) {
-                                    break :get_type field.type;
-                                }
-                            }
+            //                 for (packed_sym.fields) |field| {
+            //                     if (std.mem.eql(u8, field.name, field_name)) {
+            //                         break :get_type field.type;
+            //                     }
+            //                 }
 
-                            try sema.errors.append(sema.allocator, .{
-                                .tag = .unknown_field,
-                                .ast = ast,
-                                .token = field_token,
-                                .extra = .{ .unknown_field = .{ .symbol = target_type } },
-                            });
-                            return error.AnalyzeFailed;
-                        },
-                    }
-                };
-                const field_offset = get_offset: {
-                    switch (target_type.raw) {
-                        .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
-                        .@"packed" => |packed_type_sym| {
-                            const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+            //                 try sema.errors.append(sema.allocator, .{
+            //                     .tag = .unknown_field,
+            //                     .ast = ast,
+            //                     .token = field_token,
+            //                     .extra = .{ .unknown_field = .{ .symbol = target_type } },
+            //                 });
+            //                 return error.AnalyzeFailed;
+            //             },
+            //         }
+            //     };
+            //     const field_offset = get_offset: {
+            //         switch (target_type.raw) {
+            //             .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
+            //             .@"packed" => |packed_type_sym| {
+            //                 const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
 
-                            var bit_offset: u16 = 0;
-                            for (packed_sym.fields) |field| {
-                                if (std.mem.eql(u8, field.name, field_name)) {
-                                    break :get_offset bit_offset;
-                                }
+            //                 var bit_offset: u16 = 0;
+            //                 for (packed_sym.fields) |field| {
+            //                     if (std.mem.eql(u8, field.name, field_name)) {
+            //                         break :get_offset bit_offset;
+            //                     }
 
-                                bit_offset += field.type.bitSize();
-                            }
+            //                     bit_offset += field.type.bitSize();
+            //                 }
 
-                            unreachable;
-                        },
-                    }
-                };
-                const field_value = try sema.resolveExprValue(ast, field_data.value, field_type, current_module);
+            //                 unreachable;
+            //             },
+            //         }
+            //     };
+            //     const field_value = try sema.resolveExprValue(ast, field_data.value, field_type, current_module);
 
-                try fields.append(sema.allocator, .{
-                    .name = field_name,
-                    .value = field_value,
-                    .bit_offset = field_offset,
-                });
-            }
+            //     try fields.append(sema.allocator, .{
+            //         .name = field_name,
+            //         .value = field_value,
+            //         .bit_offset = field_offset,
+            //     });
+            // }
 
-            // Fill default values / check missing
-            switch (target_type.raw) {
-                .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
-                .@"packed" => |packed_type_sym| {
-                    const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+            // // Fill default values / check missing
+            // switch (target_type.raw) {
+            //     .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
+            //     .@"packed" => |packed_type_sym| {
+            //         const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
 
-                    for (packed_sym.fields, 0..) |defined_field, def_idx| {
-                        for (fields.items) |specified_field| {
-                            if (std.mem.eql(u8, defined_field.name, specified_field.name)) {
-                                break;
-                            }
-                        } else {
-                            // Field not specified
-                            if (defined_field.default_value) |default| {
-                                // Apply default value
-                                var bit_offset: u16 = 0;
-                                for (packed_sym.fields, 0..) |field, field_idx| {
-                                    if (def_idx == field_idx) {
-                                        try fields.append(sema.allocator, .{
-                                            .name = field.name,
-                                            .value = default,
-                                            .bit_offset = bit_offset,
-                                        });
-                                        break;
-                                    }
+            //         for (packed_sym.fields, 0..) |defined_field, def_idx| {
+            //             for (fields.items) |specified_field| {
+            //                 if (std.mem.eql(u8, defined_field.name, specified_field.name)) {
+            //                     break;
+            //                 }
+            //             } else {
+            //                 // Field not specified
+            //                 if (defined_field.default_value) |default| {
+            //                     // Apply default value
+            //                     var bit_offset: u16 = 0;
+            //                     for (packed_sym.fields, 0..) |field, field_idx| {
+            //                         if (def_idx == field_idx) {
+            //                             try fields.append(sema.allocator, .{
+            //                                 .name = field.name,
+            //                                 .value = default,
+            //                                 .bit_offset = bit_offset,
+            //                             });
+            //                             break;
+            //                         }
 
-                                    bit_offset += field.type.bitSize();
-                                }
-                            } else {
-                                // Field value not specified
-                                try sema.errors.append(sema.allocator, .{
-                                    .tag = .missing_field,
-                                    .ast = ast,
-                                    .token = ast.node_tokens[node_idx],
-                                    .extra = .{ .missing_field = .{
-                                        .type = target_type,
-                                        .name = defined_field.name,
-                                    } },
-                                });
-                                return error.AnalyzeFailed;
-                            }
-                        }
-                    }
-                },
-            }
+            //                         bit_offset += field.type.bitSize();
+            //                     }
+            //                 } else {
+            //                     // Field value not specified
+            //                     try sema.errors.append(sema.allocator, .{
+            //                         .tag = .missing_field,
+            //                         .ast = ast,
+            //                         .token = ast.node_tokens[node_idx],
+            //                         .extra = .{ .missing_field = .{
+            //                             .type = target_type,
+            //                             .name = defined_field.name,
+            //                         } },
+            //                     });
+            //                     return error.AnalyzeFailed;
+            //                 }
+            //             }
+            //         }
+            //     },
+            // }
 
-            return .{ .fields = try fields.toOwnedSlice(sema.allocator) };
+            // return .{ .fields = try fields.toOwnedSlice(sema.allocator) };
         },
         else => unreachable,
     }
@@ -1119,6 +1112,7 @@ pub const Error = struct {
         expected_type_symbol,
         // Extra: expected_register_size
         expected_register_size,
+        expected_mod_register_size,
         // Extra: expected_enum_field_or_decl
         expected_enum_field_or_decl,
         // Extra: unsupported_register
@@ -1321,7 +1315,11 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             @tagName(err.extra.actual_symbol),
         }),
 
-        .expected_register_size => rich.print(writer, tty_config, "Expected register size to evenly divide [" ++ highlight ++ "]{d}-bit value[reset], found [" ++ highlight ++ "]{d}-bit register", .{
+        .expected_register_size => rich.print(writer, tty_config, "Expected register size to be [" ++ highlight ++ "]{d}-bits[reset], found [" ++ highlight ++ "]{d}-bit register", .{
+            err.extra.expected_register_size.expected,
+            err.extra.expected_register_size.actual,
+        }),
+        .expected_mod_register_size => rich.print(writer, tty_config, "Expected register size to evenly divide [" ++ highlight ++ "]{d}-bit value[reset], found [" ++ highlight ++ "]{d}-bit register", .{
             err.extra.expected_register_size.expected,
             err.extra.expected_register_size.actual,
         }),
