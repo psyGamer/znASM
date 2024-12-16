@@ -45,6 +45,8 @@ pub const BranchRelocation = struct {
         not_equal,
         plus,
         minus,
+        jump,
+        jump_long,
     };
 
     type: Type,
@@ -485,6 +487,8 @@ const FunctionBuilder = struct {
             .not_equal = comptime Instruction.bne.size(.none),
             .plus = comptime Instruction.bpl.size(.none),
             .minus = comptime Instruction.bmi.size(.none),
+            .jump = comptime Instruction.jmp.size(.none),
+            .jump_long = comptime Instruction.jml.size(.none),
         });
         const long_sizes: std.EnumArray(BranchRelocation.Type, u8) = .init(.{
             .always = comptime Instruction.jmp.size(.none),
@@ -496,6 +500,8 @@ const FunctionBuilder = struct {
             .not_equal = comptime Instruction.beq.size(.none) + Instruction.jmp.size(.none),
             .plus = comptime Instruction.bmi.size(.none) + Instruction.jmp.size(.none),
             .minus = comptime Instruction.bpl.size(.none) + Instruction.jmp.size(.none),
+            .jump = comptime Instruction.jmp.size(.none),
+            .jump_long = comptime Instruction.jml.size(.none),
         });
 
         // Interativly lower to short-form
@@ -607,11 +613,27 @@ const FunctionBuilder = struct {
                     .not_equal => .{ .bne = @intCast(relative_offset) },
                     .plus => .{ .bpl = @intCast(relative_offset) },
                     .minus => .{ .bmi = @intCast(relative_offset) },
+                    .jump => .{ .jmp = undefined },
+                    .jump_long => .{ .jml = undefined },
                 };
+
+                if (reloc.type == .jump) {
+                    info.reloc = .{
+                        .type = .addr16,
+                        .target_sym = b.symbol_location,
+                        .target_offset = target_offset,
+                    };
+                } else if (reloc.type == .jump_long) {
+                    info.reloc = .{
+                        .type = .addr24,
+                        .target_sym = b.symbol_location,
+                        .target_offset = target_offset,
+                    };
+                }
             } else {
                 const jmp_size = comptime Opcode.jmp.size(.none);
                 info.instr = switch (reloc.type) {
-                    .always => .{ .jmp = undefined },
+                    .always, .jump => .{ .jmp = undefined },
                     .carry_set => .{ .bcc = jmp_size },
                     .carry_clear => .{ .bcs = jmp_size },
                     .overflow_set => .{ .bvc = jmp_size },
@@ -620,6 +642,7 @@ const FunctionBuilder = struct {
                     .not_equal => .{ .beq = jmp_size },
                     .plus => .{ .bmi = jmp_size },
                     .minus => .{ .bpl = jmp_size },
+                    .jump_long => .{ .jml = undefined },
                 };
 
                 const jmp_reloc: Relocation = .{
@@ -628,8 +651,14 @@ const FunctionBuilder = struct {
                     .target_offset = target_offset,
                 };
 
-                if (reloc.type == .always) {
+                if (reloc.type == .always or reloc.type == .jump) {
                     info.reloc = jmp_reloc;
+                } else if (reloc.type == .jump_long) {
+                    info.reloc = .{
+                        .type = .addr24,
+                        .target_sym = b.symbol_location,
+                        .target_offset = target_offset,
+                    };
                 } else {
                     try b.instructions.insert(b.sema.allocator, source_idx + 1, .{
                         .instr = .{ .jmp = undefined },

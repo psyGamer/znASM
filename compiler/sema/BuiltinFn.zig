@@ -81,6 +81,16 @@ pub const all = [_]BuiltinFn{
         .handler_fn = branchHandler(.minus),
     },
     .{
+        .name = "@jump",
+        .param_count = 1,
+        .handler_fn = branchHandler(.jump),
+    },
+    .{
+        .name = "@longJump",
+        .param_count = 1,
+        .handler_fn = branchHandler(.jump_long),
+    },
+    .{
         .name = "@pushValue",
         .param_count = 1,
         .handler_fn = pushValueHandler,
