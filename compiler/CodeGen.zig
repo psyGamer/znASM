@@ -127,6 +127,7 @@ const FunctionBuilder = struct {
                 // .load => try b.handleLoad(ir),
                 .load => @panic("BAD"),
                 .store_variable => try b.handleStoreVariable(ir),
+                .zero_variable => try b.handleZeroVariable(ir),
                 .call => try b.handleCall(ir),
                 .branch => try b.handleBranch(ir),
                 .label => try b.handleLabel(ir),
@@ -398,6 +399,26 @@ const FunctionBuilder = struct {
         try b.instructions.append(b.sema.allocator, .{
             .instr = instr,
             .reloc = reloc,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+    }
+    fn handleZeroVariable(b: *FunctionBuilder, ir: Ir) !void {
+        const store = ir.tag.zero_variable;
+
+        // STZ does not support long addresses
+        std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.lookupSymbol(store.symbol).?.*, b.function.bank));
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = .{ .stz_addr16 = undefined },
+            .reloc = .{
+                .type = .addr16,
+                .target_sym = store.symbol,
+                .target_offset = store.offset,
+            },
 
             .mem_size = b.mem_size,
             .idx_size = b.idx_size,

@@ -14,9 +14,12 @@ const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionValue, ?RegisterType) 
 
 name: []const u8,
 type: TypeSymbol,
+
+/// List of allowed intermediate registers
+allowed_registers: []const ?RegisterType,
+
 // read: ?HandleReadFn,
 write: *const HandleWriteFn,
-require_exact: bool,
 
 /// Retrieves the built-in variable with the specified name
 pub fn get(name: []const u8) ?BuiltinVar {
@@ -33,22 +36,31 @@ pub const all = [_]BuiltinVar{
     .{
         .name = "@stack_pointer",
         .type = .{ .raw = .{ .unsigned_int = 16 } },
+        .allowed_registers = &.{ .a16, .x8, .x16 },
         .write = handleStackPointerWrite,
-        .require_exact = true,
     },
 };
 
-fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: ExpressionValue, register: ?RegisterType) Sema.AnalyzeError!void {
+fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: ExpressionValue, opt_register_type: ?RegisterType) Sema.AnalyzeError!void {
+    const register_type = opt_register_type orelse {
+        try ana.sema.errors.append(ana.sema.allocator, .{
+            .tag = .expected_intermediate_register,
+            .ast = ana.ast,
+            .token = ana.ast.node_tokens[node_idx],
+        });
+        return error.AnalyzeFailed;
+    };
+
     switch (expr) {
         .value, .variable => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
             ana.ir.appendAssumeCapacity(.{
                 .tag = .{ .change_size = .{
-                    .target = switch (register.?) {
+                    .target = switch (register_type) {
                         .a8, .a16 => .mem,
                         .x8, .x16, .y8, .y16 => .idx,
                     },
-                    .mode = switch (register.?) {
+                    .mode = switch (register_type) {
                         .a8, .x8, .y8 => .@"8bit",
                         .a16, .x16, .y16 => .@"16bit",
                     },
@@ -60,7 +72,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 .value => |value| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_value = .{
-                            .register = register.?,
+                            .register = register_type,
                             .value = .{ .imm16 = @intCast(value) },
                         } },
                         .node = node_idx,
@@ -69,7 +81,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 .variable => |sym_loc| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_variable = .{
-                            .register = register.?,
+                            .register = register_type,
                             .symbol = sym_loc,
                         } },
                         .node = node_idx,
@@ -78,7 +90,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 else => unreachable,
             }
 
-            switch (register.?) {
+            switch (register_type) {
                 .a16 => {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .instruction = .{ .instr = .tcs, .reloc = null } },
@@ -97,7 +109,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                         .ast = ana.ast,
                         .token = ana.ast.node_tokens[node_idx],
                         .extra = .{ .unsupported_register = .{
-                            .register = register.?,
+                            .register = register_type,
                             .message = "@stack_pointer",
                         } },
                     });
@@ -127,7 +139,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                         .ast = ana.ast,
                         .token = ana.ast.node_tokens[node_idx],
                         .extra = .{ .unsupported_register = .{
-                            .register = register.?,
+                            .register = register_type,
                             .message = "@stack_pointer",
                         } },
                     });

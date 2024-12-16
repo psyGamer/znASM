@@ -42,6 +42,14 @@ pub const Ir = struct {
             symbol: SymbolLocation,
             offset: u16 = 0,
         },
+        /// Stores zero into the variable
+        zero_variable: struct {
+            symbol: SymbolLocation,
+            offset: u16 = 0,
+        },
+
+        // shift_left: u16,
+        // shift_right: u16,
 
         call: struct {
             target: SymbolLocation,
