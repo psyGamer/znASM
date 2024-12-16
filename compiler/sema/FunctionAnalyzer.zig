@@ -159,7 +159,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                         .tag = .expected_type,
                                         .ast = ana.ast,
                                         .token = operand_token,
-                                        .extra = .{ .expected_type = .{
+                                        .extra = .{ .expected_actual_type = .{
                                             .expected = .{ .raw = .{ .unsigned_int = 8 } },
                                             .actual = const_sym.type,
                                         } },
@@ -175,7 +175,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                         .tag = .expected_type,
                                         .ast = ana.ast,
                                         .token = operand_token,
-                                        .extra = .{ .expected_type = .{
+                                        .extra = .{ .expected_actual_type = .{
                                             .expected = .{ .raw = .{ .unsigned_int = 16 } },
                                             .actual = const_sym.type,
                                         } },
@@ -231,7 +231,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                         .tag = .expected_type,
                                         .ast = ana.ast,
                                         .token = operand_token,
-                                        .extra = .{ .expected_type = .{
+                                        .extra = .{ .expected_actual_type = .{
                                             .expected = .{ .raw = .{ .unsigned_int = 8 } },
                                             .actual = var_sym.type,
                                         } },
@@ -244,7 +244,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                         .tag = .expected_type,
                                         .ast = ana.ast,
                                         .token = operand_token,
-                                        .extra = .{ .expected_type = .{
+                                        .extra = .{ .expected_actual_type = .{
                                             .expected = .{ .raw = .{ .unsigned_int = 8 } },
                                             .actual = var_sym.type,
                                         } },

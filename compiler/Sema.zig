@@ -504,10 +504,20 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, sym_loc: SymbolLocatio
     const data = ast.extraData(Ast.Node.PackedDefData, packed_def.extra);
 
     packed_sym.backing_type = try sema.resolveType(ast, data.backing_type, sym_loc.module);
-    // TODO: Validate integer type
+    if (packed_sym.backing_type != .raw and packed_sym.backing_type.raw != .signed_int or packed_sym.backing_type.raw != .unsigned_int) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .expected_int_backing_type,
+            .ast = ast,
+            .token = ast.node_tokens[packed_sym.common.node] + 1,
+            .extra = .{ .actual_type = packed_sym.backing_type },
+        });
+        return error.AnalyzeFailed;
+    }
 
     var fields: std.ArrayListUnmanaged(Symbol.Packed.Field) = .empty;
     defer fields.deinit(sema.allocator);
+
+    var total_bit_size: u8 = 0;
 
     const member_range = ast.node_data[packed_def.block].sub_range;
     for (member_range.extra_start..member_range.extra_end) |extra_idx| {
@@ -519,19 +529,34 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, sym_loc: SymbolLocatio
                 const field_extra = ast.extraData(Node.StructFieldData, field_data.extra);
                 const ident_name = ast.node_tokens[member_idx];
 
-                try fields.append(sema.allocator, .{
+                const field: Symbol.Packed.Field = .{
                     .name = ast.parseIdentifier(ident_name),
                     .type = try sema.resolveType(ast, field_extra.type, sym_loc.module),
                     .default_value = if (field_extra.value != Ast.null_node)
                         try sema.resolveExprValue(ast, field_extra.value, packed_sym.backing_type, sym_loc.module)
                     else
                         null,
-                });
+                };
+                try fields.append(sema.allocator, field);
+
+                total_bit_size += field.type.bitSize();
             },
             else => unreachable,
         }
     }
 
+    if (total_bit_size > packed_sym.backing_type.bitSize()) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .packed_struct_too_big,
+            .ast = ast,
+            .token = ast.node_tokens[packed_sym.common.node] + 1,
+            .extra = .{ .exceeds_backing_type = .{
+                .backing = packed_sym.backing_type,
+                .value = total_bit_size,
+            } },
+        });
+        return error.AnalyzeFailed;
+    }
     packed_sym.fields = try fields.toOwnedSlice(sema.allocator);
 }
 fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
@@ -540,7 +565,15 @@ fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, mod
     const data = ast.extraData(Ast.Node.EnumDefData, enum_def.extra);
 
     enum_sym.backing_type = try sema.resolveType(ast, data.backing_type, sym_loc.module);
-    // TODO: Validate integer type
+    if (enum_sym.backing_type != .raw and enum_sym.backing_type.raw != .signed_int or enum_sym.backing_type.raw != .unsigned_int) {
+        try sema.errors.append(sema.allocator, .{
+            .tag = .expected_int_backing_type,
+            .ast = ast,
+            .token = ast.node_tokens[enum_sym.common.node] + 1,
+            .extra = .{ .actual_type = enum_sym.backing_type },
+        });
+        return error.AnalyzeFailed;
+    }
 
     var fields: std.ArrayListUnmanaged(Symbol.Enum.Field) = .empty;
     defer fields.deinit(sema.allocator);
@@ -693,7 +726,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     .tag = .expected_type,
                     .ast = ast,
                     .token = source_symbol_ident,
-                    .extra = .{ .expected_type = .{ .expected = target_type, .actual = source_type } },
+                    .extra = .{ .expected_actual_type = .{ .expected = target_type, .actual = source_type } },
                 });
                 return error.AnalyzeFailed;
             }
@@ -714,7 +747,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     .tag = .expected_type,
                     .ast = ast,
                     .token = value_lit,
-                    .extra = .{ .expected_type = .{
+                    .extra = .{ .expected_actual_type = .{
                         .expected = target_type,
                         .actual = .{ .raw = .{ .comptime_int = value } },
                     } },
@@ -809,7 +842,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                         .tag = .expected_type_got_init,
                         .ast = ast,
                         .token = ast.node_tokens[node_idx],
-                        .extra = .{ .expected_type_got_init = target_type },
+                        .extra = .{ .expected_type = target_type },
                     });
                     return error.AnalyzeFailed;
                 },
@@ -1096,7 +1129,7 @@ fn formatType(data: FormatTypeData, comptime _: []const u8, _: std.fmt.FormatOpt
 
 pub const Error = struct {
     pub const Tag = enum {
-        // Extra: node
+        // Extra: none
         duplicate_symbol,
         duplicate_label,
         existing_symbol,
@@ -1129,10 +1162,12 @@ pub const Error = struct {
         expected_arguments,
         // Extra: expected_token
         expected_token,
-        // Extra: expected_type
+        // Extra: expected_actual_type
         expected_type,
-        // Extra: expected_type_got_init
+        // Extra: expected_type
         expected_type_got_init,
+        // Extra: actual_type
+        expected_int_backing_type,
         // Extra: actual_symbol
         expected_var_symbol,
         expected_const_var_reg_symbol,
@@ -1152,6 +1187,8 @@ pub const Error = struct {
         // Extra: field
         duplicate_field,
         missing_field,
+        // Extra: exceeds_backing_type
+        packed_struct_too_big,
     };
 
     tag: Tag,
@@ -1180,11 +1217,12 @@ pub const Error = struct {
             actual: u8,
         },
         expected_token: Token.Tag,
-        expected_type: struct {
+        expected_actual_type: struct {
             expected: TypeSymbol,
             actual: TypeSymbol,
         },
-        expected_type_got_init: TypeSymbol,
+        expected_type: TypeSymbol,
+        actual_type: TypeSymbol,
         actual_symbol: std.meta.Tag(Symbol),
         expected_register_size: struct {
             expected: u16,
@@ -1204,6 +1242,10 @@ pub const Error = struct {
         field: struct {
             type: TypeSymbol,
             name: []const u8,
+        },
+        exceeds_backing_type: struct {
+            backing: TypeSymbol,
+            value: u16,
         },
     } = .{ .none = {} },
 };
@@ -1330,12 +1372,16 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         }),
 
         .expected_type => rich.print(writer, tty_config, "Expected value of type [" ++ highlight ++ "]{}[reset], found [" ++ highlight ++ "]{}", .{
-            sema.fmtType(&err.extra.expected_type.expected),
-            sema.fmtType(&err.extra.expected_type.actual),
+            sema.fmtType(&err.extra.expected_actual_type.expected),
+            sema.fmtType(&err.extra.expected_actual_type.actual),
         }),
 
         .expected_type_got_init => rich.print(writer, tty_config, "Expected value of type [" ++ highlight ++ "]{}[reset], found [" ++ highlight ++ "]object-initializer", .{
-            sema.fmtType(&err.extra.expected_type_got_init),
+            sema.fmtType(&err.extra.expected_type),
+        }),
+
+        .expected_int_backing_type => rich.print(writer, tty_config, "Expected backing-type to be [" ++ highlight ++ "]an integer[reset], found [" ++ highlight ++ "]{}", .{
+            sema.fmtType(&err.extra.actual_type),
         }),
 
         .expected_var_symbol => rich.print(writer, tty_config, "Expected symbol to a [" ++ highlight ++ "]variable[reset], found [" ++ highlight ++ "]{s}", .{
@@ -1401,6 +1447,12 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .missing_field => rich.print(writer, tty_config, "Missing field [" ++ highlight ++ "]'{s}'[reset], in object-initializer for type [" ++ highlight ++ "]{s}", .{
             err.extra.field.name,
             sema.fmtType(&err.extra.field.type),
+        }),
+
+        .packed_struct_too_big => rich.print(writer, tty_config, "Backing-type [" ++ highlight ++ "]{}[reset], has a maximum bit-size of [" ++ highlight ++ "]{d}[reset], but the packed struct fields have a total bit-size of [" ++ highlight ++ "]{d}[reset]", .{
+            sema.fmtType(&err.extra.exceeds_backing_type.backing),
+            err.extra.exceeds_backing_type.backing.bitSize(),
+            err.extra.exceeds_backing_type.value,
         }),
     };
 }
