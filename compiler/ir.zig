@@ -31,11 +31,6 @@ pub const Ir = struct {
             offset: u16 = 0,
         },
 
-        load: struct {
-            target: RegisterType,
-            value: ExpressionValue,
-            source_offset: u16 = 0,
-        },
         /// Stores the value of the register into the variable
         store_variable: struct {
             register: RegisterType,
@@ -48,8 +43,18 @@ pub const Ir = struct {
             offset: u16 = 0,
         },
 
-        // shift_left: u16,
-        // shift_right: u16,
+        /// ORs the accumulator with the value
+        or_value: Instruction.Imm816,
+        /// ORs the accumulator with the variable
+        or_variable: struct {
+            symbol: SymbolLocation,
+            offset: u16 = 0,
+        },
+
+        /// Bit-Shift the value in the accumulator to the left
+        shift_accum_left: u16,
+        /// Bit-Shift the value in the accumulator to the right
+        shift_accum_right: u16,
 
         call: struct {
             target: SymbolLocation,

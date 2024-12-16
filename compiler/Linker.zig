@@ -498,7 +498,11 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
                     }
 
-                    try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size() - 1, debug_sym_name });
+                    if (var_sym.type.size() == 1) {
+                        try writer.print("SnesWorkRam:{x}:{s}", .{ var_sym.wram_offset, debug_sym_name });
+                    } else {
+                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size() - 1, debug_sym_name });
+                    }
                     for (comments.items, 0..) |comment, i| {
                         if (i == 0) {
                             try writer.writeByte(':');

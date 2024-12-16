@@ -31,7 +31,9 @@ pub const RegisterType = enum { a8, a16, x8, x16, y8, y16 };
 pub const ExpressionValue = union(enum) {
     pub const PackedField = struct {
         value: ExpressionValue,
-        bit_offset: u16,
+        bit_offset: u8,
+        bit_size: u8,
+        node_idx: NodeIndex,
     };
 
     value: TypeSymbol.ComptimeIntValue,
@@ -42,7 +44,12 @@ pub const ExpressionValue = union(enum) {
     pub fn deinit(expr: ExpressionValue, allocator: std.mem.Allocator) void {
         switch (expr) {
             .value, .variable, .register => {},
-            .packed_fields => |fields| allocator.free(fields),
+            .packed_fields => |fields| {
+                for (fields) |field| {
+                    field.value.deinit(allocator);
+                }
+                allocator.free(fields);
+            },
         }
     }
 
@@ -566,15 +573,15 @@ const max_int_bitwidth = 64;
 pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
     switch (ast.node_tags[node_idx]) {
         .type_ident => {
-            const token_idx = ast.node_tokens[node_idx];
-            const ident_name = ast.tokenSource(token_idx);
+            const ident_name = ast.node_tokens[node_idx];
+            const type_name = ast.tokenSource(ident_name);
 
-            if (primitives.get(ident_name)) |primitive| {
+            if (primitives.get(type_name)) |primitive| {
                 return primitive;
             }
-            if (ident_name[0] == 'i' or ident_name[0] == 'u') {
+            if (type_name[0] == 'i' or type_name[0] == 'u') {
                 var is_int = true;
-                for (ident_name[1..]) |c| switch (c) {
+                for (type_name[1..]) |c| switch (c) {
                     '0'...'9' => {},
                     else => {
                         is_int = false;
@@ -583,11 +590,11 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                 };
 
                 if (is_int) {
-                    const bits = std.fmt.parseInt(u16, ident_name[1..], 10) catch {
+                    const bits = std.fmt.parseInt(u8, type_name[1..], 10) catch {
                         try sema.errors.append(sema.allocator, .{
                             .tag = .int_bitwidth_too_large,
                             .ast = ast,
-                            .token = token_idx,
+                            .token = ident_name,
                         });
                         return error.AnalyzeFailed;
                     };
@@ -595,12 +602,12 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                         try sema.errors.append(sema.allocator, .{
                             .tag = .int_bitwidth_too_large,
                             .ast = ast,
-                            .token = token_idx,
+                            .token = ident_name,
                         });
                         return error.AnalyzeFailed;
                     }
 
-                    if (ident_name[0] == 'i') {
+                    if (type_name[0] == 'i') {
                         return .{ .raw = .{ .signed_int = bits } };
                     } else {
                         return .{ .raw = .{ .unsigned_int = bits } };
@@ -608,14 +615,14 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                 }
             }
 
-            const sym, const sym_loc = try sema.resolveSymbol(ast, token_idx, current_module);
+            const sym, const sym_loc = try sema.resolveSymbol(ast, ident_name, current_module);
             const sym_idx = sema.findSymbolIndex(sym_loc);
             switch (sym.*) {
                 .function, .constant, .variable, .register => {
                     try sema.errors.append(sema.allocator, .{
                         .tag = .expected_type_symbol,
                         .ast = ast,
-                        .token = token_idx,
+                        .token = ident_name,
                     });
                     return error.AnalyzeFailed;
                 },
@@ -849,7 +856,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                         .@"packed" => |packed_type_sym| {
                             const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
 
-                            var bit_offset: u16 = 0;
+                            var bit_offset: u8 = 0;
                             for (packed_sym.fields) |field| {
                                 if (std.mem.eql(u8, field.name, field_name)) {
                                     break :get_offset bit_offset;
@@ -880,6 +887,8 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                 fields.putAssumeCapacityNoClobber(field_name, .{
                     .value = field_value,
                     .bit_offset = field_offset,
+                    .bit_size = field_type.bitSize(),
+                    .node_idx = field_idx,
                 });
             }
 
@@ -896,12 +905,14 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
 
                         if (defined_field.default_value) |default| {
                             // Apply default value
-                            var bit_offset: u16 = 0;
+                            var bit_offset: u8 = 0;
                             for (packed_sym.fields, 0..) |field, field_idx| {
                                 if (def_idx == field_idx) {
                                     fields.putAssumeCapacityNoClobber(field.name, .{
                                         .value = default,
                                         .bit_offset = bit_offset,
+                                        .bit_size = field.type.bitSize(),
+                                        .node_idx = node_idx,
                                     });
                                     break;
                                 }
@@ -1109,6 +1120,8 @@ pub const Error = struct {
         invalid_vector_bank,
         // Extra: size_type
         undefined_size_mode,
+        // Extra: register_type
+        fields_cross_register_boundry,
         // Extra: int_size
         value_too_large,
         invalid_number,
@@ -1157,6 +1170,7 @@ pub const Error = struct {
             actual: u8,
         },
         size_type: Instruction.SizeType,
+        bit_size: u8,
         int_size: struct {
             is_signed: bool,
             bits: u16,
@@ -1282,6 +1296,8 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             .mem => "A-Register / Memory access",
             .idx => "X/Y-Registers",
         }}),
+
+        .fields_cross_register_boundry => rich.print(writer, tty_config, "Packed fields cross [" ++ highlight ++ "]{d}-bit register boudry[reset]", .{err.extra.bit_size}),
 
         .value_too_large => rich.print(
             writer,

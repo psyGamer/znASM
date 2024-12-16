@@ -202,19 +202,19 @@ pub const TypeSymbol = union(enum) {
 
     const Payload = union(enum) {
         // Payload indicates bit-size
-        signed_int: u16,
-        unsigned_int: u16,
+        signed_int: u8,
+        unsigned_int: u8,
         // Payload indicates value
         comptime_int: ComptimeIntValue,
 
         @"packed": struct {
             is_signed: bool,
-            bits: u16,
+            bits: u8,
             symbol_index: SymbolIndex,
         },
         @"enum": struct {
             is_signed: bool,
-            bits: u16,
+            bits: u8,
             symbol_index: SymbolIndex,
         },
     };
@@ -296,12 +296,12 @@ pub const TypeSymbol = union(enum) {
     }
 
     /// Calculates the size of this type in bits
-    pub fn bitSize(type_sym: TypeSymbol) u16 {
+    pub fn bitSize(type_sym: TypeSymbol) u8 {
         switch (type_sym) {
             .raw => |payload| return payloadBitSize(payload),
         }
     }
-    fn payloadBitSize(payload: Payload) u16 {
+    fn payloadBitSize(payload: Payload) u8 {
         return switch (payload) {
             .signed_int => |bits| bits,
             .unsigned_int => |bits| bits,
