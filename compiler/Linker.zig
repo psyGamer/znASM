@@ -111,7 +111,7 @@ pub fn symbolLocation(link: Linker, symbol_loc: SymbolLocation) u24 {
         .constant => |const_sym| memory_map.bankOffsetToAddr(link.mapping_mode, const_sym.bank, const_sym.bank_offset),
         .variable => |var_sym| memory_map.wramOffsetToAddr(var_sym.wram_offset),
         .register => |reg_sym| reg_sym.address,
-        .@"enum" => unreachable,
+        .@"packed", .@"enum" => unreachable,
     };
 }
 
@@ -172,7 +172,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
                     } },
                 });
             },
-            .register, .@"enum" => {}, // Don't require space in the ROM
+            .register, .@"packed", .@"enum" => {}, // Don't require space in the ROM
         }
     }
 }
@@ -540,11 +540,9 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         try writer.writeAll(comment);
                     }
                     try writer.writeByte('\n');
-                    // TODO: Write symbols
                 },
-                .@"enum" => |enum_sym| {
-                    _ = enum_sym; // autofix
-                    // TODO: Write symbols
+                .@"packed", .@"enum" => {
+                    // Don't have symbols representing them
                 },
             }
         }
@@ -613,7 +611,7 @@ pub fn generateCdlData(link: Linker, rom: []const u8) ![]const u8 {
             .variable, .register => {
                 // Not in ROM
             },
-            .@"enum" => {
+            .@"packed", .@"enum" => {
                 // Doesn't exist at runtime
             },
         }

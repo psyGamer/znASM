@@ -223,8 +223,7 @@ fn instructionHandler(comptime instruction: Instruction) HandlerFn {
 
 fn pushValueHandler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
     const size_node = params[0];
-    const size_expr = try ana.sema.resolveExprValue(ana.ast, size_node, .{ .raw = .{ .unsigned_int = 16 } }, ana.symbol_location.module);
-    const size_value = size_expr.resolve(u16, ana.sema);
+    const size_value = try ana.sema.parseInt(u16, ana.ast, ana.ast.node_tokens[size_node]);
 
     try ana.ir.append(ana.sema.allocator, .{
         .tag = .{ .instruction = .{

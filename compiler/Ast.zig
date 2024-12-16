@@ -22,19 +22,6 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         const_def,
 
-        /// `data` is `enum_def`
-        /// `main_token - 1` is the optional `keyword_pub`
-        /// `main_token + 1` is the `identifier` of the name
-        enum_def,
-
-        /// `data` is `sub_range`
-        /// `main_token` is the `lbrace`
-        enum_block,
-
-        /// `data` is `enum_field`
-        /// `main_token` is the `identifier` of the name
-        enum_field,
-
         /// `data` is `var_def`
         /// `main_token - 1` is the optional `keyword_pub`
         /// `main_token + 1` is the `identifier` of the name
@@ -45,10 +32,36 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         reg_def,
 
+        /// `data` is `packed_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        packed_def,
+
+        /// `data` is `enum_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        enum_def,
+
+        /// `data` is `sub_range`
+        /// `main_token` is the `lbrace`
+        struct_block,
+
+        /// `data` is `enum_field`
+        /// `main_token` is the `identifier` of the name
+        struct_field,
+
+        /// `data` is `sub_range`
+        /// `main_token` is the `lbrace`
+        enum_block,
+
+        /// `data` is `enum_field`
+        /// `main_token` is the `identifier` of the name
+        enum_field,
+
         /// `main_token` is the `int_literal` of bank
         bank_attr,
 
-        /// `main_token` is the `enum_literal` of access type
+        /// `main_token` is the `dot_literal` of access type
         access_attr,
 
         /// `data` is `sub_range`
@@ -76,8 +89,14 @@ pub const Node = struct {
         expr_ident,
         /// `main_token` is the `int_literal` value of the expression
         expr_int_value,
-        /// `main_token` is the `enum_literal` value of the expression
+        /// `main_token` is the `dot_literal` value of the expression
         expr_enum_value,
+        /// `data` is `sub_range`
+        /// `main_token` is the `period` value of the init-expression
+        expr_init,
+        /// `data` is `expr_init_field`
+        /// `main_token` is the `dot_literal` of the target field
+        expr_init_field,
 
         /// `main_token` is the `identifier` of the type
         type_ident,
@@ -115,13 +134,20 @@ pub const Node = struct {
         reg_def: struct {
             extra: ExtraIndex,
         },
+        packed_def: struct {
+            block: NodeIndex,
+            extra: ExtraIndex,
+        },
         enum_def: struct {
             block: NodeIndex,
             extra: ExtraIndex,
         },
-        enum_body: struct {},
         enum_field: struct {
             value: NodeIndex,
+            doc_comments: ExtraIndex,
+        },
+        struct_field: struct {
+            extra: ExtraIndex,
             doc_comments: ExtraIndex,
         },
         assign_statement: struct {
@@ -131,6 +157,9 @@ pub const Node = struct {
         while_statement: struct {
             condition: NodeIndex,
             block: NodeIndex,
+        },
+        expr_init_field: struct {
+            value: NodeIndex,
         },
     };
 
@@ -163,10 +192,19 @@ pub const Node = struct {
         doc_comment_start: NodeIndex,
         doc_comment_end: NodeIndex,
     };
+    pub const PackedDefData = struct {
+        backing_type: NodeIndex,
+        doc_comment_start: NodeIndex,
+        doc_comment_end: NodeIndex,
+    };
     pub const EnumDefData = struct {
         backing_type: NodeIndex,
         doc_comment_start: NodeIndex,
         doc_comment_end: NodeIndex,
+    };
+    pub const StructFieldData = struct {
+        type: NodeIndex,
+        value: NodeIndex,
     };
 };
 
@@ -299,9 +337,9 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
     };
     return try std.fmt.parseInt(T, int_str[(if (number_base == 10) 0 else 1)..], number_base);
 }
-/// Parses the enum value of an `enum_literal`
+/// Parses the enum value of an `dot_literal`
 pub fn parseEnumLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
-    std.debug.assert(tree.token_tags[token_idx] == .enum_literal);
+    std.debug.assert(tree.token_tags[token_idx] == .dot_literal);
     const enum_str = tree.tokenSource(token_idx);
     return std.meta.stringToEnum(T, enum_str[1..]) orelse error.UnknownField;
 }

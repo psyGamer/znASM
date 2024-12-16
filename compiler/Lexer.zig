@@ -24,7 +24,7 @@ pub const Token = struct {
         ident,
         builtin_ident,
         int_literal,
-        enum_literal,
+        dot_literal,
         doc_comment,
 
         keyword_module,
@@ -33,6 +33,8 @@ pub const Token = struct {
         keyword_var,
         keyword_const,
         keyword_reg,
+        keyword_struct,
+        keyword_packed,
         keyword_enum,
         keyword_true,
         keyword_false,
@@ -49,7 +51,7 @@ pub const Token = struct {
                 .ident,
                 .builtin_ident,
                 .int_literal,
-                .enum_literal,
+                .dot_literal,
                 .doc_comment,
                 => null,
 
@@ -72,6 +74,8 @@ pub const Token = struct {
                 .keyword_var => "var",
                 .keyword_const => "const",
                 .keyword_reg => "reg",
+                .keyword_struct => "struct",
+                .keyword_packed => "packed",
                 .keyword_enum => "enum",
                 .keyword_true => "true",
                 .keyword_false => "false",
@@ -88,7 +92,7 @@ pub const Token = struct {
                 .ident => "an identifier",
                 .builtin_ident => "a built-in identifier",
                 .int_literal => "a number literal",
-                .enum_literal => "an enum literal",
+                .dot_literal => "a dot-literal",
                 .doc_comment => "a document comment",
                 else => unreachable,
             };
@@ -116,6 +120,8 @@ pub const Token = struct {
         .{ "var", .keyword_var },
         .{ "const", .keyword_const },
         .{ "reg", .keyword_reg },
+        .{ "struct", .keyword_struct },
+        .{ "packed", .keyword_packed },
         .{ "enum", .keyword_enum },
         .{ "true", .keyword_true },
         .{ "false", .keyword_false },
@@ -144,7 +150,7 @@ pub fn next(lexer: *Lexer) Token {
         dec_int,
         hex_int,
         bin_int,
-        enum_lit,
+        dot_lit,
     };
 
     var state: State = .start;
@@ -283,8 +289,8 @@ pub fn next(lexer: *Lexer) Token {
 
             .period => switch (c) {
                 'a'...'z', 'A'...'Z' => {
-                    token.tag = .enum_literal;
-                    state = .enum_lit;
+                    token.tag = .dot_literal;
+                    state = .dot_lit;
                 },
                 else => {
                     token.tag = .period;
@@ -340,7 +346,7 @@ pub fn next(lexer: *Lexer) Token {
                 else => break,
             },
 
-            .enum_lit => switch (c) {
+            .dot_lit => switch (c) {
                 'a'...'z', 'A'...'Z', '0'...'9', '_' => {},
                 else => break,
             },

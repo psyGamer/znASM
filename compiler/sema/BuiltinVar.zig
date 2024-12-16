@@ -127,14 +127,6 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 },
             }
         },
+        .fields => unreachable,
     }
-
-    // ana.ir.appendAssumeCapacity(.{
-    //     .tag = .{ .instruction = .{
-    //         .instr = switch (register.?) {
-    //             .a8, .a16 =>
-    //         },
-    //     } },
-    //     .node = node_idx,
-    // });
 }

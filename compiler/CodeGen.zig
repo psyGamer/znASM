@@ -184,15 +184,15 @@ const FunctionBuilder = struct {
 
         const instr: Instruction, const reloc: ?Relocation = switch (load.target) {
             .a8, .a16 => switch (load.value) {
-                .immediate => |value| .{ .{ .lda_imm = if (load.target == .a8)
-                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                .immediate, .fields => .{ .{ .lda_imm = if (load.target == .a8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                 else
-                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
 
                 .symbol => |sym_loc| b: {
                     const sym = b.sema.lookupSymbol(sym_loc).?.*;
                     break :b switch (sym) {
-                        .function, .@"enum" => unreachable,
+                        .function, .@"packed", .@"enum" => unreachable,
                         .constant => .{ .{ .lda_imm = if (load.target == .a8)
                             .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                         else
@@ -220,15 +220,15 @@ const FunctionBuilder = struct {
                 },
             },
             .x8, .x16 => switch (load.value) {
-                .immediate => |value| .{ .{ .ldx_imm = if (load.target == .x8)
-                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                .immediate, .fields => .{ .{ .ldx_imm = if (load.target == .x8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                 else
-                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
 
                 .symbol => |sym_loc| b: {
                     const sym = b.sema.lookupSymbol(sym_loc).?.*;
                     break :b switch (sym) {
-                        .function, .@"enum" => unreachable,
+                        .function, .@"packed", .@"enum" => unreachable,
                         .constant => .{ .{ .ldx_imm = if (load.target == .x8)
                             .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                         else
@@ -252,15 +252,15 @@ const FunctionBuilder = struct {
                 },
             },
             .y8, .y16 => switch (load.value) {
-                .immediate => |value| .{ .{ .ldy_imm = if (load.target == .y8)
-                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) }
+                .immediate, .fields => .{ .{ .ldy_imm = if (load.target == .y8)
+                    .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                 else
-                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> @intCast(load.source_offset * 8)) } }, null },
+                    .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) } }, null },
 
                 .symbol => |sym_loc| b: {
                     const sym = b.sema.lookupSymbol(sym_loc).?.*;
                     break :b switch (sym) {
-                        .function, .@"enum" => unreachable,
+                        .function, .@"packed", .@"enum" => unreachable,
                         .constant => .{ .{ .ldy_imm = if (load.target == .y8)
                             .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(load.value.resolve(TypeSymbol.ComptimeIntValue, b.sema))) >> @intCast(load.source_offset * 8)) }
                         else

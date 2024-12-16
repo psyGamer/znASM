@@ -114,6 +114,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
+        // Packed Definition
+        const packed_def = try p.parsePackedDef(doc_comments);
+        if (packed_def != null_node) {
+            try p.scratch.append(p.allocator, packed_def);
+            continue;
+        }
+
         // Enum Definition
         const enum_def = try p.parseEnumDef(doc_comments);
         if (enum_def != null_node) {
@@ -248,6 +255,30 @@ fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
+/// PackedDef <- (KEYWORD_pub)? KEYWORD_packed IDENTIFIER LPAREN TypeExpr RPAREN StructBlock
+fn parsePackedDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    _ = p.eatToken(.keyword_pub);
+    const keyword_packed = p.eatToken(.keyword_packed) orelse return null_node;
+    _ = try p.expectToken(.ident);
+    _ = try p.expectToken(.lparen);
+    const type_expr = try p.parseTypeExpr();
+    _ = try p.expectToken(.rparen);
+    const struct_block = try p.parseStructBlock();
+
+    return try p.addNode(.{
+        .tag = .packed_def,
+        .main_token = keyword_packed,
+        .data = .{ .packed_def = .{
+            .block = struct_block,
+            .extra = try p.writeExtraData(Ast.Node.PackedDefData, .{
+                .backing_type = type_expr,
+                .doc_comment_start = doc_comments.extra_start,
+                .doc_comment_end = doc_comments.extra_end,
+            }),
+        } },
+    });
+}
+
 /// EmumDef <- (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
 fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
@@ -268,6 +299,95 @@ fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
                 .doc_comment_start = doc_comments.extra_start,
                 .doc_comment_end = doc_comments.extra_end,
             }),
+        } },
+    });
+}
+
+/// StructBlock <- LBRACE NEW_LINE (StructField)* RBRACE
+fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    const lbrace = try p.expectToken(.lbrace);
+    _ = try p.expectToken(.new_line);
+
+    var doc_start: ?usize = null;
+    while (true) {
+        const t = p.token_tags[p.index];
+        if (t == .new_line) {
+            p.index += 1;
+            continue;
+        }
+        if (t == .rbrace) {
+            break;
+        }
+        if (t == .doc_comment) {
+            doc_start = doc_start orelse p.scratch.items.len;
+            try p.scratch.append(p.allocator, try p.addNode(.{
+                .tag = .doc_comment,
+                .main_token = p.index,
+                .data = undefined,
+            }));
+            p.index += 1;
+            continue;
+        }
+
+        const doc_comments: Node.SubRange = get_comments: {
+            if (doc_start) |start| {
+                const comments = try p.writeExtraSubRange(p.scratch.items[start..]);
+                p.scratch.shrinkRetainingCapacity(start);
+                doc_start = null;
+                break :get_comments comments;
+            } else {
+                break :get_comments .{ .extra_start = null_node, .extra_end = null_node };
+            }
+        };
+
+        const start_idx = p.index;
+
+        // Struct Field
+        const field = try p.parseStructField(doc_comments);
+        if (field != null_node) {
+            try p.scratch.append(p.allocator, field);
+            continue;
+        }
+        p.index = start_idx;
+
+        return p.fail(.expected_enum_member);
+    }
+    _ = try p.expectToken(.rbrace);
+    _ = try p.expectToken(.new_line);
+
+    return p.addNode(.{
+        .tag = .struct_block,
+        .main_token = lbrace,
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[scratch_top..]) },
+    });
+}
+
+/// StructField <- IDENTIFIER COLON TypeExpr (EQUAL Expr)? COMMA NEW_LINE
+fn parseStructField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
+    const ident_name = p.eatToken(.ident) orelse return null_node;
+    _ = try p.expectToken(.colon);
+    const type_expr = try p.parseTypeExpr();
+
+    const value_expr = if (p.eatToken(.equal)) |_|
+        try p.parseExpr()
+    else
+        Ast.null_node;
+
+    _ = try p.expectToken(.comma);
+    _ = try p.expectToken(.new_line);
+
+    return try p.addNode(.{
+        .tag = .struct_field,
+        .main_token = ident_name,
+        .data = .{ .struct_field = .{
+            .extra = try p.writeExtraData(Node.StructFieldData, .{
+                .type = type_expr,
+                .value = value_expr,
+            }),
+            .doc_comments = try p.writeExtraData(Node.SubRange, doc_comments),
         } },
     });
 }
@@ -368,14 +488,14 @@ fn parseBankAttr(p: *Parser) ParseError!NodeIndex {
         .data = undefined,
     });
 }
-/// AccessAttr <- IDENTIFIER LPAREN (ENUM_LITERAL) RPAREN
+/// AccessAttr <- IDENTIFIER LPAREN (DOT_LITERAL) RPAREN
 fn parseAccessAttr(p: *Parser) ParseError!NodeIndex {
     const ident_bank = p.eatToken(.ident) orelse return null_node;
     if (!std.mem.eql(u8, "access", p.source[p.token_locs[ident_bank].start..p.token_locs[ident_bank].end]))
         return null_node;
 
     _ = try p.expectToken(.lparen);
-    const int_literal = try p.expectToken(.enum_literal);
+    const int_literal = try p.expectToken(.dot_literal);
     _ = try p.expectToken(.rparen);
 
     return p.addNode(.{
@@ -574,7 +694,7 @@ fn parseWhileStatement(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Expr <- (IDENTIFIER | INT_LITERAL | ENUM_LITERAL)
+/// Expr <- (IDENTIFIER | INT_LITERAL | DOT_LITERAL | InitExpr)
 fn parseExpr(p: *Parser) ParseError!NodeIndex {
     if (p.eatToken(.ident)) |ident| {
         return try p.addNode(.{
@@ -590,7 +710,7 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
             .data = undefined,
         });
     }
-    if (p.eatToken(.enum_literal)) |literal| {
+    if (p.eatToken(.dot_literal)) |literal| {
         return try p.addNode(.{
             .tag = .expr_enum_value,
             .main_token = literal,
@@ -598,7 +718,52 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
         });
     }
 
+    const init_expr = try p.parseInitExpr();
+    if (init_expr != null_node) {
+        return init_expr;
+    }
+
     return null_node;
+}
+/// InitExpr  <- PERIOD LBRACE NEW_LINE (InitField)* RBRACE
+/// InitField <- DOT_LITERAL EQUAL Expr COMMA NEW_LINE
+fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
+    const period = p.eatToken(.period) orelse return null_node;
+    _ = try p.expectToken(.lbrace);
+    _ = try p.expectToken(.new_line);
+
+    const fields_start = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(fields_start);
+
+    while (true) {
+        if (p.eatToken(.rbrace)) |_| break;
+
+        const name_literal = try p.expectToken(.dot_literal);
+        _ = try p.expectToken(.equal);
+        const value_expr = try p.parseExpr();
+        if (value_expr == null_node) {
+            return p.fail(.expected_expr);
+        }
+        _ = p.eatToken(.comma) orelse {
+            // Likely just a missing comma
+            try p.warn(.expected_comma_after_arg);
+        };
+        _ = try p.expectToken(.new_line);
+
+        try p.scratch.append(p.allocator, try p.addNode(.{
+            .tag = .expr_init_field,
+            .main_token = name_literal,
+            .data = .{ .expr_init_field = .{
+                .value = value_expr,
+            } },
+        }));
+    }
+
+    return p.addNode(.{
+        .tag = .expr_init,
+        .main_token = period,
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[fields_start..]) },
+    });
 }
 
 /// TypeExpr <- (IDENTIFIER)

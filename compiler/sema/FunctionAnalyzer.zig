@@ -386,6 +386,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     };
 
     const value_expr = try ana.sema.resolveExprValue(ana.ast, data.value, target_type, ana.symbol_location.module);
+    defer value_expr.deinit(ana.sema.allocator);
 
     const register_type = get_register: {
         if (value_expr != .register) {
