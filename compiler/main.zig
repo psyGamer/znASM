@@ -4,7 +4,7 @@ const log = @import("logging.zig");
 const builtin_module = @import("builtin_module.zig");
 const target_os = builtin.os.tag;
 
-const Lexer = @import("Lexer.zig");
+const Tokenizer = @import("Tokenizer.zig");
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
@@ -15,7 +15,7 @@ const SymbolLocation = @import("symbol.zig").SymbolLocation;
 
 // Required to execute tests
 comptime {
-    _ = Lexer;
+    _ = Tokenizer;
 }
 
 pub const std_options: std.Options = .{

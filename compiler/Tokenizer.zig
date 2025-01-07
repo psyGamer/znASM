@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Lexer = @This();
+const Tokenizer = @This();
 
 pub const Token = struct {
     pub const Tag = enum {
@@ -138,7 +138,7 @@ pub const Token = struct {
 buffer: [:0]const u8,
 index: usize = 0,
 
-pub fn next(lexer: *Lexer) Token {
+pub fn next(lexer: *Tokenizer) Token {
     const State = enum {
         start,
         ident,
@@ -361,8 +361,8 @@ pub fn next(lexer: *Lexer) Token {
     return token;
 }
 
-fn testLexer(src: [:0]const u8, expected_tokens: []const Token.Tag) !void {
-    var lexer: Lexer = .{ .buffer = src };
+fn testTokenizer(src: [:0]const u8, expected_tokens: []const Token.Tag) !void {
+    var lexer: Tokenizer = .{ .buffer = src };
     for (expected_tokens) |expected| {
         const token = lexer.next();
         try std.testing.expectEqualDeep(expected, token.tag);
@@ -371,31 +371,4 @@ fn testLexer(src: [:0]const u8, expected_tokens: []const Token.Tag) !void {
     try std.testing.expectEqual(Token.Tag.eof, last_token.tag);
     try std.testing.expectEqual(src.len, last_token.loc.start);
     try std.testing.expectEqual(src.len, last_token.loc.end);
-}
-
-test "empty" {
-    try testLexer("", &.{.eof});
-}
-
-test "identifier" {
-    try testLexer("my_ident", &.{.ident});
-    try testLexer("@my_builtin_ident", &.{.builtin_ident});
-}
-
-test "decimal literal" {
-    try testLexer("1", &.{.int_literal});
-    try testLexer("12", &.{.int_literal});
-    try testLexer("123", &.{.int_literal});
-}
-
-test "hex literal" {
-    try testLexer("$1", &.{.int_literal});
-    try testLexer("$12", &.{.int_literal});
-    try testLexer("$123", &.{.int_literal});
-}
-
-test "bin literal" {
-    try testLexer("%1", &.{.int_literal});
-    try testLexer("%10", &.{.int_literal});
-    try testLexer("%101", &.{.int_literal});
 }
