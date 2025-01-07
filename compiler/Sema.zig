@@ -1,7 +1,7 @@
 const std = @import("std");
-const symbol = @import("symbol.zig");
 const memory_map = @import("memory_map.zig");
 const rich = @import("util/rich.zig");
+const builtin_module = @import("builtin_module.zig");
 
 const Token = @import("Lexer.zig").Token;
 const Ast = @import("Ast.zig");
@@ -12,17 +12,14 @@ const Instruction = @import("instruction.zig").Instruction;
 const Opcode = @import("instruction.zig").Opcode;
 const Relocation = @import("CodeGen.zig").Relocation;
 const Ir = @import("ir.zig").Ir;
-const Symbol = symbol.Symbol;
-const TypeSymbol = symbol.TypeSymbol;
-const SymbolLocation = symbol.SymbolLocation;
+const Symbol = @import("symbol.zig").Symbol;
+const TypeSymbol = @import("symbol.zig").TypeSymbol;
+const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 const FunctionAnalyzer = @import("sema/FunctionAnalyzer.zig");
 const Sema = @This();
 
-/// Module -> Name -> Symbol
 pub const SymbolIndex = u32;
-pub const SymbolMap = std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(SymbolIndex));
-
 pub const ModuleIndex = u32;
 
 pub const RegisterType = enum { a8, a16, x8, x16, y8, y16 };
@@ -37,7 +34,7 @@ pub const ExpressionValue = union(enum) {
     };
 
     value: TypeSymbol.ComptimeIntValue,
-    variable: SymbolLocation,
+    variable: SymbolIndex,
     packed_fields: []const PackedField,
     register: RegisterType,
 
@@ -63,25 +60,51 @@ pub const ExpressionValue = union(enum) {
 };
 
 const InterruptVectors = struct {
-    native_cop: ?SymbolLocation = null,
-    native_brk: ?SymbolLocation = null,
-    native_abort: ?SymbolLocation = null,
-    native_nmi: ?SymbolLocation = null,
-    native_irq: ?SymbolLocation = null,
-    emulation_cop: ?SymbolLocation = null,
-    emulation_abort: ?SymbolLocation = null,
-    emulation_nmi: ?SymbolLocation = null,
-    emulation_reset: ?SymbolLocation = null,
-    emulation_irqbrk: ?SymbolLocation = null,
+    const Location = struct {
+        pub const none: Location = .{
+            .module = std.math.maxInt(ModuleIndex),
+            .symbol = std.math.maxInt(SymbolIndex),
+        };
+
+        pub inline fn unpack(loc: Location) ?Location {
+            if (loc.module == std.math.maxInt(ModuleIndex) or loc.symbol == std.math.maxInt(SymbolIndex)) {
+                return null;
+            }
+            return loc;
+        }
+        pub inline fn unpackSymbol(loc: Location) ?SymbolIndex {
+            if (loc.symbol == std.math.maxInt(SymbolIndex)) {
+                return null;
+            }
+            return loc.symbol;
+        }
+
+        module: ModuleIndex,
+        symbol: SymbolIndex,
+    };
+
+    native_cop: Location = .none,
+    native_brk: Location = .none,
+    native_abort: Location = .none,
+    native_nmi: Location = .none,
+    native_irq: Location = .none,
+    emulation_cop: Location = .none,
+    emulation_abort: Location = .none,
+    emulation_nmi: Location = .none,
+    emulation_reset: Location = .none,
+    emulation_irqbrk: Location = .none,
 };
 
-modules: []Module,
 mapping_mode: MappingMode,
 
-symbols: std.MultiArrayList(struct { sym: Symbol, loc: SymbolLocation }) = .empty,
-symbol_map: SymbolMap = .empty,
+modules: []Module,
+module_map: std.StringArrayHashMapUnmanaged(ModuleIndex) = .empty,
 
+symbols: std.ArrayListUnmanaged(Symbol) = .empty,
 errors: std.ArrayListUnmanaged(Error) = .empty,
+
+/// Incremetal counter to avoid name collisions with anonymous types
+anon_type_index: u32 = 0,
 
 interrupt_vectors: InterruptVectors = .{},
 allocator: std.mem.Allocator,
@@ -95,14 +118,16 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
         .mapping_mode = mapping_mode,
         .allocator = allocator,
     };
+    errdefer sema.deinit();
 
     // Gather symbols
+    try sema.module_map.ensureUnusedCapacity(sema.allocator, modules.len);
     for (0..modules.len) |module_idx| {
         try sema.gatherSymbols(@intCast(module_idx));
     }
 
     // Only reset is required
-    if (sema.interrupt_vectors.emulation_reset == null) {
+    if (sema.interrupt_vectors.emulation_reset.unpack() == null) {
         try sema.errors.append(allocator, .{
             .tag = .missing_reset_vector,
             .ast = undefined,
@@ -111,47 +136,55 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
     }
 
     if (try sema.detectErrors(stderr.writer(), tty_config)) {
-        sema.deinit(allocator);
+        sema.deinit();
         return null;
     }
 
     // Recursivly analayze symbols, starting from the interrupt vectors
     inline for (std.meta.fields(InterruptVectors)) |field| {
-        if (@field(sema.interrupt_vectors, field.name)) |vector_loc| {
-            const vector_sym = sema.lookupSymbol(vector_loc).?;
-            const vector_mod = sema.findSymbolModuleIndex(vector_loc);
+        if (@field(sema.interrupt_vectors, field.name).unpack()) |vector_loc| {
+            const vector_sym = &sema.symbols.items[vector_loc.symbol];
 
-            sema.analyzeSymbol(vector_sym, vector_loc, Ast.null_token, vector_mod) catch |err| switch (err) {
-                error.AnalyzeFailed => std.log.err("Failed to analyze symbol {}", .{vector_loc}),
+            sema.analyzeSymbol(vector_sym, Ast.null_token, vector_loc.module) catch |err| switch (err) {
+                error.AnalyzeFailed => std.log.err("Failed to analyze symbol {}", .{sema.getSymbolLocation(vector_loc.symbol)}),
                 else => |e| return e,
             };
 
             if (try sema.detectErrors(stderr.writer(), tty_config)) {
-                sema.deinit(allocator);
+                sema.deinit();
                 return null;
             }
         }
     }
 
+    if (try sema.detectErrors(stderr.writer(), tty_config)) {
+        sema.deinit();
+        return null;
+    }
+
+    // Also analyze built-in fallback interrupt vector
+    const builtin_mod_idx = sema.module_map.get(builtin_module.module_name).?;
+    const builtin_mod = &sema.modules[builtin_mod_idx];
+    const fallback_vector_sym = &sema.symbols.items[builtin_mod.symbol_map.get(builtin_module.empty_vector_name).?];
+
+    // The built-in modules is NEVER allowed to error
+    sema.analyzeSymbol(fallback_vector_sym, Ast.null_token, builtin_mod_idx) catch unreachable;
+
     return sema;
 }
 
-pub fn deinit(sema: *Sema, allocator: std.mem.Allocator) void {
-    for (sema.symbols.items(.sym)) |*sym| {
-        sym.deinit(allocator);
+pub fn deinit(sema: *Sema) void {
+    sema.module_map.deinit(sema.allocator);
+    for (sema.symbols.items) |*symbol| {
+        symbol.deinit(sema.allocator);
     }
-    sema.symbols.deinit(allocator);
-    for (sema.symbol_map.values()) |*module_symbols| {
-        module_symbols.deinit(allocator);
-    }
-    sema.symbol_map.deinit(allocator);
-
-    sema.errors.deinit(allocator);
+    sema.symbols.deinit(sema.allocator);
+    sema.errors.deinit(sema.allocator);
 }
 
 pub const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
 
-fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
+fn gatherSymbols(sema: *Sema, module_idx: ModuleIndex) AnalyzeError!void {
     const module = &sema.modules[module_idx];
     const ast = &module.ast;
 
@@ -161,16 +194,20 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
         const token_idx = ast.node_tokens[node_idx];
 
         if (ast.node_tags[node_idx] == .module) {
+            std.debug.assert(module.name.len == 0); // Should've been caught while parsing
+
             module.name = ast.parseIdentifier(token_idx);
+            sema.module_map.putAssumeCapacityNoClobber(module.name, module_idx);
             continue;
         }
 
-        const sym_loc: SymbolLocation = .{
-            .module = module.name.?,
-            .name = ast.parseIdentifier(token_idx + 1),
-        };
+        std.debug.assert(module.name.len != 0); // Should've been caught while parsing
 
-        if (sema.lookupSymbol(sym_loc)) |existing_sym| {
+        const symbol_name = ast.parseIdentifier(token_idx + 1);
+
+        if (module.symbol_map.get(symbol_name)) |existing_sym_idx| {
+            const existing_sym = &sema.symbols.items[existing_sym_idx];
+
             try sema.errors.append(sema.allocator, .{
                 .tag = .duplicate_symbol,
                 .ast = ast,
@@ -187,17 +224,17 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
         }
 
         const result = switch (ast.node_tags[node_idx]) {
-            .fn_def => sema.gatherFunctionSymbol(sym_loc, module_idx, @intCast(node_idx)),
-            .const_def => sema.gatherConstantSymbol(sym_loc, module_idx, @intCast(node_idx)),
-            .var_def => sema.gatherVariableSymbol(sym_loc, module_idx, @intCast(node_idx)),
-            .reg_def => sema.gatherRegisterSymbol(sym_loc, module_idx, @intCast(node_idx)),
-            .packed_def => sema.gatherPackedSymbol(sym_loc, module_idx, @intCast(node_idx)),
-            .enum_def => sema.gatherEnumSymbol(sym_loc, module_idx, @intCast(node_idx)),
+            .fn_def => sema.gatherFunctionSymbol(symbol_name, @intCast(node_idx), module_idx),
+            .const_def => sema.gatherConstantSymbol(symbol_name, @intCast(node_idx), module_idx),
+            .var_def => sema.gatherVariableSymbol(symbol_name, @intCast(node_idx), module_idx),
+            .reg_def => sema.gatherRegisterSymbol(symbol_name, @intCast(node_idx), module_idx),
+            .packed_def => sema.gatherPackedSymbol(symbol_name, @intCast(node_idx), module_idx),
+            .enum_def => sema.gatherEnumSymbol(symbol_name, @intCast(node_idx), module_idx),
             else => unreachable,
         };
         result catch |err| switch (err) {
             error.AnalyzeFailed => {
-                std.log.err("Failed to gather symbol of {}", .{sym_loc});
+                std.log.err("Failed to gather symbol of {s}::{s}", .{ module.name, symbol_name });
                 continue;
             },
             else => |e| return e,
@@ -205,8 +242,10 @@ fn gatherSymbols(sema: *Sema, module_idx: u32) AnalyzeError!void {
     }
 }
 
-fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
+fn gatherFunctionSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const fn_def = ast.node_data[node_idx].fn_def;
     const data = ast.extraData(Ast.Node.FnDefData, fn_def.extra);
 
@@ -227,7 +266,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
 
     const fn_token = ast.node_tokens[node_idx];
 
-    try sema.createSymbol(sym_loc, .{
+    try sema.createSymbol(module, symbol_name, .{
         .function = .{
             .common = .{
                 .node = node_idx,
@@ -242,11 +281,12 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
             .assembly_data = &.{},
         },
     });
+    const symbol_idx: SymbolIndex = @intCast(sema.symbols.items.len - 1);
 
     // Handle interrupt vectors
     inline for (std.meta.fields(InterruptVectors), 0..) |field, i| {
-        if (std.mem.eql(u8, "@" ++ field.name, sym_loc.name)) {
-            if (@field(sema.interrupt_vectors, field.name)) |existing_loc| {
+        if (std.mem.eql(u8, "@" ++ field.name, symbol_name)) {
+            if (@field(sema.interrupt_vectors, field.name).unpack()) |existing_loc| {
                 try sema.errors.append(sema.allocator, .{
                     .tag = .duplicate_vector,
                     .ast = ast,
@@ -254,7 +294,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                     .extra = .{ .vector = @enumFromInt(i) },
                 });
 
-                const existing_sym = sema.lookupSymbol(existing_loc).?;
+                const existing_sym = &sema.symbols.items[existing_loc.symbol];
                 try sema.errors.append(sema.allocator, .{
                     .tag = .existing_symbol,
                     .is_note = true,
@@ -262,7 +302,10 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
                     .token = ast.node_tokens[existing_sym.common().node],
                 });
             } else {
-                @field(sema.interrupt_vectors, field.name) = sym_loc;
+                @field(sema.interrupt_vectors, field.name) = .{
+                    .module = module_idx,
+                    .symbol = symbol_idx,
+                };
             }
 
             // Enforce bank $00
@@ -283,7 +326,7 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
     }
 
     // Only interrupt vectors are allowed to start with an @
-    if (std.mem.startsWith(u8, sym_loc.name, "@")) {
+    if (symbol_name[0] == '@') {
         try sema.errors.append(sema.allocator, .{
             .tag = .invalid_vector_name,
             .ast = ast,
@@ -291,8 +334,10 @@ fn gatherFunctionSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: u32, n
         });
     }
 }
-fn gatherConstantSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
+fn gatherConstantSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const const_def = ast.node_data[node_idx].const_def;
     const data = ast.extraData(Ast.Node.ConstDefData, const_def.extra);
 
@@ -311,7 +356,7 @@ fn gatherConstantSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         return error.AnalyzeFailed;
     }
 
-    try sema.createSymbol(sym_loc, .{
+    try sema.createSymbol(module, symbol_name, .{
         .constant = .{
             .common = .{
                 .node = node_idx,
@@ -325,8 +370,10 @@ fn gatherConstantSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         },
     });
 }
-fn gatherVariableSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
+fn gatherVariableSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const var_def = ast.node_data[node_idx].var_def;
     const data = ast.extraData(Ast.Node.VarDefData, var_def.extra);
 
@@ -354,7 +401,7 @@ fn gatherVariableSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         },
     };
 
-    try sema.createSymbol(sym_loc, .{
+    try sema.createSymbol(module, symbol_name, .{
         .variable = .{
             .common = .{
                 .node = node_idx,
@@ -369,15 +416,17 @@ fn gatherVariableSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         },
     });
 }
-fn gatherRegisterSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
+fn gatherRegisterSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const reg_def = ast.node_data[node_idx].reg_def;
     const data = ast.extraData(Ast.Node.RegDefData, reg_def.extra);
 
     const access_type = try sema.parseEnum(Symbol.Register.AccessType, ast, ast.node_tokens[data.access_attr]);
     const address = try sema.parseInt(u16, ast, data.address);
 
-    try sema.createSymbol(sym_loc, .{
+    try sema.createSymbol(module, symbol_name, .{
         .register = .{
             .common = .{
                 .node = node_idx,
@@ -392,9 +441,11 @@ fn gatherRegisterSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: Module
         },
     });
 }
-fn gatherPackedSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
-    try sema.createSymbol(sym_loc, .{
+fn gatherPackedSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
+    try sema.createSymbol(module, symbol_name, .{
         .@"packed" = .{
             .common = .{
                 .node = node_idx,
@@ -407,9 +458,11 @@ fn gatherPackedSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIn
         },
     });
 }
-fn gatherEnumSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleIndex, node_idx: NodeIndex) !void {
-    const ast = &sema.modules[module_idx].ast;
-    try sema.createSymbol(sym_loc, .{
+fn gatherEnumSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, module_idx: ModuleIndex) !void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
+    try sema.createSymbol(module, symbol_name, .{
         .@"enum" = .{
             .common = .{
                 .node = node_idx,
@@ -424,8 +477,8 @@ fn gatherEnumSymbol(sema: *Sema, sym_loc: SymbolLocation, module_idx: ModuleInde
 }
 
 /// Recursivly analyzes the specified symbol
-pub fn analyzeSymbol(sema: *Sema, sym: *Symbol, sym_loc: SymbolLocation, token_idx: Ast.TokenIndex, module_idx: ModuleIndex) AnalyzeError!void {
-    var common = sym.common();
+pub fn analyzeSymbol(sema: *Sema, symbol: *Symbol, referring_token_idx: Ast.TokenIndex, module_idx: ModuleIndex) AnalyzeError!void {
+    var common = symbol.common();
     if (common.analyze_status == .done) {
         return; // Nothing to do
     }
@@ -433,7 +486,7 @@ pub fn analyzeSymbol(sema: *Sema, sym: *Symbol, sym_loc: SymbolLocation, token_i
         try sema.errors.append(sema.allocator, .{
             .tag = .dependency_loop,
             .ast = &sema.modules[module_idx].ast,
-            .token = token_idx,
+            .token = referring_token_idx,
         });
         return error.AnalyzeFailed;
     }
@@ -441,69 +494,72 @@ pub fn analyzeSymbol(sema: *Sema, sym: *Symbol, sym_loc: SymbolLocation, token_i
     common.analyze_status = .active;
     defer common.analyze_status = .done;
 
-    return switch (sym.*) {
-        .function => |*fn_sym| sema.analyzeFunction(fn_sym, sym_loc, module_idx),
-        .constant => |*const_sym| sema.analyzeConstant(const_sym, sym_loc, module_idx),
-        .variable => |*var_sym| sema.analyzeVariable(var_sym, sym_loc, module_idx),
-        .register => |*reg_sym| sema.analyzeRegister(reg_sym, sym_loc, module_idx),
-        .@"packed" => |*packed_sym| sema.analyzePacked(packed_sym, sym_loc, module_idx),
-        .@"enum" => |*enum_sym| sema.analyzeEnum(enum_sym, sym_loc, module_idx),
+    return switch (symbol.*) {
+        .function => |*fn_sym| sema.analyzeFunction(fn_sym, module_idx),
+        .constant => |*const_sym| sema.analyzeConstant(const_sym, module_idx),
+        .variable => |*var_sym| sema.analyzeVariable(var_sym, module_idx),
+        .register => |*reg_sym| sema.analyzeRegister(reg_sym, module_idx),
+        .@"packed" => |*packed_sym| sema.analyzePacked(packed_sym, module_idx),
+        .@"enum" => |*enum_sym| sema.analyzeEnum(enum_sym, module_idx),
     };
 }
 
-fn analyzeFunction(sema: *Sema, fn_sym: *Symbol.Function, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
+fn analyzeFunction(sema: *Sema, fn_sym: *Symbol.Function, module_idx: ModuleIndex) AnalyzeError!void {
     // Mark as done early, to prevent recursion counting as a dependency loop
     fn_sym.common.analyze_status = .done;
 
     var analyzer: FunctionAnalyzer = .{
-        .ast = &sema.modules[module_idx].ast,
         .sema = sema,
         .symbol = fn_sym,
-        .symbol_location = sym_loc,
+        .module_idx = module_idx,
     };
-    errdefer {
-        for (analyzer.ir.items) |ir| {
-            ir.deinit(sema.allocator);
-        }
-        analyzer.ir.deinit(sema.allocator);
-    }
+    errdefer analyzer.deinit();
 
     try analyzer.handleFnDef(fn_sym.common.node);
 
-    std.log.debug("IR for {s}::{s}", .{ sym_loc.module, sym_loc.name });
+    const ast = &sema.modules[module_idx].ast;
+    std.log.debug("IR for {}", .{sema.parseSymbolLocation(ast, ast.node_tokens[fn_sym.common.node] + 1) catch unreachable});
     for (analyzer.ir.items) |ir| {
         std.log.debug(" - {}", .{ir});
     }
     fn_sym.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
 }
-fn analyzeConstant(sema: *Sema, const_sym: *Symbol.Constant, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
-    const ast = &sema.modules[module_idx].ast;
+fn analyzeConstant(sema: *Sema, const_sym: *Symbol.Constant, module_idx: ModuleIndex) AnalyzeError!void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const const_def = ast.node_data[const_sym.common.node].const_def;
     const data = ast.extraData(Ast.Node.ConstDefData, const_def.extra);
 
-    const_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
-    const_sym.value = try sema.resolveExprValue(ast, const_def.value, const_sym.type, sym_loc.module);
+    const_sym.type = try sema.resolveType(data.type, module_idx);
+    const_sym.value = try sema.resolveExprValue(const_sym.type, const_def.value, module_idx);
 }
-fn analyzeVariable(sema: *Sema, var_sym: *Symbol.Variable, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
-    const ast = &sema.modules[module_idx].ast;
+fn analyzeVariable(sema: *Sema, var_sym: *Symbol.Variable, module_idx: ModuleIndex) AnalyzeError!void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const var_def = ast.node_data[var_sym.common.node].var_def;
     const data = ast.extraData(Ast.Node.VarDefData, var_def.extra);
 
-    var_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
+    var_sym.type = try sema.resolveType(data.type, module_idx);
 }
-fn analyzeRegister(sema: *Sema, reg_sym: *Symbol.Register, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
-    const ast = &sema.modules[module_idx].ast;
+fn analyzeRegister(sema: *Sema, reg_sym: *Symbol.Register, module_idx: ModuleIndex) AnalyzeError!void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const reg_def = ast.node_data[reg_sym.common.node].reg_def;
     const data = ast.extraData(Ast.Node.RegDefData, reg_def.extra);
 
-    reg_sym.type = try sema.resolveType(ast, data.type, sym_loc.module);
+    reg_sym.type = try sema.resolveType(data.type, module_idx);
 }
-fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
-    const ast = &sema.modules[module_idx].ast;
+fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, module_idx: ModuleIndex) AnalyzeError!void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const packed_def = ast.node_data[packed_sym.common.node].packed_def;
     const data = ast.extraData(Ast.Node.PackedDefData, packed_def.extra);
 
-    packed_sym.backing_type = try sema.resolveType(ast, data.backing_type, sym_loc.module);
+    packed_sym.backing_type = try sema.resolveType(data.backing_type, module_idx);
     if (packed_sym.backing_type != .raw and packed_sym.backing_type.raw != .signed_int or packed_sym.backing_type.raw != .unsigned_int) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_int_backing_type,
@@ -531,9 +587,9 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, sym_loc: SymbolLocatio
 
                 const field: Symbol.Packed.Field = .{
                     .name = ast.parseIdentifier(ident_name),
-                    .type = try sema.resolveType(ast, field_extra.type, sym_loc.module),
+                    .type = try sema.resolveType(field_extra.type, module_idx),
                     .default_value = if (field_extra.value != Ast.null_node)
-                        try sema.resolveExprValue(ast, field_extra.value, packed_sym.backing_type, sym_loc.module)
+                        try sema.resolveExprValue(packed_sym.backing_type, field_extra.value, module_idx)
                     else
                         null,
                 };
@@ -559,12 +615,14 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, sym_loc: SymbolLocatio
     }
     packed_sym.fields = try fields.toOwnedSlice(sema.allocator);
 }
-fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, module_idx: ModuleIndex) AnalyzeError!void {
-    const ast = &sema.modules[module_idx].ast;
+fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, module_idx: ModuleIndex) AnalyzeError!void {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     const enum_def = ast.node_data[enum_sym.common.node].enum_def;
     const data = ast.extraData(Ast.Node.EnumDefData, enum_def.extra);
 
-    enum_sym.backing_type = try sema.resolveType(ast, data.backing_type, sym_loc.module);
+    enum_sym.backing_type = try sema.resolveType(data.backing_type, module_idx);
     if (enum_sym.backing_type != .raw and enum_sym.backing_type.raw != .signed_int or enum_sym.backing_type.raw != .unsigned_int) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_int_backing_type,
@@ -589,7 +647,7 @@ fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, sym_loc: SymbolLocation, mod
 
                 try fields.append(sema.allocator, .{
                     .name = ast.parseIdentifier(ident_name),
-                    .value = try sema.resolveExprValue(ast, field_data.value, enum_sym.backing_type, sym_loc.module),
+                    .value = try sema.resolveExprValue(enum_sym.backing_type, field_data.value, module_idx),
                 });
             },
             else => unreachable,
@@ -603,12 +661,16 @@ const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
 const max_int_bitwidth = 64;
 
 /// Resolves a TypeExpr-node into the associated `TypeSymbol`
-pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_module: []const u8) !TypeSymbol {
+pub fn resolveType(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex) !TypeSymbol {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     switch (ast.node_tags[node_idx]) {
         .type_ident => {
             const ident_name = ast.node_tokens[node_idx];
-            const type_name = ast.tokenSource(ident_name);
+            const type_name = ast.parseIdentifier(ident_name);
 
+            // Primitive types
             if (primitives.get(type_name)) |primitive| {
                 return primitive;
             }
@@ -648,9 +710,8 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                 }
             }
 
-            const sym, const sym_loc = try sema.resolveSymbol(ast, ident_name, current_module);
-            const sym_idx = sema.findSymbolIndex(sym_loc);
-            switch (sym.*) {
+            const symbol, const symbol_idx = try sema.resolveSymbol(ident_name, module_idx);
+            switch (symbol.*) {
                 .function, .constant, .variable, .register => {
                     try sema.errors.append(sema.allocator, .{
                         .tag = .expected_type_symbol,
@@ -661,31 +722,75 @@ pub fn resolveType(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, current_mo
                 },
                 .@"packed" => |packed_sym| {
                     return .{ .raw = .{ .@"packed" = if (packed_sym.backing_type.raw == .signed_int)
-                        .{ .is_signed = true, .bits = packed_sym.backing_type.raw.signed_int, .symbol_index = sym_idx }
+                        .{ .is_signed = true, .bits = packed_sym.backing_type.raw.signed_int, .symbol_index = symbol_idx }
                     else
-                        .{ .is_signed = false, .bits = packed_sym.backing_type.raw.unsigned_int, .symbol_index = sym_idx } } };
+                        .{ .is_signed = false, .bits = packed_sym.backing_type.raw.unsigned_int, .symbol_index = symbol_idx } } };
                 },
                 .@"enum" => |enum_sym| {
                     return .{ .raw = .{ .@"enum" = if (enum_sym.backing_type.raw == .signed_int)
-                        .{ .is_signed = true, .bits = enum_sym.backing_type.raw.signed_int, .symbol_index = sym_idx }
+                        .{ .is_signed = true, .bits = enum_sym.backing_type.raw.signed_int, .symbol_index = symbol_idx }
                     else
-                        .{ .is_signed = false, .bits = enum_sym.backing_type.raw.unsigned_int, .symbol_index = sym_idx } } };
+                        .{ .is_signed = false, .bits = enum_sym.backing_type.raw.unsigned_int, .symbol_index = symbol_idx } } };
                 },
             }
+        },
+        .packed_def => {
+            const symbol: Symbol.Packed = .{
+                .common = .{
+                    .node = node_idx,
+                    .is_pub = false,
+                },
+
+                // To be determined during analyzation
+                .backing_type = undefined,
+                .fields = &.{},
+            };
+            _ = symbol; // autofix
+
+            // try sema.createSymbol(sym_loc, symbol);
+            // try sema.analyzePacked(&symbol, sym_loc, module_idx);
+            unreachable;
+        },
+        .enum_def => {
+            unreachable;
         },
         else => unreachable,
     }
 }
 
 /// Resolves a `name` or `module::name` into the associated `Symbol`
-pub fn resolveSymbol(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!struct { *Symbol, SymbolLocation } {
-    const sym_loc = try sema.parseSymbolLocation(ast, token_idx, current_module);
+pub fn resolveSymbol(sema: *Sema, token_idx: Ast.TokenIndex, module_idx: ModuleIndex) AnalyzeError!struct { *Symbol, SymbolIndex } {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
 
-    if (sema.lookupSymbol(sym_loc)) |sym| {
+    const symbol_loc = try sema.parseSymbolLocation(ast, token_idx);
+
+    const target_module, const target_module_idx: ModuleIndex = if (symbol_loc.module.len == 0)
+        // Current module
+        .{ module, module_idx }
+    else find_module: {
+        // Other module
+        for (sema.modules, 0..) |*other_module, other_module_idx| {
+            if (std.mem.eql(u8, other_module.name, symbol_loc.module)) {
+                break :find_module .{ other_module, @intCast(other_module_idx) };
+            }
+        }
+
+        try sema.errors.append(sema.allocator, .{
+            .tag = .undefined_module,
+            .ast = ast,
+            .token = token_idx,
+        });
+        return error.AnalyzeFailed;
+    };
+
+    if (target_module.symbol_map.get(symbol_loc.name)) |symbol_idx| {
+        const symbol = &sema.symbols.items[symbol_idx];
+
         // Ensure symbol is analyzed
-        try sema.analyzeSymbol(sym, sym_loc, token_idx, sema.findSymbolModuleIndex(sym_loc));
+        try sema.analyzeSymbol(symbol, token_idx, target_module_idx);
 
-        return .{ sym, sym_loc };
+        return .{ symbol, symbol_idx };
     }
 
     try sema.errors.append(sema.allocator, .{
@@ -696,14 +801,15 @@ pub fn resolveSymbol(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, cu
     return error.AnalyzeFailed;
 }
 
-// Helper functions
-
 /// Resolves an expression into a parsed value
-pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, target_type: TypeSymbol, current_module: []const u8) !ExpressionValue {
+pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeIndex, module_idx: ModuleIndex) !ExpressionValue {
+    const module = &sema.modules[module_idx];
+    const ast = &module.ast;
+
     switch (ast.node_tags[node_idx]) {
         .expr_ident => {
             const source_symbol_ident = ast.node_tokens[node_idx];
-            const source_symbol, const source_symbol_loc = try sema.resolveSymbol(ast, source_symbol_ident, current_module);
+            const source_symbol, const source_symbol_idx = try sema.resolveSymbol(source_symbol_ident, module_idx);
 
             const source_type = switch (source_symbol.*) {
                 .constant => |const_sym| const_sym.type,
@@ -733,7 +839,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
 
             return switch (source_symbol.*) {
                 .constant => |const_sym| .{ .value = const_sym.value.resolve(TypeSymbol.ComptimeIntValue, sema) },
-                .variable, .register => .{ .variable = source_symbol_loc },
+                .variable, .register => .{ .variable = source_symbol_idx },
                 else => unreachable,
             };
         },
@@ -811,7 +917,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                         return error.AnalyzeFailed;
                     },
                     .@"enum" => |enum_type_sym| {
-                        const enum_sym = sema.symbols.items(.sym)[enum_type_sym.symbol_index].@"enum";
+                        const enum_sym = sema.symbols.items[enum_type_sym.symbol_index].@"enum";
 
                         for (enum_sym.fields) |field| {
                             if (std.mem.eql(u8, field.name, literal_name)) {
@@ -847,7 +953,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     return error.AnalyzeFailed;
                 },
                 .@"packed" => |packed_type_sym| {
-                    const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+                    const packed_sym = sema.symbols.items[packed_type_sym.symbol_index].@"packed";
 
                     try fields.ensureUnusedCapacity(sema.allocator, packed_sym.fields.len);
                 },
@@ -865,7 +971,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     switch (target_type.raw) {
                         .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
                         .@"packed" => |packed_type_sym| {
-                            const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+                            const packed_sym = sema.symbols.items[packed_type_sym.symbol_index].@"packed";
 
                             for (packed_sym.fields) |field| {
                                 if (std.mem.eql(u8, field.name, field_name)) {
@@ -887,7 +993,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                     switch (target_type.raw) {
                         .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
                         .@"packed" => |packed_type_sym| {
-                            const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+                            const packed_sym = sema.symbols.items[packed_type_sym.symbol_index].@"packed";
 
                             var bit_offset: u8 = 0;
                             for (packed_sym.fields) |field| {
@@ -902,7 +1008,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
                         },
                     }
                 };
-                const field_value = try sema.resolveExprValue(ast, field_data.value, field_type, current_module);
+                const field_value = try sema.resolveExprValue(field_type, field_data.value, module_idx);
 
                 if (fields.contains(field_name)) {
                     try sema.errors.append(sema.allocator, .{
@@ -929,7 +1035,7 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
             switch (target_type.raw) {
                 .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
                 .@"packed" => |packed_type_sym| {
-                    const packed_sym = sema.symbols.items(.sym)[packed_type_sym.symbol_index].@"packed";
+                    const packed_sym = sema.symbols.items[packed_type_sym.symbol_index].@"packed";
 
                     for (packed_sym.fields, 0..) |defined_field, def_idx| {
                         if (fields.contains(defined_field.name)) {
@@ -978,24 +1084,36 @@ pub fn resolveExprValue(sema: *Sema, ast: *const Ast, node_idx: NodeIndex, targe
     }
 }
 
-fn createSymbol(sema: *Sema, sym_loc: SymbolLocation, sym: Symbol) !void {
-    const gop = try sema.symbol_map.getOrPut(sema.allocator, sym_loc.module);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{};
-    }
-    try gop.value_ptr.put(sema.allocator, sym_loc.name, @intCast(sema.symbols.len));
+// Helper functions
 
-    try sema.symbols.append(sema.allocator, .{ .sym = sym, .loc = sym_loc });
+/// Creates a new symbol and associates it with the given module
+fn createSymbol(sema: *Sema, module: *Module, name: []const u8, symbol: Symbol) !void {
+    const symbol_idx: SymbolIndex = @intCast(sema.symbols.items.len);
+    try sema.symbols.append(sema.allocator, symbol);
+
+    try module.symbol_map.putNoClobber(module.allocator, name, symbol_idx);
 }
 
 /// Searches for the specified symbol
-pub fn lookupSymbol(sema: Sema, sym_loc: SymbolLocation) ?*Symbol {
-    if (sema.symbol_map.get(sym_loc.module)) |module_symbols| {
-        if (module_symbols.get(sym_loc.name)) |sym_idx| {
-            return &sema.symbols.items(.sym)[sym_idx];
+pub fn lookupSymbol(sema: Sema, symbol_name: []const u8, module_idx: ModuleIndex) ?*Symbol {
+    const module = &sema.modules[module_idx];
+    return module.symbol_map.get(symbol_name);
+}
+
+/// Re-creates the symbol location of the specifed symbol
+pub fn getSymbolLocation(sema: Sema, symbol_idx: SymbolIndex) SymbolLocation {
+    for (sema.modules) |module| {
+        for (module.symbol_map.keys(), module.symbol_map.values()) |name, idx| {
+            if (idx == symbol_idx) {
+                return .{
+                    .module = module.name,
+                    .name = name,
+                };
+            }
         }
     }
-    return null;
+
+    unreachable;
 }
 
 /// Checks if the symbol is accessible in the specified bank
@@ -1022,14 +1140,19 @@ pub fn findSymbolIndex(sema: Sema, sym_loc: SymbolLocation) SymbolIndex {
     }
     unreachable;
 }
-/// Finds the `ModuleIndex` of the specified symbol location
-pub fn findSymbolModuleIndex(sema: Sema, sym_loc: SymbolLocation) ModuleIndex {
+
+/// Finds the `ModuleIndex` of the specified module name
+pub fn findModuleIndex(sema: Sema, name: []const u8) ModuleIndex {
     for (sema.modules, 0..) |module, module_idx| {
-        if (std.mem.eql(u8, module.name.?, sym_loc.module)) {
+        if (std.mem.eql(u8, module.name.?, name)) {
             return @intCast(module_idx);
         }
     }
     unreachable;
+}
+/// Finds the `ModuleIndex` of the specified symbol location
+pub fn findSymbolModuleIndex(sema: Sema, sym_loc: SymbolLocation) ModuleIndex {
+    return sema.findModuleIndex(sym_loc.module);
 }
 
 /// Tries parsing an integer and reports an error on failure
@@ -1064,7 +1187,7 @@ pub fn parseEnum(sema: *Sema, comptime T: type, ast: *const Ast, token_idx: Ast.
 }
 
 /// Parse either a `name` or `module::name` symbol location
-pub fn parseSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex, current_module: []const u8) AnalyzeError!SymbolLocation {
+pub fn parseSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenIndex) AnalyzeError!SymbolLocation {
     if (ast.token_tags[token_idx] != .ident and ast.token_tags[token_idx] != .builtin_ident) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_token,
@@ -1092,7 +1215,7 @@ pub fn parseSymbolLocation(sema: *Sema, ast: *const Ast, token_idx: Ast.TokenInd
         };
     } else {
         return .{
-            .module = current_module,
+            .module = "",
             .name = ast.tokenSource(token_idx),
         };
     }
@@ -1134,6 +1257,7 @@ pub const Error = struct {
         duplicate_label,
         existing_symbol,
         existing_label,
+        undefined_module,
         undefined_symbol,
         undefined_label,
         missing_reset_vector,
@@ -1304,6 +1428,7 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         .duplicate_label => rich.print(writer, tty_config, "Found duplicate label [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .existing_symbol => writer.writeAll("Symbol already defined here"),
         .existing_label => writer.writeAll("Label already defiend here"),
+        .undefined_module => rich.print(writer, tty_config, "Use of undefined module [" ++ highlight ++ "]{s}", .{err.ast.tokenSource(err.token)}),
         .undefined_symbol => if (err.ast.token_tags[err.token + 1] == .double_colon)
             rich.print(writer, tty_config, "Use of undefined symbol [" ++ highlight ++ "]{s}::{s}", .{ err.ast.tokenSource(err.token), err.ast.tokenSource(err.token + 2) })
         else

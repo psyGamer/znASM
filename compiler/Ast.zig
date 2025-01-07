@@ -164,6 +164,8 @@ pub const Node = struct {
     };
 
     pub const SubRange = struct {
+        pub const empty: SubRange = .{ .extra_start = 0, .extra_end = 0 };
+
         extra_start: ExtraIndex,
         extra_end: ExtraIndex,
     };

@@ -1,7 +1,7 @@
 //! Intermediate representation for program logic
 const std = @import("std");
 const Instruction = @import("instruction.zig").Instruction;
-const SymbolLocation = @import("symbol.zig").SymbolLocation;
+const SymbolIndex = @import("Sema.zig").SymbolIndex;
 const RegisterType = @import("Sema.zig").RegisterType;
 const ExpressionValue = @import("Sema.zig").ExpressionValue;
 const Relocation = @import("CodeGen.zig").Relocation;
@@ -27,19 +27,19 @@ pub const Ir = struct {
         /// Loads the variable at the offset into the register
         load_variable: struct {
             register: RegisterType,
-            symbol: SymbolLocation,
+            symbol: SymbolIndex,
             offset: u16 = 0,
         },
 
         /// Stores the value of the register into the variable
         store_variable: struct {
             register: RegisterType,
-            symbol: SymbolLocation,
+            symbol: SymbolIndex,
             offset: u16 = 0,
         },
         /// Stores zero into the variable
         zero_variable: struct {
-            symbol: SymbolLocation,
+            symbol: SymbolIndex,
             offset: u16 = 0,
         },
 
@@ -47,7 +47,7 @@ pub const Ir = struct {
         or_value: Instruction.Imm816,
         /// ORs the accumulator with the variable
         or_variable: struct {
-            symbol: SymbolLocation,
+            symbol: SymbolIndex,
             offset: u16 = 0,
         },
 
@@ -57,7 +57,7 @@ pub const Ir = struct {
         shift_accum_right: u16,
 
         call: struct {
-            target: SymbolLocation,
+            target: SymbolIndex,
             target_offset: u16 = 0,
         },
         branch: BranchRelocation,

@@ -343,7 +343,7 @@ pub const TypeSymbol = union(enum) {
             .unsigned_int => |bits| writer.print("u{d}", .{bits}),
             .comptime_int => writer.writeAll("comptime_int"),
             .@"packed" => |packed_type_sym| {
-                const packed_sym_loc = sema.symbols.items(.loc)[packed_type_sym.symbol_index];
+                const packed_sym_loc = sema.getSymbolLocation(packed_type_sym.symbol_index);
 
                 if (packed_type_sym.is_signed)
                     try writer.print("packed {}(i{d})", .{ packed_sym_loc, packed_type_sym.bits })
@@ -351,7 +351,7 @@ pub const TypeSymbol = union(enum) {
                     try writer.print("packed {}(u{d})", .{ packed_sym_loc, packed_type_sym.bits });
             },
             .@"enum" => |enum_type_sym| {
-                const enum_sym_loc = sema.symbols.items(.loc)[enum_type_sym.symbol_index];
+                const enum_sym_loc = sema.getSymbolLocation(enum_type_sym.symbol_index);
 
                 if (enum_type_sym.is_signed)
                     try writer.print("enum {}(i{d})", .{ enum_sym_loc, enum_type_sym.bits })

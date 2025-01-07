@@ -21,7 +21,7 @@ const CodeGen = @This();
 /// which needs to be fixed after emitting the data into ROM
 pub const Relocation = struct {
     pub const Type = enum {
-        /// Relative 8-bit offset to the symbol
+        /// Relative signed 8-bit offset to the symbol
         rel8,
         /// 16-bit Absolute address of the symbol
         addr16,
@@ -30,7 +30,7 @@ pub const Relocation = struct {
     };
 
     type: Type,
-    target_sym: SymbolLocation,
+    target_symbol: Sema.SymbolIndex,
     target_offset: u16 = 0,
 };
 /// Branches need to be relocated to point to their label and use the short / long form
@@ -50,7 +50,7 @@ pub const BranchRelocation = struct {
     };
 
     type: Type,
-    target: []const u8,
+    target_label: []const u8,
 };
 /// Metadata information about an instruction
 pub const InstructionInfo = struct {
@@ -71,33 +71,29 @@ pub const InstructionInfo = struct {
 };
 
 pub fn process(sema: *Sema) !void {
-    const symbols = sema.symbols.slice();
-
-    for (symbols.items(.sym), symbols.items(.loc)) |*sym, loc| {
-        if (sym.* != .function) {
+    for (sema.symbols.items, 0..) |*symbol, symbol_idx| {
+        if (symbol.* != .function) {
             continue;
         }
 
         var builder: FunctionBuilder = .{
             .sema = sema,
-            .function = sym.function,
-            .symbol_location = loc,
+            .symbol_idx = @intCast(symbol_idx),
         };
         errdefer builder.instructions.deinit(sema.allocator);
         defer builder.labels.deinit(sema.allocator);
 
         try builder.build();
-
         try builder.resolveBranchRelocs();
-        sym.function.assembly_data = try builder.genereateAssemblyData();
-        try builder.fixLabelRelocs();
-        sym.function.instructions = try builder.instructions.toOwnedSlice(sema.allocator);
+        symbol.function.assembly_data = try builder.genereateAssemblyData();
+        // try builder.fixLabelRelocs();
+        symbol.function.instructions = try builder.instructions.toOwnedSlice(sema.allocator);
 
         const labels = try sema.allocator.alloc(struct { []const u8, u16 }, builder.labels.count());
         for (builder.labels.keys(), builder.labels.values(), labels) |label_name, index, *label| {
             label.* = .{ label_name, index };
         }
-        sym.function.labels = labels;
+        symbol.function.labels = labels;
     }
 }
 
@@ -108,8 +104,7 @@ const FunctionBuilder = struct {
 
     sema: *Sema,
 
-    function: Symbol.Function,
-    symbol_location: SymbolLocation,
+    symbol_idx: Sema.SymbolIndex,
 
     instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
@@ -120,7 +115,7 @@ const FunctionBuilder = struct {
     idx_size: Instruction.SizeMode = .none,
 
     pub fn build(b: *FunctionBuilder) !void {
-        for (b.function.ir) |ir| {
+        for (b.function().ir) |ir| {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
                 .change_size => try b.handleChangeSize(ir),
@@ -137,6 +132,10 @@ const FunctionBuilder = struct {
                 .label => try b.handleLabel(ir),
             }
         }
+    }
+
+    inline fn function(b: *FunctionBuilder) *Symbol.Function {
+        return &b.sema.symbols.items[b.symbol_idx].function;
     }
 
     fn handleInstruction(b: *FunctionBuilder, ir: Ir) !void {
@@ -205,35 +204,35 @@ const FunctionBuilder = struct {
     }
     fn handleLoadVariable(b: *FunctionBuilder, ir: Ir) !void {
         const load = ir.tag.load_variable;
-        const target_symbol = b.sema.lookupSymbol(load.symbol).?;
+        const target_symbol = b.sema.symbols.items[load.symbol];
 
         const instr: Instruction, const reloc: ?Relocation = switch (load.register) {
-            .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .lda_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = load.symbol,
+                    .target_symbol = load.symbol,
                     .target_offset = load.offset,
                 } }
             else
                 .{ .{ .lda_addr24 = undefined }, .{
                     .type = .addr24,
-                    .target_sym = load.symbol,
+                    .target_symbol = load.symbol,
                     .target_offset = load.offset,
                 } },
 
-            .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .ldx_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = load.symbol,
+                    .target_symbol = load.symbol,
                     .target_offset = load.offset,
                 } }
             else
                 unreachable,
 
-            .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .ldx_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = load.symbol,
+                    .target_symbol = load.symbol,
                     .target_offset = load.offset,
                 } }
             else
@@ -252,35 +251,35 @@ const FunctionBuilder = struct {
     }
     fn handleStoreVariable(b: *FunctionBuilder, ir: Ir) !void {
         const store = ir.tag.store_variable;
-        const target_symbol = b.sema.lookupSymbol(store.symbol).?;
+        const target_symbol = b.sema.symbols.items[store.symbol];
 
         const instr: Instruction, const reloc: Relocation = switch (store.register) {
-            .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .sta_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = store.symbol,
+                    .target_symbol = store.symbol,
                     .target_offset = store.offset,
                 } }
             else
                 .{ .{ .sta_addr24 = undefined }, .{
                     .type = .addr24,
-                    .target_sym = store.symbol,
+                    .target_symbol = store.symbol,
                     .target_offset = store.offset,
                 } },
 
-            .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .stx_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = store.symbol,
+                    .target_symbol = store.symbol,
                     .target_offset = store.offset,
                 } }
             else
                 unreachable,
 
-            .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+            .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
                 .{ .{ .sty_addr16 = undefined }, .{
                     .type = .addr16,
-                    .target_sym = store.symbol,
+                    .target_symbol = store.symbol,
                     .target_offset = store.offset,
                 } }
             else
@@ -301,13 +300,13 @@ const FunctionBuilder = struct {
         const store = ir.tag.zero_variable;
 
         // STZ does not support long addresses
-        std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.lookupSymbol(store.symbol).?.*, b.function.bank));
+        std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.symbols.items[store.symbol], b.function().bank));
 
         try b.instructions.append(b.sema.allocator, .{
             .instr = .{ .stz_addr16 = undefined },
             .reloc = .{
                 .type = .addr16,
-                .target_sym = store.symbol,
+                .target_symbol = store.symbol,
                 .target_offset = store.offset,
             },
 
@@ -331,18 +330,18 @@ const FunctionBuilder = struct {
     }
     fn handleOrVariable(b: *FunctionBuilder, ir: Ir) !void {
         const variable = ir.tag.or_variable;
-        const target_symbol = b.sema.lookupSymbol(variable.symbol).?;
+        const target_symbol = b.sema.symbols.items[variable.symbol];
 
-        const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol.*, b.function.bank))
+        const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
             .{ .{ .ora_addr16 = undefined }, .{
                 .type = .addr16,
-                .target_sym = variable.symbol,
+                .target_symbol = variable.symbol,
                 .target_offset = variable.offset,
             } }
         else
             .{ .{ .ora_addr24 = undefined }, .{
                 .type = .addr24,
-                .target_sym = variable.symbol,
+                .target_symbol = variable.symbol,
                 .target_offset = variable.offset,
             } };
 
@@ -389,16 +388,16 @@ const FunctionBuilder = struct {
     }
     fn handleCall(b: *FunctionBuilder, ir: Ir) !void {
         const call = ir.tag.call;
-        const target_symbol = b.sema.lookupSymbol(call.target).?;
+        const target_symbol = b.sema.symbols.items[call.target];
 
         // TODO: Support long jumps
-        std.debug.assert(target_symbol.function.bank == b.function.bank);
+        std.debug.assert(target_symbol.function.bank == b.function().bank);
 
         try b.instructions.append(b.sema.allocator, .{
             .instr = .{ .jsr = undefined },
             .reloc = .{
                 .type = .addr16,
-                .target_sym = call.target,
+                .target_symbol = call.target,
                 .target_offset = call.target_offset,
             },
 
@@ -454,9 +453,9 @@ const FunctionBuilder = struct {
 
             for (b.labels.keys(), b.labels.values()) |label, instr_index| {
                 if (std.mem.eql(u8, label, reloc.target_sym.name)) {
-                    reloc.target_sym = b.symbol_location;
+                    reloc.target_symbol = b.symbol_location;
                     reloc.target_offset = if (instr_index == b.instructions.items.len)
-                        @intCast(b.function.assembly_data.len)
+                        @intCast(b.function().assembly_data.len)
                     else
                         b.instructions.items[instr_index].offset;
                 }
@@ -514,7 +513,7 @@ const FunctionBuilder = struct {
                 const already_short = relative_offset.* >= std.math.minInt(i8) and relative_offset.* <= std.math.maxInt(i8);
 
                 const reloc = b.instructions.items[source_idx].branch_reloc.?;
-                const target_idx = b.labels.get(reloc.target).?;
+                const target_idx = b.labels.get(reloc.target_label).?;
 
                 // Calculate offset to target
                 const min = @min(source_idx + 1, target_idx);
@@ -560,7 +559,7 @@ const FunctionBuilder = struct {
 
         for (reloc_offsets.keys()) |source_idx| {
             const reloc = b.instructions.items[source_idx].branch_reloc.?;
-            const target_idx = b.labels.get(reloc.target).?;
+            const target_idx = b.labels.get(reloc.target_label).?;
 
             var offset: usize = 0;
             for (b.instructions.items[0..target_idx], 0..) |info, i| {
@@ -620,13 +619,13 @@ const FunctionBuilder = struct {
                 if (reloc.type == .jump) {
                     info.reloc = .{
                         .type = .addr16,
-                        .target_sym = b.symbol_location,
+                        .target_symbol = b.symbol_idx,
                         .target_offset = target_offset,
                     };
                 } else if (reloc.type == .jump_long) {
                     info.reloc = .{
                         .type = .addr24,
-                        .target_sym = b.symbol_location,
+                        .target_symbol = b.symbol_idx,
                         .target_offset = target_offset,
                     };
                 }
@@ -647,7 +646,7 @@ const FunctionBuilder = struct {
 
                 const jmp_reloc: Relocation = .{
                     .type = .addr16,
-                    .target_sym = b.symbol_location,
+                    .target_symbol = b.symbol_idx,
                     .target_offset = target_offset,
                 };
 
@@ -656,7 +655,7 @@ const FunctionBuilder = struct {
                 } else if (reloc.type == .jump_long) {
                     info.reloc = .{
                         .type = .addr24,
-                        .target_sym = b.symbol_location,
+                        .target_symbol = b.symbol_idx,
                         .target_offset = target_offset,
                     };
                 } else {

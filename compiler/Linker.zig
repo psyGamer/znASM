@@ -8,6 +8,7 @@ const Node = Ast.Node;
 const NodeIndex = Ast.NodeIndex;
 const Module = @import("Module.zig");
 const Symbol = @import("symbol.zig").Symbol;
+const SymbolIndex = @import("Sema.zig").SymbolIndex;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const Sema = @import("Sema.zig");
 const Opcode = @import("instruction.zig").Opcode;
@@ -36,7 +37,7 @@ pub const Error = struct {
     is_note: bool = false,
 
     node: Ast.NodeIndex,
-    symbol_location: *const SymbolLocation,
+    symbol_location: SymbolLocation,
 
     extra: union {
         none: void,
@@ -102,9 +103,9 @@ pub fn deinit(link: *Linker) void {
 }
 
 /// Returns the memory-mapped location of a symbol
-pub fn symbolLocation(link: Linker, symbol_loc: SymbolLocation) u24 {
-    const symbol_idx = link.sema.symbol_map.get(symbol_loc.module).?.get(symbol_loc.name).?;
-    const symbol = link.sema.symbols.items(.sym)[symbol_idx];
+pub fn symbolLocation(link: Linker, symbol_idx: SymbolIndex) u24 {
+    const symbol = link.sema.symbols.items[symbol_idx];
+    std.log.info("LINK SYM {}", .{symbol});
 
     return switch (symbol) {
         .function => |func_sym| memory_map.bankOffsetToAddr(link.mapping_mode, func_sym.bank, func_sym.bank_offset),
@@ -121,14 +122,14 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
     defer link.allocator.free(used_ram);
     @memset(used_ram, false);
 
-    symbol_loop: for (link.sema.symbols.items(.sym), link.sema.symbols.items(.loc)) |*sym, *loc| {
+    symbol_loop: for (link.sema.symbols.items, 0..) |*symbol, symbol_idx| {
         // Skip unreferenced symbols
-        if (sym.common().analyze_status == .pending) {
+        if (symbol.common().analyze_status == .pending) {
             continue;
         }
-        std.debug.assert(sym.common().analyze_status == .done);
+        std.debug.assert(symbol.common().analyze_status == .done);
 
-        switch (sym.*) {
+        switch (symbol.*) {
             .function => |*func_sym| {
                 const gop = try link.rom_banks.getOrPut(link.allocator, func_sym.bank);
                 if (!gop.found_existing) {
@@ -164,7 +165,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
                 try link.errors.append(link.allocator, .{
                     .tag = .no_space_left,
                     .node = var_sym.common.node,
-                    .symbol_location = loc,
+                    .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
                     .extra = .{ .no_space_left = .{
                         .addr_min = memory_map.wramOffsetToAddr(var_sym.wram_offset_min),
                         .addr_max = memory_map.wramOffsetToAddr(var_sym.wram_offset_max),
@@ -193,18 +194,17 @@ pub fn allocateBanks(link: *Linker) !void {
 
 /// Resolves relocation of instructions
 pub fn resolveRelocations(link: *Linker) !void {
-    const symbols = link.sema.symbols.slice();
-    for (symbols.items(.sym), symbols.items(.loc)) |*sym, *loc| {
-        if (sym.* != .function) {
+    for (link.sema.symbols.items, 0..) |*symbol, symbol_idx| {
+        if (symbol.* != .function) {
             continue;
         }
 
-        const func = sym.function;
+        const func = symbol.function;
         const bank = link.rom_banks.get(func.bank).?;
 
         for (func.instructions) |info| {
             const reloc = info.reloc orelse continue;
-            const target_addr = link.symbolLocation(reloc.target_sym) + reloc.target_offset;
+            const target_addr = link.symbolLocation(reloc.target_symbol) + reloc.target_offset;
 
             switch (reloc.type) {
                 .rel8 => {
@@ -214,7 +214,7 @@ pub fn resolveRelocations(link: *Linker) !void {
                         try link.errors.append(link.allocator, .{
                             .tag = .offset_too_large_i8,
                             .node = info.source,
-                            .symbol_location = loc,
+                            .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
                             .extra = .{ .offset = offset },
                         });
                         continue;
@@ -228,7 +228,7 @@ pub fn resolveRelocations(link: *Linker) !void {
                         try link.errors.append(link.allocator, .{
                             .tag = .different_bank,
                             .node = info.source,
-                            .symbol_location = loc,
+                            .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
                             .extra = .{ .different_bank = .{
                                 .source_bank = func.bank,
                                 .target_addr = target_addr,
@@ -261,7 +261,7 @@ pub fn detectErrors(link: Linker, writer: std.fs.File.Writer, tty_config: std.io
 
         const module = get_module: {
             for (link.sema.modules) |module| {
-                if (std.mem.eql(u8, module.name.?, err.symbol_location.module)) {
+                if (std.mem.eql(u8, module.name, err.symbol_location.module)) {
                     break :get_module module;
                 }
             }
@@ -348,26 +348,22 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
         }
     };
 
-    const symbols = link.sema.symbols.items(.sym);
-
     var comments: std.ArrayListUnmanaged([]const u8) = .empty;
     defer comments.deinit(link.allocator);
 
-    for (link.sema.symbol_map.keys(), link.sema.symbol_map.values(), 0..) |module_name, module_symbols, module_index| {
-        const module = link.sema.modules[module_index];
-
+    for (link.sema.modules) |module| {
         var src_fbs = std.io.fixedBufferStream(module.source);
         const src_reader = src_fbs.reader();
 
-        for (module_symbols.keys(), module_symbols.values()) |symbol_name, symbol_idx| {
-            const symbol = symbols[symbol_idx];
+        for (module.symbol_map.keys(), module.symbol_map.values()) |symbol_name, symbol_idx| {
+            const symbol = link.sema.symbols.items[symbol_idx];
             const is_vector = symbol_name[0] == '@';
 
             // Usually format module@symbol, except for vectors which would have a double @
             const debug_sym_name = if (is_vector)
                 symbol_name
             else
-                try std.fmt.allocPrint(link.allocator, "{s}@{s}", .{ module_name, symbol_name });
+                try std.fmt.allocPrint(link.allocator, "{s}@{s}", .{ module.name, symbol_name });
             defer if (!is_vector) link.allocator.free(debug_sym_name);
 
             switch (symbol) {
@@ -583,8 +579,8 @@ pub fn generateCdlData(link: Linker, rom: []const u8) ![]const u8 {
     const cdl_flags: []CdlFlags = @ptrCast(cdl_data[(@sizeOf(CdlHeader) - 0)..]);
     @memset(cdl_flags, .{});
 
-    for (link.sema.symbols.items(.sym)) |sym| {
-        switch (sym) {
+    for (link.sema.symbols.items) |symbol| {
+        switch (symbol) {
             .function => |func_sym| {
                 const func_offset = memory_map.bankToRomOffset(link.mapping_mode, func_sym.bank) + func_sym.bank_offset;
                 for (func_sym.instructions, 0..) |info, info_idx| {

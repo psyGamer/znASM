@@ -166,8 +166,8 @@ fn sizeHandler(comptime target: Instruction.SizeType) HandlerFn {
     return struct {
         pub fn handler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
             const size_node = params[0];
-            const size_literal = try ana.sema.expectToken(ana.ast, size_node, .int_literal);
-            const size_value = try ana.sema.parseInt(u8, ana.ast, size_literal);
+            const size_literal = try ana.sema.expectToken(ana.ast(), size_node, .int_literal);
+            const size_value = try ana.sema.parseInt(u8, ana.ast(), size_literal);
 
             const size_mode: Instruction.SizeMode = switch (size_value) {
                 8 => .@"8bit",
@@ -175,7 +175,7 @@ fn sizeHandler(comptime target: Instruction.SizeType) HandlerFn {
                 else => {
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .invalid_size_mode,
-                        .ast = ana.ast,
+                        .ast = ana.ast(),
                         .token = size_literal,
                     });
                     return error.AnalyzeFailed;
@@ -203,13 +203,13 @@ fn branchHandler(comptime branch_type: BranchRelocation.Type) HandlerFn {
     return struct {
         pub fn handler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
             const target_node = params[0];
-            const target_ident = try ana.sema.expectToken(ana.ast, target_node, .ident);
-            const target_name = ana.ast.tokenSource(target_ident);
+            const target_ident = try ana.sema.expectToken(ana.ast(), target_node, .ident);
+            const target_name = ana.ast().tokenSource(target_ident);
 
             try ana.ir.append(ana.sema.allocator, .{
                 .tag = .{ .branch = .{
                     .type = branch_type,
-                    .target = target_name,
+                    .target_label = target_name,
                 } },
                 .node = node_idx,
             });
@@ -233,7 +233,7 @@ fn instructionHandler(comptime instruction: Instruction) HandlerFn {
 
 fn pushValueHandler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
     const size_node = params[0];
-    const size_value = try ana.sema.parseInt(u16, ana.ast, ana.ast.node_tokens[size_node]);
+    const size_value = try ana.sema.parseInt(u16, ana.ast(), ana.ast().node_tokens[size_node]);
 
     try ana.ir.append(ana.sema.allocator, .{
         .tag = .{ .instruction = .{

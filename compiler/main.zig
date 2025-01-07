@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("logging.zig");
+const builtin_module = @import("builtin_module.zig");
 const target_os = builtin.os.tag;
 
 const Lexer = @import("Lexer.zig");
@@ -116,7 +117,8 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Built-in module
-    try modules.append(allocator, try Module.init(allocator, try allocator.dupeZ(u8, @embedFile("builtin.znasm")), "<builtin>") orelse unreachable);
+    try modules.append(allocator, try builtin_module.init(allocator));
+    const builtin_mod = &modules.items[0];
 
     // User modules
     var has_errors = false;
@@ -141,7 +143,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
     // Run semantic analysis
     var sema = try Sema.process(allocator, modules.items, .lorom) orelse return 1;
-    defer sema.deinit(allocator);
+    defer sema.deinit();
 
     // Generate code
     try CodeGen.process(&sema);
@@ -151,7 +153,8 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     defer linker.deinit();
 
     // Generate ROM
-    const fallback_vector: SymbolLocation = .{ .module = "builtin", .name = "empty_vector" };
+    const fallback_vector_idx = builtin_mod.symbol_map.get(builtin_module.empty_vector_name).?;
+
     var rom: Rom = .{
         .header = .{
             .title = rom_name,
@@ -170,16 +173,16 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .rom_version = 0,
         },
         .vectors = .{
-            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop orelse fallback_vector)),
-            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk orelse fallback_vector)),
-            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort orelse fallback_vector)), // Unused
-            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi orelse fallback_vector)),
-            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq orelse fallback_vector)),
-            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop orelse fallback_vector)),
-            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort orelse fallback_vector)), // Unused
-            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi orelse fallback_vector)),
-            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset orelse fallback_vector)),
-            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk orelse fallback_vector)),
+            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop.unpackSymbol() orelse fallback_vector_idx)),
+            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk.unpackSymbol() orelse fallback_vector_idx)),
+            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort.unpackSymbol() orelse fallback_vector_idx)), // Unused
+            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi.unpackSymbol() orelse fallback_vector_idx)),
+            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq.unpackSymbol() orelse fallback_vector_idx)),
+            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop.unpackSymbol() orelse fallback_vector_idx)),
+            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort.unpackSymbol() orelse fallback_vector_idx)), // Unused
+            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi.unpackSymbol() orelse fallback_vector_idx)),
+            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset.unpackSymbol() orelse fallback_vector_idx)),
+            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk.unpackSymbol() orelse fallback_vector_idx)),
         },
         .banks = linker.rom_bank_data,
     };

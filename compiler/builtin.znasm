@@ -2,5 +2,8 @@ module builtin
 
 /// Used as a fallback for when an interrupt vector isn't defiend
 fn empty_vector() {
-    rti
+    // rti
+    while (true) {
+        
+    }
 }

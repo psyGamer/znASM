@@ -115,14 +115,14 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         }
 
         // Packed Definition
-        const packed_def = try p.parsePackedDef(doc_comments);
+        const packed_def = try p.parsePackedDef(doc_comments, .top_level);
         if (packed_def != null_node) {
             try p.scratch.append(p.allocator, packed_def);
             continue;
         }
 
         // Enum Definition
-        const enum_def = try p.parseEnumDef(doc_comments);
+        const enum_def = try p.parseEnumDef(doc_comments, .top_level);
         if (enum_def != null_node) {
             try p.scratch.append(p.allocator, enum_def);
             continue;
@@ -255,11 +255,14 @@ fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// PackedDef <- (KEYWORD_pub)? KEYWORD_packed IDENTIFIER LPAREN TypeExpr RPAREN StructBlock
-fn parsePackedDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
-    _ = p.eatToken(.keyword_pub);
+const DeclType = enum { top_level, anonymous };
+
+///     PackedDef <- (KEYWORD_pub)? KEYWORD_packed IDENTIFIER LPAREN TypeExpr RPAREN StructBlock
+/// AnonPackedDef <- KEYWORD_packed LPAREN TypeExpr RPAREN StructBlock
+fn parsePackedDef(p: *Parser, doc_comments: Node.SubRange, decl_type: DeclType) ParseError!NodeIndex {
+    if (decl_type == .top_level) _ = p.eatToken(.keyword_pub);
     const keyword_packed = p.eatToken(.keyword_packed) orelse return null_node;
-    _ = try p.expectToken(.ident);
+    if (decl_type == .top_level) _ = try p.expectToken(.ident);
     _ = try p.expectToken(.lparen);
     const type_expr = try p.parseTypeExpr();
     _ = try p.expectToken(.rparen);
@@ -279,11 +282,12 @@ fn parsePackedDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex 
     });
 }
 
-/// EmumDef <- (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
-fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
-    _ = p.eatToken(.keyword_pub);
+/// EmumDef     <- (KEYWORD_pub)? KEYWORD_enum IDENTIFIER LPAREN TypeExpr RPAREN EnumBlock
+/// AnonEmumDef <- KEYWORD_enum LPAREN TypeExpr RPAREN EnumBlock
+fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange, decl_type: DeclType) ParseError!NodeIndex {
+    if (decl_type == .top_level) _ = p.eatToken(.keyword_pub);
     const keyword_enum = p.eatToken(.keyword_enum) orelse return null_node;
-    _ = try p.expectToken(.ident);
+    if (decl_type == .top_level) _ = try p.expectToken(.ident);
     _ = try p.expectToken(.lparen);
     const type_expr = try p.parseTypeExpr();
     _ = try p.expectToken(.rparen);
@@ -392,7 +396,7 @@ fn parseStructField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeInde
     });
 }
 
-/// EnumBlock <- LBRACE NEW_LINE (EnumField)* RBRACE
+/// EnumBlock <- LBRACE EnumField? (COMMA EnumField)* RBRACE
 fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
@@ -401,10 +405,16 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     _ = try p.expectToken(.new_line);
 
     var doc_start: ?usize = null;
+    var has_comma = true; // First argument doesn't need a comma before it
     while (true) {
         const t = p.token_tags[p.index];
         if (t == .new_line) {
             p.index += 1;
+            continue;
+        }
+        if (t == .comma) {
+            p.index += 1;
+            has_comma = true;
             continue;
         }
         if (t == .rbrace) {
@@ -420,6 +430,15 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
             p.index += 1;
             continue;
         }
+
+        if (!has_comma) {
+            // Most likely just missing. Can continue parsing
+            try p.errors.append(p.allocator, .{
+                .tag = .expected_comma_after_arg,
+                .token = p.index,
+            });
+        }
+        has_comma = false;
 
         const doc_comments: Node.SubRange = get_comments: {
             if (doc_start) |start| {
@@ -444,8 +463,9 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
 
         return p.fail(.expected_enum_member);
     }
+
+    _ = p.eatToken(.comma); // Optional trailing comma
     _ = try p.expectToken(.rbrace);
-    _ = try p.expectToken(.new_line);
 
     return p.addNode(.{
         .tag = .enum_block,
@@ -454,13 +474,11 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// EnumField <- IDENTIFIER EQUAL Expr COMMA NEW_LINE
+/// EnumField <- IDENTIFIER EQUAL Expr
 fn parseEnumField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     const ident_name = p.eatToken(.ident) orelse return null_node;
     _ = try p.expectToken(.equal);
     const expr_value = try p.parseExpr();
-    _ = try p.expectToken(.comma);
-    _ = try p.expectToken(.new_line);
 
     return try p.addNode(.{
         .tag = .enum_field,
@@ -766,8 +784,15 @@ fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// TypeExpr <- (IDENTIFIER)
+/// TypeExpr <- AnonPackedDef | AnonEnumDef | IDENTIFIER
 fn parseTypeExpr(p: *Parser) ParseError!NodeIndex {
+    if (p.token_tags[p.index] == .keyword_packed) {
+        return p.parsePackedDef(.empty, .anonymous);
+    }
+    if (p.token_tags[p.index] == .keyword_enum) {
+        return p.parseEnumDef(.empty, .anonymous);
+    }
+
     if (p.eatToken(.ident)) |ident| {
         return try p.addNode(.{
             .tag = .type_ident,
