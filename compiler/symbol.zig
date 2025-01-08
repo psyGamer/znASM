@@ -34,10 +34,16 @@ const A = enum(u2) {};
 
 pub const Symbol = union(enum) {
     pub const Common = struct {
-        /// Parent node
+        /// Containing node for this symbol
         node: Ast.NodeIndex,
         /// Accessibilty for other modules
         is_pub: bool,
+
+        /// Module which contains this symbol
+        module_index: Sema.ModuleIndex = undefined,
+        /// Index of this symbol into the modules's symbol-map
+        /// Useful for retrieving the name of this symbol
+        module_symbol_index: Sema.SymbolIndex = undefined,
 
         /// Current status for analyzation
         analyze_status: enum { pending, active, done } = .pending,
@@ -157,6 +163,9 @@ pub const Symbol = union(enum) {
             .@"packed" => |*packed_sym| &packed_sym.common,
             .@"enum" => |*enum_sym| &enum_sym.common,
         };
+    }
+    pub fn commonConst(sym: *const Symbol) *const Common {
+        return @constCast(sym).common();
     }
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {

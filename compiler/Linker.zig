@@ -358,6 +358,12 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
             const symbol = link.sema.getSymbol(symbol_idx).*;
             const is_vector = symbol_name[0] == '@';
 
+            // Skip unreferenced symbols
+            if (symbol.commonConst().analyze_status == .pending) {
+                continue;
+            }
+            std.debug.assert(symbol.commonConst().analyze_status == .done);
+
             // Usually format module@symbol, except for vectors which would have a double @
             const debug_sym_name = if (is_vector)
                 symbol_name
@@ -579,6 +585,12 @@ pub fn generateCdlData(link: Linker, rom: []const u8) ![]const u8 {
     @memset(cdl_flags, .{});
 
     for (link.sema.symbols.items) |symbol| {
+        // Skip unreferenced symbols
+        if (symbol.commonConst().analyze_status == .pending) {
+            continue;
+        }
+        std.debug.assert(symbol.commonConst().analyze_status == .done);
+
         switch (symbol) {
             .function => |func_sym| {
                 const func_offset = memory_map.bankToRomOffset(link.mapping_mode, func_sym.bank) + func_sym.bank_offset;

@@ -129,10 +129,10 @@ module_map: std.StringArrayHashMapUnmanaged(ModuleIndex) = .empty,
 symbols: std.ArrayListUnmanaged(Symbol) = .empty,
 errors: std.ArrayListUnmanaged(Error) = .empty,
 
-/// Incremetal counter to avoid name collisions with anonymous types
-anon_type_index: u32 = 0,
-
 interrupt_vectors: InterruptVectors = .{},
+
+/// Collection of strings which needed to be dynamically allocated
+string_pool: std.ArrayListUnmanaged([]u8) = .empty,
 allocator: std.mem.Allocator,
 
 pub inline fn getModule(sema: *Sema, index: ModuleIndex) *Module {
@@ -213,6 +213,10 @@ pub fn deinit(sema: *Sema) void {
     }
     sema.symbols.deinit(sema.allocator);
     sema.errors.deinit(sema.allocator);
+    for (sema.string_pool.items) |str| {
+        sema.allocator.free(str);
+    }
+    sema.string_pool.deinit(sema.allocator);
 }
 
 pub const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error;
@@ -299,7 +303,7 @@ fn gatherFunctionSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
 
     const fn_token = ast.nodeToken(node_idx);
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .function = .{
             .common = .{
                 .node = node_idx,
@@ -389,7 +393,7 @@ fn gatherConstantSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
         return error.AnalyzeFailed;
     }
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .constant = .{
             .common = .{
                 .node = node_idx,
@@ -434,7 +438,7 @@ fn gatherVariableSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
         },
     };
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .variable = .{
             .common = .{
                 .node = node_idx,
@@ -459,7 +463,7 @@ fn gatherRegisterSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
     const access_type = try sema.parseEnum(Symbol.Register.AccessType, ast, ast.nodeToken(data.access_attr));
     const address = try sema.parseInt(u16, ast, data.address);
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .register = .{
             .common = .{
                 .node = node_idx,
@@ -478,7 +482,7 @@ fn gatherPackedSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex,
     const module = sema.getModule(module_idx);
     const ast = &module.ast;
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .@"packed" = .{
             .common = .{
                 .node = node_idx,
@@ -495,7 +499,7 @@ fn gatherEnumSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeIndex, m
     const module = sema.getModule(module_idx);
     const ast = &module.ast;
 
-    try sema.createSymbol(module, symbol_name, .{
+    try sema.createSymbol(module_idx, symbol_name, .{
         .@"enum" = .{
             .common = .{
                 .node = node_idx,
@@ -564,7 +568,7 @@ fn analyzeConstant(sema: *Sema, const_sym: *Symbol.Constant, module_idx: ModuleI
     const const_def = ast.nodeData(const_sym.common.node).const_def;
     const data = ast.readExtraData(Ast.Node.ConstDefData, const_def.extra);
 
-    const_sym.type = try sema.resolveType(data.type, module_idx);
+    const_sym.type = try sema.resolveType(data.type, module_idx, .{ .constant = const_sym.* });
     const_sym.value = try sema.resolveExprValue(const_sym.type, const_def.value, module_idx);
 }
 fn analyzeVariable(sema: *Sema, var_sym: *Symbol.Variable, module_idx: ModuleIndex) AnalyzeError!void {
@@ -574,7 +578,7 @@ fn analyzeVariable(sema: *Sema, var_sym: *Symbol.Variable, module_idx: ModuleInd
     const var_def = ast.nodeData(var_sym.common.node).var_def;
     const data = ast.readExtraData(Ast.Node.VarDefData, var_def.extra);
 
-    var_sym.type = try sema.resolveType(data.type, module_idx);
+    var_sym.type = try sema.resolveType(data.type, module_idx, .{ .variable = var_sym.* });
 }
 fn analyzeRegister(sema: *Sema, reg_sym: *Symbol.Register, module_idx: ModuleIndex) AnalyzeError!void {
     const module = sema.getModule(module_idx);
@@ -583,7 +587,7 @@ fn analyzeRegister(sema: *Sema, reg_sym: *Symbol.Register, module_idx: ModuleInd
     const reg_def = ast.nodeData(reg_sym.common.node).reg_def;
     const data = ast.readExtraData(Ast.Node.RegDefData, reg_def.extra);
 
-    reg_sym.type = try sema.resolveType(data.type, module_idx);
+    reg_sym.type = try sema.resolveType(data.type, module_idx, .{ .register = reg_sym.* });
 }
 fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, module_idx: ModuleIndex) AnalyzeError!void {
     const module = sema.getModule(module_idx);
@@ -592,7 +596,7 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, module_idx: ModuleInde
     const packed_def = ast.nodeData(packed_sym.common.node).packed_def;
     const data = ast.readExtraData(Ast.Node.PackedDefData, packed_def.extra);
 
-    packed_sym.backing_type = try sema.resolveType(data.backing_type, module_idx);
+    packed_sym.backing_type = try sema.resolveType(data.backing_type, module_idx, .{ .@"packed" = packed_sym.* });
     if (packed_sym.backing_type != .raw and packed_sym.backing_type.raw != .signed_int or packed_sym.backing_type.raw != .unsigned_int) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_int_backing_type,
@@ -620,7 +624,7 @@ fn analyzePacked(sema: *Sema, packed_sym: *Symbol.Packed, module_idx: ModuleInde
 
                 const field: Symbol.Packed.Field = .{
                     .name = ast.parseIdentifier(ident_name),
-                    .type = try sema.resolveType(field_extra.type, module_idx),
+                    .type = try sema.resolveType(field_extra.type, module_idx, .{ .@"packed" = packed_sym.* }),
                     .default_value = if (field_extra.value != .none)
                         try sema.resolveExprValue(packed_sym.backing_type, field_extra.value, module_idx)
                     else
@@ -655,7 +659,7 @@ fn analyzeEnum(sema: *Sema, enum_sym: *Symbol.Enum, module_idx: ModuleIndex) Ana
     const enum_def = ast.nodeData(enum_sym.common.node).enum_def;
     const data = ast.readExtraData(Ast.Node.EnumDefData, enum_def.extra);
 
-    enum_sym.backing_type = try sema.resolveType(data.backing_type, module_idx);
+    enum_sym.backing_type = try sema.resolveType(data.backing_type, module_idx, .{ .@"enum" = enum_sym.* });
     if (enum_sym.backing_type != .raw and enum_sym.backing_type.raw != .signed_int or enum_sym.backing_type.raw != .unsigned_int) {
         try sema.errors.append(sema.allocator, .{
             .tag = .expected_int_backing_type,
@@ -694,7 +698,7 @@ const primitives: std.StaticStringMap(TypeSymbol) = .initComptime(.{});
 const max_int_bitwidth = 64;
 
 /// Resolves a TypeExpr-node into the associated `TypeSymbol`
-pub fn resolveType(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex) !TypeSymbol {
+pub fn resolveType(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex, parent: ?Symbol) !TypeSymbol {
     const module = sema.getModule(module_idx);
     const ast = &module.ast;
 
@@ -768,7 +772,7 @@ pub fn resolveType(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex) !T
             }
         },
         .packed_def => {
-            const symbol: Symbol.Packed = .{
+            const packed_symbol: Symbol.Packed = .{
                 .common = .{
                     .node = node_idx,
                     .is_pub = false,
@@ -778,14 +782,94 @@ pub fn resolveType(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex) !T
                 .backing_type = undefined,
                 .fields = &.{},
             };
-            _ = symbol; // autofix
 
-            // try sema.createSymbol(sym_loc, symbol);
-            // try sema.analyzePacked(&symbol, sym_loc, module_idx);
-            unreachable;
+            const symbol_idx: SymbolIndex = .cast(sema.symbols.items.len);
+            const parent_name = if (parent) |p|
+                sema.getModule(p.commonConst().module_index).symbol_map.keys()[@intFromEnum(p.commonConst().module_symbol_index)]
+            else
+                "";
+            const symbol_name = try std.fmt.allocPrint(sema.allocator, "{s}__packed_{d}", .{ parent_name, @intFromEnum(symbol_idx) });
+            try sema.string_pool.append(sema.allocator, symbol_name);
+
+            if (module.symbol_map.get(symbol_name)) |existing_sym_idx| {
+                const existing_sym = sema.getSymbol(existing_sym_idx);
+
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .duplicate_symbol,
+                    .ast = ast,
+                    .token = ast.nodeToken(node_idx).next(),
+                });
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .existing_symbol,
+                    .is_note = true,
+                    .ast = ast,
+                    .token = ast.nodeToken(existing_sym.commonConst().node),
+                });
+
+                return error.AnalyzeFailed;
+            }
+
+            try sema.createSymbol(module_idx, symbol_name, .{ .@"packed" = packed_symbol });
+            var symbol = sema.getSymbol(symbol_idx);
+
+            symbol.common().analyze_status = .active;
+            try sema.analyzePacked(&symbol.@"packed", module_idx);
+            symbol.common().analyze_status = .done;
+
+            return .{ .raw = .{ .@"packed" = if (symbol.@"packed".backing_type.raw == .signed_int)
+                .{ .is_signed = true, .bits = symbol.@"packed".backing_type.raw.signed_int, .symbol_index = symbol_idx }
+            else
+                .{ .is_signed = false, .bits = symbol.@"packed".backing_type.raw.unsigned_int, .symbol_index = symbol_idx } } };
         },
         .enum_def => {
-            unreachable;
+            const enum_symbol: Symbol.Enum = .{
+                .common = .{
+                    .node = node_idx,
+                    .is_pub = false,
+                },
+
+                // To be determined during analyzation
+                .backing_type = undefined,
+                .fields = &.{},
+            };
+
+            const symbol_idx: SymbolIndex = .cast(sema.symbols.items.len);
+            const parent_name = if (parent) |p|
+                sema.getModule(p.commonConst().module_index).symbol_map.keys()[@intFromEnum(p.commonConst().module_symbol_index)]
+            else
+                "";
+            const symbol_name = try std.fmt.allocPrint(sema.allocator, "{s}__enum_{d}", .{ parent_name, @intFromEnum(symbol_idx) });
+            try sema.string_pool.append(sema.allocator, symbol_name);
+
+            if (module.symbol_map.get(symbol_name)) |existing_sym_idx| {
+                const existing_sym = sema.getSymbol(existing_sym_idx);
+
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .duplicate_symbol,
+                    .ast = ast,
+                    .token = ast.nodeToken(node_idx),
+                });
+                try sema.errors.append(sema.allocator, .{
+                    .tag = .existing_symbol,
+                    .is_note = true,
+                    .ast = ast,
+                    .token = ast.nodeToken(existing_sym.common().node),
+                });
+
+                return error.AnalyzeFailed;
+            }
+
+            try sema.createSymbol(module_idx, symbol_name, .{ .@"enum" = enum_symbol });
+            var symbol = sema.getSymbol(symbol_idx);
+
+            symbol.common().analyze_status = .active;
+            try sema.analyzeEnum(&symbol.@"enum", module_idx);
+            symbol.common().analyze_status = .done;
+
+            return .{ .raw = .{ .@"enum" = if (symbol.@"enum".backing_type.raw == .signed_int)
+                .{ .is_signed = true, .bits = symbol.@"enum".backing_type.raw.signed_int, .symbol_index = symbol_idx }
+            else
+                .{ .is_signed = false, .bits = symbol.@"enum".backing_type.raw.unsigned_int, .symbol_index = symbol_idx } } };
         },
         else => unreachable,
     }
@@ -1120,11 +1204,16 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
 // Helper functions
 
 /// Creates a new symbol and associates it with the given module
-fn createSymbol(sema: *Sema, module: *Module, name: []const u8, symbol: Symbol) !void {
+fn createSymbol(sema: *Sema, module_idx: ModuleIndex, name: []const u8, symbol: Symbol) !void {
+    const module = sema.getModule(module_idx);
+
     const symbol_idx: SymbolIndex = .cast(sema.symbols.items.len);
     try sema.symbols.append(sema.allocator, symbol);
-
     try module.symbol_map.putNoClobber(module.allocator, name, symbol_idx);
+
+    var common = sema.getSymbol(symbol_idx).common();
+    common.module_index = module_idx;
+    common.module_symbol_index = .cast(module.symbol_map.count() - 1);
 }
 
 /// Searches for the specified symbol
@@ -1135,18 +1224,14 @@ pub fn lookupSymbol(sema: Sema, symbol_name: []const u8, module_idx: ModuleIndex
 
 /// Re-creates the symbol location of the specifed symbol
 pub fn getSymbolLocation(sema: Sema, symbol_idx: SymbolIndex) SymbolLocation {
-    for (sema.modules) |module| {
-        for (module.symbol_map.keys(), module.symbol_map.values()) |name, idx| {
-            if (idx == symbol_idx) {
-                return .{
-                    .module = module.name,
-                    .name = name,
-                };
-            }
-        }
-    }
+    const symbol = &sema.symbols.items[@intFromEnum(symbol_idx)];
+    const common = symbol.commonConst();
+    const module = sema.modules[@intFromEnum(common.module_index)];
 
-    unreachable;
+    return .{
+        .name = module.symbol_map.keys()[@intFromEnum(common.module_symbol_index)],
+        .module = module.name,
+    };
 }
 
 /// Checks if the symbol is accessible in the specified bank
@@ -1564,9 +1649,9 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             err.extra.expected_register_size.actual,
         }),
 
-        .expected_enum_field_or_decl => rich.print(writer, tty_config, "Could not find an [" ++ highlight ++ "]enum field[reset] or a [" ++ highlight ++ "]declaration[reset] called [" ++ highlight ++ "]\"{s}\"[reset], on type [" ++ highlight ++ "]{}[reset]", .{
+        .expected_enum_field_or_decl => rich.print(writer, tty_config, "Could not find an [" ++ highlight ++ "]enum field[reset] or a [" ++ highlight ++ "]declaration[reset] called [" ++ highlight ++ "]'{s}'[reset] on type [" ++ highlight ++ "]{}[reset]", .{
             err.ast.tokenSource(err.token)[1..],
-            err.extra.expected_enum_field_or_decl,
+            sema.fmtType(&err.extra.expected_enum_field_or_decl),
         }),
 
         .unsupported_register => rich.print(writer, tty_config, "Unsupported [" ++ highlight ++ "]intermediate register {s}[reset], for use with [" ++ highlight ++ "]{s}", .{
