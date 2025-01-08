@@ -79,9 +79,6 @@ pub const Node = struct {
         /// `main_token` is the `keyword_while`
         while_statement,
 
-        /// `main_token` is the `identifier` of the opcode, followed by operands until a `new_line`
-        instruction,
-
         /// `main_token` is the `identifier` of the name
         label,
 

@@ -529,7 +529,7 @@ fn parseAccessAttr(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Block <- LBRACE NEW_LINE (NEW_LINE | Expr | Instruction | Label)* RBRACE NEW_LINE
+/// Block <- LBRACE NEW_LINE (NEW_LINE | Expr | Label)* RBRACE NEW_LINE
 fn parseBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
@@ -572,14 +572,6 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         }
         p.index = start_idx;
 
-        // Instruction
-        const instr = try p.parseInstruction();
-        if (instr != .none) {
-            try p.scratch.append(p.allocator, instr);
-            continue;
-        }
-        p.index = start_idx;
-
         // Label
         const label = try p.parseLabel();
         if (label != .none) {
@@ -597,19 +589,6 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         .tag = .block,
         .main_token = lbrace,
         .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[scratch_top..]) },
-    });
-}
-
-/// Instruction <- IDENTIFIER (INT_LITERAL | IDENTIFIER)? NEW_LINE
-fn parseInstruction(p: *Parser) ParseError!NodeIndex {
-    const ident_opcode = p.eatToken(.ident) orelse return .none;
-    _ = p.eatToken(.ident) orelse p.eatToken(.int_literal);
-    _ = p.eatToken(.new_line) orelse return .none;
-
-    return try p.addNode(.{
-        .tag = .instruction,
-        .main_token = ident_opcode,
-        .data = undefined,
     });
 }
 
