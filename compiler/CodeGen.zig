@@ -78,7 +78,7 @@ pub fn process(sema: *Sema) !void {
 
         var builder: FunctionBuilder = .{
             .sema = sema,
-            .symbol_idx = @intCast(symbol_idx),
+            .symbol_idx = .cast(symbol_idx),
         };
         errdefer builder.instructions.deinit(sema.allocator);
         defer builder.labels.deinit(sema.allocator);
@@ -135,7 +135,7 @@ const FunctionBuilder = struct {
     }
 
     inline fn function(b: *FunctionBuilder) *Symbol.Function {
-        return &b.sema.symbols.items[b.symbol_idx].function;
+        return &b.sema.getSymbol(b.symbol_idx).function;
     }
 
     fn handleInstruction(b: *FunctionBuilder, ir: Ir) !void {
@@ -204,7 +204,7 @@ const FunctionBuilder = struct {
     }
     fn handleLoadVariable(b: *FunctionBuilder, ir: Ir) !void {
         const load = ir.tag.load_variable;
-        const target_symbol = b.sema.symbols.items[load.symbol];
+        const target_symbol = b.sema.getSymbol(load.symbol).*;
 
         const instr: Instruction, const reloc: ?Relocation = switch (load.register) {
             .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
@@ -251,7 +251,7 @@ const FunctionBuilder = struct {
     }
     fn handleStoreVariable(b: *FunctionBuilder, ir: Ir) !void {
         const store = ir.tag.store_variable;
-        const target_symbol = b.sema.symbols.items[store.symbol];
+        const target_symbol = b.sema.getSymbol(store.symbol).*;
 
         const instr: Instruction, const reloc: Relocation = switch (store.register) {
             .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
@@ -300,7 +300,7 @@ const FunctionBuilder = struct {
         const store = ir.tag.zero_variable;
 
         // STZ does not support long addresses
-        std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.symbols.items[store.symbol], b.function().bank));
+        std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.getSymbol(store.symbol).*, b.function().bank));
 
         try b.instructions.append(b.sema.allocator, .{
             .instr = .{ .stz_addr16 = undefined },
@@ -330,7 +330,7 @@ const FunctionBuilder = struct {
     }
     fn handleOrVariable(b: *FunctionBuilder, ir: Ir) !void {
         const variable = ir.tag.or_variable;
-        const target_symbol = b.sema.symbols.items[variable.symbol];
+        const target_symbol = b.sema.getSymbol(variable.symbol).*;
 
         const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
             .{ .{ .ora_addr16 = undefined }, .{
@@ -388,7 +388,7 @@ const FunctionBuilder = struct {
     }
     fn handleCall(b: *FunctionBuilder, ir: Ir) !void {
         const call = ir.tag.call;
-        const target_symbol = b.sema.symbols.items[call.target];
+        const target_symbol = b.sema.getSymbol(call.target);
 
         // TODO: Support long jumps
         std.debug.assert(target_symbol.function.bank == b.function().bank);

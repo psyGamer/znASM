@@ -164,7 +164,7 @@ pub const Node = struct {
     };
 
     pub const SubRange = struct {
-        pub const empty: SubRange = .{ .extra_start = 0, .extra_end = 0 };
+        pub const empty: SubRange = .{ .extra_start = @enumFromInt(0), .extra_end = @enumFromInt(0) };
 
         extra_start: ExtraIndex,
         extra_end: ExtraIndex,
@@ -172,37 +172,37 @@ pub const Node = struct {
 
     pub const FnDefData = struct {
         bank_attr: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const ConstDefData = struct {
         type: NodeIndex,
         bank_attr: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const VarDefData = struct {
         type: NodeIndex,
         bank_attr: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const RegDefData = struct {
         type: NodeIndex,
-        address: NodeIndex,
+        address: TokenIndex,
         access_attr: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const PackedDefData = struct {
         backing_type: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const EnumDefData = struct {
         backing_type: NodeIndex,
-        doc_comment_start: NodeIndex,
-        doc_comment_end: NodeIndex,
+        doc_comment_start: ExtraIndex,
+        doc_comment_end: ExtraIndex,
     };
     pub const StructFieldData = struct {
         type: NodeIndex,
@@ -210,20 +210,72 @@ pub const Node = struct {
     };
 };
 
-pub const TokenIndex = u32;
-pub const NodeIndex = u32;
-pub const ExtraIndex = u32;
+pub const TokenIndex = enum(u32) {
+    // Token 0 is valid, so use maxInt as null
+    none = std.math.maxInt(u32),
+    _,
 
-// Token 0 is valid, so use ~0 as null
-pub const null_token: TokenIndex = std.math.maxInt(TokenIndex);
+    pub inline fn next(index: TokenIndex) TokenIndex {
+        return @enumFromInt(@intFromEnum(index) + 1);
+    }
+    pub inline fn prev(index: TokenIndex) TokenIndex {
+        return @enumFromInt(@intFromEnum(index) - 1);
+    }
+    pub inline fn offset(index: TokenIndex, off: i32) TokenIndex {
+        return @enumFromInt(@intFromEnum(index) + off);
+    }
 
-// Root and null share the same index, since no Node can have a root node as a child.
-pub const root_node: NodeIndex = 0;
-pub const null_node: NodeIndex = 0;
+    /// Cast a generic number to a TokenIndex
+    pub inline fn cast(x: anytype) TokenIndex {
+        return switch (@typeInfo(@TypeOf(x))) {
+            .null => .none,
+            .int, .comptime_int => @enumFromInt(@as(std.meta.Tag(TokenIndex), @intCast(x))),
+            .optional => if (x) |value| @enumFromInt(@as(std.meta.Tag(TokenIndex), @intCast(value))) else .none,
+            else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a TokenIndex"),
+        };
+    }
+};
+pub const NodeIndex = enum(u32) {
+    // Root and null share the same index, since no Node can have a root node as a child.
+    pub const root: NodeIndex = @enumFromInt(0);
 
-const Lexer = @import("Lexer.zig");
+    none = 0,
+    _,
+
+    /// Helper function to cast a generic number to a NodeIndex
+    pub inline fn cast(x: anytype) NodeIndex {
+        return switch (@typeInfo(@TypeOf(x))) {
+            .null => .none,
+            .int, .comptime_int => @enumFromInt(@as(std.meta.Tag(NodeIndex), @intCast(x))),
+            .optional => if (x) |value| @enumFromInt(@as(std.meta.Tag(NodeIndex), @intCast(value))) else .none,
+            else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a NodeIndex"),
+        };
+    }
+};
+pub const ExtraIndex = enum(u32) {
+    _,
+
+    /// Helper function to cast a generic number to a ExtraIndex
+    pub inline fn cast(x: anytype) ExtraIndex {
+        return switch (@typeInfo(@TypeOf(x))) {
+            .null => .none,
+            .int, .comptime_int => @enumFromInt(@as(std.meta.Tag(ExtraIndex), @intCast(x))),
+            .optional => if (x) |value| @enumFromInt(@as(std.meta.Tag(ExtraIndex), @intCast(value))) else .none,
+            else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a ExtraIndex"),
+        };
+    }
+};
+
+/// Non-typesafe type which can represent either a token, node, or extra index
+pub const CommonIndex = @TypeOf(
+    @as(std.meta.Tag(TokenIndex), undefined),
+    @as(std.meta.Tag(NodeIndex), undefined),
+    @as(std.meta.Tag(ExtraIndex), undefined),
+);
+
+const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
-const Token = Lexer.Token;
+const Token = Tokenizer.Token;
 
 const Ast = @This();
 
@@ -240,14 +292,33 @@ node_tags: []const Node.Tag,
 node_tokens: []const TokenIndex,
 node_data: []const Node.Data,
 
-extra_data: []const NodeIndex,
+extra_data: []const CommonIndex,
 
 errors: []const Error,
+
+pub inline fn tokenTag(tree: Ast, index: TokenIndex) Token.Tag {
+    return tree.token_tags[@intFromEnum(index)];
+}
+pub inline fn tokenLoc(tree: Ast, index: TokenIndex) Token.Loc {
+    return tree.token_locs[@intFromEnum(index)];
+}
+pub inline fn nodeTag(tree: Ast, index: NodeIndex) Node.Tag {
+    return tree.node_tags[@intFromEnum(index)];
+}
+pub inline fn nodeToken(tree: Ast, index: NodeIndex) TokenIndex {
+    return tree.node_tokens[@intFromEnum(index)];
+}
+pub inline fn nodeData(tree: Ast, index: NodeIndex) Node.Data {
+    return tree.node_data[@intFromEnum(index)];
+}
+pub inline fn extraData(tree: Ast, index: ExtraIndex) CommonIndex {
+    return tree.extra_data[@intFromEnum(index)];
+}
 
 pub fn parse(allocator: std.mem.Allocator, source: [:0]const u8, source_path: []const u8) !Ast {
     var tokens: std.MultiArrayList(Token) = .empty;
 
-    var lexer: Lexer = .{ .buffer = source };
+    var lexer: Tokenizer = .{ .buffer = source };
     while (true) {
         const token = lexer.next();
         try tokens.append(allocator, token);
@@ -309,27 +380,26 @@ pub fn deinit(tree: *Ast, allocator: std.mem.Allocator) void {
 }
 
 /// Parses the extra data for the specified type
-pub fn extraData(tree: Ast, comptime T: type, extra_idx: usize) T {
+pub fn readExtraData(tree: Ast, comptime T: type, extra_idx: ExtraIndex) T {
     var result: T = undefined;
     inline for (std.meta.fields(T), 0..) |field, i| {
-        comptime std.debug.assert(field.type == NodeIndex);
-        @field(result, field.name) = tree.extra_data[extra_idx + i];
+        @field(result, field.name) = .cast(tree.extra_data[@intFromEnum(extra_idx) + i]);
     }
     return result;
 }
 
 /// Resolves the source data of a token
 pub fn tokenSource(tree: Ast, token_idx: TokenIndex) []const u8 {
-    return tree.token_locs[token_idx].source(tree.source);
+    return tree.token_locs[@intFromEnum(token_idx)].source(tree.source);
 }
 /// Parses the string value of a token
 pub fn parseIdentifier(tree: Ast, token_idx: TokenIndex) []const u8 {
-    std.debug.assert(tree.token_tags[token_idx] == .ident or tree.token_tags[token_idx] == .builtin_ident);
+    std.debug.assert(tree.tokenTag(token_idx) == .ident or tree.tokenTag(token_idx) == .builtin_ident);
     return tree.tokenSource(token_idx);
 }
 /// Parses the int value of an `int_literal`
 pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
-    std.debug.assert(tree.token_tags[token_idx] == .int_literal);
+    std.debug.assert(tree.tokenTag(token_idx) == .int_literal);
     const int_str = tree.tokenSource(token_idx);
     const number_base: u8 = switch (int_str[0]) {
         '$' => 16,
@@ -341,7 +411,7 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
 }
 /// Parses the enum value of an `dot_literal`
 pub fn parseEnumLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
-    std.debug.assert(tree.token_tags[token_idx] == .dot_literal);
+    std.debug.assert(tree.tokenTag(token_idx) == .dot_literal);
     const enum_str = tree.tokenSource(token_idx);
     return std.meta.stringToEnum(T, enum_str[1..]) orelse error.UnknownField;
 }
@@ -351,14 +421,14 @@ pub fn isToken(tree: Ast, token_idx: TokenIndex, tag: Token.Tag) bool {
     return if (token_idx >= tree.token_tags.len)
         false
     else
-        tree.token_tags[token_idx] == tag;
+        tree.tokenTag(token_idx) == tag;
 }
 /// Checks if the index are of the specified token tags
 pub fn areTokens(tree: Ast, token_idx: TokenIndex, tags: []const Token.Tag) bool {
     return if (token_idx + tags.len - 1 >= tree.token_tags.len)
         false
     else
-        std.mem.eql(Token.Tag, tree.token_tags[token_idx..(token_idx + tags.len)], tags);
+        std.mem.eql(Token.Tag, tree.token_tags[@intFromEnum(token_idx)..(@intFromEnum(token_idx) + tags.len)], tags);
 }
 
 // Error handling
@@ -376,13 +446,10 @@ pub const Error = struct {
     };
 
     tag: Tag,
+    token: TokenIndex,
 
     /// Notes are associated with the previous error
     is_note: bool = false,
-
-    /// True if `token` points to the token before the token causing an issue.
-    token_is_prev: bool = false,
-    token: TokenIndex,
 
     extra: union {
         none: void,
@@ -395,7 +462,7 @@ pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config) !
     defer std.debug.unlockStdErr();
 
     for (tree.errors) |err| {
-        const token_loc = tree.token_locs[err.token];
+        const token_loc = tree.tokenLoc(err.token);
         const src_loc = std.zig.findLineColumn(tree.source, token_loc.start);
 
         const args = .{ tree.source_path, src_loc.line + 1, src_loc.column + 1 };
@@ -429,24 +496,24 @@ pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, er
 
     switch (err.tag) {
         .expected_toplevel => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a top-level definition[reset], found [" ++ highlight ++ "]{s}", .{
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
         .expected_statement => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a statement[reset], found [" ++ highlight ++ "]{s}", .{
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
         .expected_expr => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an expression[reset], found [" ++ highlight ++ "]{s}", .{
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
         .expected_comma_after_arg => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a comma[reset], after an argument, found [" ++ highlight ++ "]{s}", .{
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
         .expected_enum_member => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an enum member[reset], inside [" ++ highlight ++ "]enum block[reset], found [" ++ highlight ++ "]{s}", .{
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
 
         .expected_token => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
             err.extra.expected_tag.symbol(),
-            tree.token_tags[err.token - @intFromBool(err.token_is_prev)].symbol(),
+            tree.tokenTag(err.token).symbol(),
         }),
     }
 }

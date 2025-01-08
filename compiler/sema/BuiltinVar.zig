@@ -46,7 +46,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
         try ana.sema.errors.append(ana.sema.allocator, .{
             .tag = .expected_intermediate_register,
             .ast = ana.ast(),
-            .token = ana.ast().node_tokens[node_idx],
+            .token = ana.ast().nodeToken(node_idx),
         });
         return error.AnalyzeFailed;
     };
@@ -107,7 +107,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .unsupported_register,
                         .ast = ana.ast(),
-                        .token = ana.ast().node_tokens[node_idx],
+                        .token = ana.ast().nodeToken(node_idx),
                         .extra = .{ .unsupported_register = .{
                             .register = register_type,
                             .message = "@stack_pointer",
@@ -137,7 +137,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .unsupported_register,
                         .ast = ana.ast(),
-                        .token = ana.ast().node_tokens[node_idx],
+                        .token = ana.ast().nodeToken(node_idx),
                         .extra = .{ .unsupported_register = .{
                             .register = register_type,
                             .message = "@stack_pointer",

@@ -41,22 +41,22 @@ pub fn deinit(ana: *Analyzer) void {
 }
 
 pub inline fn module(ana: *Analyzer) *Module {
-    return &ana.sema.modules[ana.module_idx];
+    return ana.sema.getModule(ana.module_idx);
 }
 pub inline fn ast(ana: *Analyzer) *Ast {
     return &ana.module().ast;
 }
 
 pub fn handleFnDef(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    try ana.handleBlock(ana.ast().node_data[node_idx].fn_def.block);
+    try ana.handleBlock(ana.ast().nodeData(node_idx).fn_def.block);
 }
 
 pub fn handleBlock(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const range = ana.ast().node_data[node_idx].sub_range;
-    for (range.extra_start..range.extra_end) |extra_idx| {
-        const child_idx = ana.ast().extra_data[extra_idx];
+    const range = ana.ast().nodeData(node_idx).sub_range;
+    for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra_idx| {
+        const child_idx: NodeIndex = @enumFromInt(ana.ast().extra_data[extra_idx]);
 
-        switch (ana.ast().node_tags[child_idx]) {
+        switch (ana.ast().nodeTag(child_idx)) {
             // .instruction => try ana.handleInstruction(child_idx),
             .instruction => @panic("NO"),
             .label => try ana.handleLabel(child_idx),
@@ -69,7 +69,7 @@ pub fn handleBlock(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 }
 
 pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const opcode_name = ana.ast().parseIdentifier(ana.ast().node_tokens[node_idx]);
+    const opcode_name = ana.ast().parseIdentifier(ana.ast().nodeToken(node_idx));
 
     const opcode = get_opcode: {
         inline for (std.meta.fields(Instruction)) |field| {
@@ -85,19 +85,19 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             const mnemonic = field.name[0..3];
 
             if (std.mem.eql(u8, mnemonic, opcode_name)) {
-                if (field.type == void and ana.ast().isToken(ana.ast().node_tokens[node_idx] + 1, .new_line)) {
+                if (field.type == void and ana.ast().isToken(ana.ast().nodeToken(node_idx) + 1, .new_line)) {
                     break :get_opcode curr_opcode;
                 }
                 if (field.type == Instruction.Imm816) {
-                    if (ana.ast().areTokens(ana.ast().node_tokens[node_idx] + 1, &.{ .int_literal, .new_line })) {
+                    if (ana.ast().areTokens(ana.ast().nodeToken(node_idx) + 1, &.{ .int_literal, .new_line })) {
                         break :get_opcode curr_opcode;
                     }
-                    if (ana.ast().areTokens(ana.ast().node_tokens[node_idx] + 1, &.{ .ident, .new_line })) {
+                    if (ana.ast().areTokens(ana.ast().nodeToken(node_idx) + 1, &.{ .ident, .new_line })) {
                         break :get_opcode curr_opcode;
                     }
                 }
                 if (field.type == Instruction.Addr16) {
-                    if (ana.ast().areTokens(ana.ast().node_tokens[node_idx] + 1, &.{ .ident, .new_line })) {
+                    if (ana.ast().areTokens(ana.ast().nodeToken(node_idx) + 1, &.{ .ident, .new_line })) {
                         break :get_opcode curr_opcode;
                     }
                 }
@@ -105,7 +105,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 if (curr_opcode == .bra or
                     curr_opcode == .jmp or curr_opcode == .jml or curr_opcode == .jsr or curr_opcode == .jsl)
                 {
-                    if (ana.ast().areTokens(ana.ast().node_tokens[node_idx] + 1, &.{ .ident, .new_line })) {
+                    if (ana.ast().areTokens(ana.ast().nodeToken(node_idx) + 1, &.{ .ident, .new_line })) {
                         break :get_opcode curr_opcode;
                     }
                 }
@@ -115,7 +115,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         try ana.sema.errors.append(ana.sema.allocator, .{
             .tag = .invalid_opcode,
             .ast = ana.ast(),
-            .token = ana.ast().node_tokens[node_idx],
+            .token = ana.ast().nodeToken(node_idx),
         });
         return;
     };
@@ -131,7 +131,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 unreachable;
             };
 
-            const operand_token = ana.ast().node_tokens[node_idx] + 1;
+            const operand_token = ana.ast().nodeToken(node_idx) + 1;
 
             const size_type = opcode.sizeType();
             const curr_size = switch (size_type) {
@@ -155,7 +155,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             }
 
             if (field.type == Instruction.Imm816) {
-                if (ana.ast().token_tags[operand_token] == .int_literal) {
+                if (ana.ast().tokenTag(operand_token) == .int_literal) {
                     if (curr_size == .@"8bit") {
                         const value = try ana.sema.parseInt(u8, ana.ast(), operand_token);
                         break :get_instr .{ @unionInit(Instruction, field.name, .{ .imm8 = value }), null };
@@ -166,7 +166,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                     }
                 }
 
-                if (ana.ast().token_tags[operand_token] == .ident and ana.ast().token_tags[operand_token + 1] == .new_line) {
+                if (ana.ast().tokenTag(operand_token) == .ident and ana.ast().tokenTag(operand_token + 1) == .new_line) {
                     const value_sym, _ = try ana.sema.resolveSymbol(ana.ast(), operand_token, ana.symbol_location.module);
                     switch (value_sym.*) {
                         .constant => |const_sym| {
@@ -226,7 +226,7 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
             }
             if (field.type == Instruction.Addr16) {
-                if (ana.ast().token_tags[operand_token] == .ident and ana.ast().token_tags[operand_token + 1] == .new_line) {
+                if (ana.ast().tokenTag(operand_token) == .ident and ana.ast().tokenTag(operand_token + 1) == .new_line) {
                     const value_sym_loc: SymbolLocation = .{
                         .module = ana.symbol_location.module,
                         .name = ana.ast().parseIdentifier(operand_token),
@@ -313,11 +313,11 @@ pub fn handleInstruction(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 }
 
 pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const label_token = ana.ast().node_tokens[node_idx];
+    const label_token = ana.ast().nodeToken(node_idx);
     const label = ana.ast().parseIdentifier(label_token);
 
     if (ana.module().symbol_map.get(label)) |existing_sym_idx| {
-        const existing_sym = &ana.sema.symbols.items[existing_sym_idx];
+        const existing_sym = ana.sema.getSymbol(existing_sym_idx);
 
         try ana.sema.errors.append(ana.sema.allocator, .{
             .tag = .duplicate_label,
@@ -328,7 +328,7 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             .tag = .existing_symbol,
             .is_note = true,
             .ast = ana.ast(),
-            .token = ana.ast().node_tokens[existing_sym.common().node],
+            .token = ana.ast().nodeToken(existing_sym.common().node),
         });
         return error.AnalyzeFailed;
     }
@@ -348,7 +348,7 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 .tag = .existing_label,
                 .is_note = true,
                 .ast = ana.ast(),
-                .token = ana.ast().node_tokens[ir.node],
+                .token = ana.ast().nodeToken(ir.node),
             });
             return error.AnalyzeFailed;
         }
@@ -361,12 +361,12 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 }
 
 fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const data = ana.ast().node_data[node_idx].assign_statement;
+    const data = ana.ast().nodeData(node_idx).assign_statement;
 
-    const target_ident = ana.ast().node_tokens[node_idx];
+    const target_ident = ana.ast().nodeToken(node_idx);
 
     const target: union(enum) { builtin: BuiltinVar, symbol: SymbolIndex } = get_target: {
-        if (ana.ast().token_tags[target_ident] == .builtin_ident) {
+        if (ana.ast().tokenTag(target_ident) == .builtin_ident) {
             // Built-in variable
             if (BuiltinVar.get(ana.ast().parseIdentifier(target_ident))) |builtin| {
                 break :get_target .{ .builtin = builtin };
@@ -374,7 +374,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 try ana.sema.errors.append(ana.sema.allocator, .{
                     .tag = .invalid_builtin,
                     .ast = ana.ast(),
-                    .token = ana.ast().node_tokens[node_idx],
+                    .token = ana.ast().nodeToken(node_idx),
                 });
                 return error.AnalyzeFailed;
             }
@@ -386,7 +386,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     const target_type = get_type: switch (target) {
         .builtin => |builtin| break :get_type builtin.type,
         .symbol => |symbol_idx| {
-            const target_symbol = &ana.sema.symbols.items[symbol_idx];
+            const target_symbol = ana.sema.getSymbol(symbol_idx);
             break :get_type switch (target_symbol.*) {
                 .constant => |const_sym| const_sym.type,
                 .variable => |var_sym| var_sym.type,
@@ -409,7 +409,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 
     const opt_register_type = get_register: {
         if (value_expr != .register) {
-            if (data.intermediate_register == Ast.null_token) {
+            if (data.intermediate_register == .none) {
                 break :get_register null;
             }
 
@@ -538,7 +538,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .expected_intermediate_register,
                         .ast = ana.ast(),
-                        .token = ana.ast().node_tokens[node_idx],
+                        .token = ana.ast().nodeToken(node_idx),
                     });
                     return error.AnalyzeFailed;
                 };
@@ -646,7 +646,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                     try ana.sema.errors.append(ana.sema.allocator, .{
                                         .tag = .expected_intermediate_register,
                                         .ast = ana.ast(),
-                                        .token = ana.ast().node_tokens[node_idx],
+                                        .token = ana.ast().nodeToken(node_idx),
                                     });
                                     return error.AnalyzeFailed;
                                 };
@@ -676,7 +676,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                 try ana.sema.errors.append(ana.sema.allocator, .{
                                     .tag = .expected_intermediate_register,
                                     .ast = ana.ast(),
-                                    .token = ana.ast().node_tokens[node_idx],
+                                    .token = ana.ast().nodeToken(node_idx),
                                 });
                                 return error.AnalyzeFailed;
                             };
@@ -810,13 +810,13 @@ fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fi
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .fields_cross_register_boundry,
                         .ast = ana.ast(),
-                        .token = ana.ast().node_tokens[field.node_idx],
+                        .token = ana.ast().nodeToken(field.node_idx),
                         .extra = .{ .bit_size = 8 },
                     });
                     return error.AnalyzeFailed;
                 }
 
-                const target_symbol = &ana.sema.symbols.items[symbol_idx];
+                const target_symbol = ana.sema.getSymbol(symbol_idx);
                 const target_type = switch (target_symbol.*) {
                     .variable => |var_sym| var_sym.type,
                     .register => |reg_sym| reg_sym.type,
@@ -827,7 +827,7 @@ fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fi
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .expected_mod_register_size,
                         .ast = ana.ast(),
-                        .token = ana.ast().node_tokens[field.node_idx],
+                        .token = ana.ast().nodeToken(field.node_idx),
                         .extra = .{ .expected_register_size = .{
                             .expected = target_type.size() * 8,
                             .actual = @sizeOf(T) * 8,
@@ -854,11 +854,11 @@ fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fi
 }
 
 fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const target_ident = ana.ast().node_tokens[node_idx];
+    const target_ident = ana.ast().nodeToken(node_idx);
     const target_name = ana.ast().tokenSource(target_ident);
 
-    const param_range = ana.ast().node_data[node_idx].sub_range;
-    const params = ana.ast().extra_data[param_range.extra_start..param_range.extra_end];
+    const param_range = ana.ast().nodeData(node_idx).sub_range;
+    const params: []const NodeIndex = @ptrCast(ana.ast().extra_data[@intFromEnum(param_range.extra_start)..@intFromEnum(param_range.extra_end)]);
 
     if (target_name[0] == '@') {
         // Built-in call
@@ -867,7 +867,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 try ana.sema.errors.append(ana.sema.allocator, .{
                     .tag = .expected_arguments,
                     .ast = ana.ast(),
-                    .token = ana.ast().node_tokens[node_idx],
+                    .token = ana.ast().nodeToken(node_idx),
                     .extra = .{ .arguments = .{
                         .expected = builtin.param_count,
                         .actual = @intCast(params.len),
@@ -881,7 +881,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             try ana.sema.errors.append(ana.sema.allocator, .{
                 .tag = .invalid_builtin,
                 .ast = ana.ast(),
-                .token = ana.ast().node_tokens[node_idx],
+                .token = ana.ast().nodeToken(node_idx),
             });
             return error.AnalyzeFailed;
         }
@@ -901,7 +901,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 try ana.sema.errors.append(ana.sema.allocator, .{
                     .tag = .expected_fn_symbol,
                     .ast = ana.ast(),
-                    .token = ana.ast().node_tokens[node_idx],
+                    .token = ana.ast().nodeToken(node_idx),
                     .extra = .{ .actual_symbol = symbol.* },
                 });
                 return error.AnalyzeFailed;
@@ -911,9 +911,9 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 }
 
 fn handleWhile(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const while_statement = ana.ast().node_data[node_idx].while_statement;
+    const while_statement = ana.ast().nodeData(node_idx).while_statement;
 
-    if (while_statement.condition == Ast.null_node) {
+    if (while_statement.condition == .none) {
         // while (true)
         const loop_label = try std.fmt.allocPrint(ana.sema.allocator, "__while{}_loop", .{ana.while_loops});
         ana.while_loops += 1;

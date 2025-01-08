@@ -104,8 +104,7 @@ pub fn deinit(link: *Linker) void {
 
 /// Returns the memory-mapped location of a symbol
 pub fn symbolLocation(link: Linker, symbol_idx: SymbolIndex) u24 {
-    const symbol = link.sema.symbols.items[symbol_idx];
-    std.log.info("LINK SYM {}", .{symbol});
+    const symbol = link.sema.getSymbol(symbol_idx).*;
 
     return switch (symbol) {
         .function => |func_sym| memory_map.bankOffsetToAddr(link.mapping_mode, func_sym.bank, func_sym.bank_offset),
@@ -165,7 +164,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
                 try link.errors.append(link.allocator, .{
                     .tag = .no_space_left,
                     .node = var_sym.common.node,
-                    .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
+                    .symbol_location = link.sema.getSymbolLocation(.cast(symbol_idx)),
                     .extra = .{ .no_space_left = .{
                         .addr_min = memory_map.wramOffsetToAddr(var_sym.wram_offset_min),
                         .addr_max = memory_map.wramOffsetToAddr(var_sym.wram_offset_max),
@@ -214,7 +213,7 @@ pub fn resolveRelocations(link: *Linker) !void {
                         try link.errors.append(link.allocator, .{
                             .tag = .offset_too_large_i8,
                             .node = info.source,
-                            .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
+                            .symbol_location = link.sema.getSymbolLocation(.cast(symbol_idx)),
                             .extra = .{ .offset = offset },
                         });
                         continue;
@@ -228,7 +227,7 @@ pub fn resolveRelocations(link: *Linker) !void {
                         try link.errors.append(link.allocator, .{
                             .tag = .different_bank,
                             .node = info.source,
-                            .symbol_location = link.sema.getSymbolLocation(@intCast(symbol_idx)),
+                            .symbol_location = link.sema.getSymbolLocation(.cast(symbol_idx)),
                             .extra = .{ .different_bank = .{
                                 .source_bank = func.bank,
                                 .target_addr = target_addr,
@@ -268,8 +267,8 @@ pub fn detectErrors(link: Linker, writer: std.fs.File.Writer, tty_config: std.io
             unreachable;
         };
 
-        const token_idx = module.ast.node_tokens[err.node];
-        const token_loc = module.ast.token_locs[token_idx];
+        const token_idx = module.ast.nodeToken(err.node);
+        const token_loc = module.ast.tokenLoc(token_idx);
         const src_loc = std.zig.findLineColumn(module.source, token_loc.start);
 
         const args = .{ module.source_path, src_loc.line + 1, src_loc.column + 1 };
@@ -356,7 +355,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
         const src_reader = src_fbs.reader();
 
         for (module.symbol_map.keys(), module.symbol_map.values()) |symbol_name, symbol_idx| {
-            const symbol = link.sema.symbols.items[symbol_idx];
+            const symbol = link.sema.getSymbol(symbol_idx).*;
             const is_vector = symbol_name[0] == '@';
 
             // Usually format module@symbol, except for vectors which would have a double @
@@ -368,7 +367,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
 
             switch (symbol) {
                 .function => |func_sym| {
-                    src_fbs.pos = module.ast.token_locs[module.ast.node_tokens[func_sym.common.node]].start;
+                    src_fbs.pos = module.ast.tokenLoc(module.ast.nodeToken(func_sym.common.node)).start;
 
                     const func_offset = memory_map.bankToRomOffset(link.mapping_mode, func_sym.bank) + func_sym.bank_offset;
 
@@ -382,13 +381,13 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
 
                         // Document comments
                         if (info_idx == 0) {
-                            const fn_def = module.ast.node_data[func_sym.common.node].fn_def;
-                            const data = module.ast.extraData(Ast.Node.FnDefData, fn_def.extra);
+                            const fn_def = module.ast.nodeData(func_sym.common.node).fn_def;
+                            const data = module.ast.readExtraData(Ast.Node.FnDefData, fn_def.extra);
 
-                            for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
-                                const node_idx = module.ast.extra_data[extra_idx];
-                                const token_idx = module.ast.node_tokens[node_idx];
-                                std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                            for (@intFromEnum(data.doc_comment_start)..@intFromEnum(data.doc_comment_end)) |extra_idx| {
+                                const node_idx: NodeIndex = .cast(module.ast.extra_data[extra_idx]);
+                                const token_idx = module.ast.nodeToken(node_idx);
+                                std.debug.assert(module.ast.tokenTag(token_idx) == .doc_comment);
                                 const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
 
                                 if (comments.items.len == 0) {
@@ -403,7 +402,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
 
                         // Regular comments
-                        const info_source = module.ast.token_locs[module.ast.node_tokens[info.source]].start;
+                        const info_source = module.ast.tokenLoc(module.ast.nodeToken(info.source)).start;
                         while (src_fbs.pos < info_source) {
                             const line_start = src_fbs.pos;
                             try src_reader.skipUntilDelimiterOrEof('\n');
@@ -457,13 +456,13 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                 },
                 .constant => |const_sym| {
                     // Document comments
-                    const const_def = module.ast.node_data[const_sym.common.node].const_def;
-                    const data = module.ast.extraData(Ast.Node.ConstDefData, const_def.extra);
+                    const const_def = module.ast.nodeData(const_sym.common.node).const_def;
+                    const data = module.ast.readExtraData(Ast.Node.ConstDefData, const_def.extra);
 
-                    for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
-                        const node_idx = module.ast.extra_data[extra_idx];
-                        const token_idx = module.ast.node_tokens[node_idx];
-                        std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                    for (@intFromEnum(data.doc_comment_start)..@intFromEnum(data.doc_comment_end)) |extra_idx| {
+                        const node_idx: NodeIndex = .cast(module.ast.extra_data[extra_idx]);
+                        const token_idx = module.ast.nodeToken(node_idx);
+                        std.debug.assert(module.ast.tokenTag(token_idx) == .doc_comment);
                         const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
 
                         var iter: WordWrapIter = .{ .line = doc_comment };
@@ -479,13 +478,13 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                     defer comments.clearRetainingCapacity();
 
                     // Document comments
-                    const var_def = module.ast.node_data[var_sym.common.node].var_def;
-                    const data = module.ast.extraData(Ast.Node.VarDefData, var_def.extra);
+                    const var_def = module.ast.nodeData(var_sym.common.node).var_def;
+                    const data = module.ast.readExtraData(Ast.Node.VarDefData, var_def.extra);
 
-                    for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
-                        const node_idx = module.ast.extra_data[extra_idx];
-                        const token_idx = module.ast.node_tokens[node_idx];
-                        std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                    for (@intFromEnum(data.doc_comment_start)..@intFromEnum(data.doc_comment_end)) |extra_idx| {
+                        const node_idx: NodeIndex = .cast(module.ast.extra_data[extra_idx]);
+                        const token_idx = module.ast.nodeToken(node_idx);
+                        std.debug.assert(module.ast.tokenTag(token_idx) == .doc_comment);
                         const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
 
                         var iter: WordWrapIter = .{ .line = doc_comment };
@@ -514,13 +513,13 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                     defer comments.clearRetainingCapacity();
 
                     // Document comments
-                    const reg_def = module.ast.node_data[reg_sym.common.node].reg_def;
-                    const data = module.ast.extraData(Ast.Node.RegDefData, reg_def.extra);
+                    const reg_def = module.ast.nodeData(reg_sym.common.node).reg_def;
+                    const data = module.ast.readExtraData(Ast.Node.RegDefData, reg_def.extra);
 
-                    for (data.doc_comment_start..data.doc_comment_end) |extra_idx| {
-                        const node_idx = module.ast.extra_data[extra_idx];
-                        const token_idx = module.ast.node_tokens[node_idx];
-                        std.debug.assert(module.ast.token_tags[token_idx] == .doc_comment);
+                    for (@intFromEnum(data.doc_comment_start)..@intFromEnum(data.doc_comment_end)) |extra_idx| {
+                        const node_idx: NodeIndex = .cast(module.ast.extra_data[extra_idx]);
+                        const token_idx = module.ast.nodeToken(node_idx);
+                        std.debug.assert(module.ast.tokenTag(token_idx) == .doc_comment);
                         const doc_comment = std.mem.trim(u8, module.ast.tokenSource(token_idx)["///".len..], " \t\n\r");
 
                         var iter: WordWrapIter = .{ .line = doc_comment };
