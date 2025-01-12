@@ -123,10 +123,15 @@ const FunctionBuilder = struct {
                 .load_variable => try b.handleLoadVariable(ir),
                 .store_variable => try b.handleStoreVariable(ir),
                 .zero_variable => try b.handleZeroVariable(ir),
+                .and_value => try b.handleAndValue(ir),
+                .and_variable => try b.handleAndVariable(ir),
                 .or_value => try b.handleOrValue(ir),
                 .or_variable => try b.handleOrVariable(ir),
                 .shift_accum_left => try b.handleShiftAccumLeft(ir),
                 .shift_accum_right => try b.handleShiftAccumRight(ir),
+                .rotate_accum_left => try b.handleRotateAccumLeft(ir),
+                .rotate_accum_right => try b.handleRotateAccumRight(ir),
+                .clear_bits => try b.handleClearBits(ir),
                 .call => try b.handleCall(ir),
                 .branch => try b.handleBranch(ir),
                 .label => try b.handleLabel(ir),
@@ -355,6 +360,45 @@ const FunctionBuilder = struct {
             .source = ir.node,
         });
     }
+    fn handleAndValue(b: *FunctionBuilder, ir: Ir) !void {
+        const value = ir.tag.and_value;
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = .{ .and_imm = value },
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+    }
+    fn handleAndVariable(b: *FunctionBuilder, ir: Ir) !void {
+        const variable = ir.tag.and_variable;
+        const target_symbol = b.sema.getSymbol(variable.symbol).*;
+
+        const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+            .{ .{ .and_addr16 = undefined }, .{
+                .type = .addr16,
+                .target_symbol = variable.symbol,
+                .target_offset = variable.offset,
+            } }
+        else
+            .{ .{ .and_addr24 = undefined }, .{
+                .type = .addr24,
+                .target_symbol = variable.symbol,
+                .target_offset = variable.offset,
+            } };
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = instr,
+            .reloc = reloc,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+    }
     fn handleShiftAccumLeft(b: *FunctionBuilder, ir: Ir) !void {
         const shift = ir.tag.shift_accum_left;
 
@@ -382,6 +426,59 @@ const FunctionBuilder = struct {
                 .source = ir.node,
             });
         }
+    }
+    fn handleRotateAccumLeft(b: *FunctionBuilder, ir: Ir) !void {
+        const rotate = ir.tag.rotate_accum_left;
+
+        for (0..rotate) |_| {
+            try b.instructions.append(b.sema.allocator, .{
+                .instr = .rol_accum,
+
+                .mem_size = b.mem_size,
+                .idx_size = b.idx_size,
+
+                .source = ir.node,
+            });
+        }
+    }
+    fn handleRotateAccumRight(b: *FunctionBuilder, ir: Ir) !void {
+        const rotate = ir.tag.rotate_accum_right;
+
+        for (0..rotate) |_| {
+            try b.instructions.append(b.sema.allocator, .{
+                .instr = .ror_accum,
+
+                .mem_size = b.mem_size,
+                .idx_size = b.idx_size,
+
+                .source = ir.node,
+            });
+        }
+    }
+    fn handleClearBits(b: *FunctionBuilder, ir: Ir) !void {
+        const clear_bits = ir.tag.clear_bits;
+
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = .{ .lda_imm = clear_bits.mask },
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = .{ .trb_addr16 = undefined },
+            .reloc = .{
+                .type = .addr16,
+                .target_symbol = clear_bits.symbol,
+                .target_offset = clear_bits.offset,
+            },
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = ir.node,
+        });
     }
     fn handleLabel(b: *FunctionBuilder, ir: Ir) !void {
         try b.labels.put(b.sema.allocator, ir.tag.label, @intCast(b.instructions.items.len));

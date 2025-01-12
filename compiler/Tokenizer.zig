@@ -24,7 +24,6 @@ pub const Token = struct {
         ident,
         builtin_ident,
         int_literal,
-        dot_literal,
         doc_comment,
 
         keyword_module,
@@ -51,7 +50,6 @@ pub const Token = struct {
                 .ident,
                 .builtin_ident,
                 .int_literal,
-                .dot_literal,
                 .doc_comment,
                 => null,
 
@@ -92,7 +90,6 @@ pub const Token = struct {
                 .ident => "an identifier",
                 .builtin_ident => "a built-in identifier",
                 .int_literal => "a number literal",
-                .dot_literal => "a dot-literal",
                 .doc_comment => "a document comment",
                 else => unreachable,
             };
@@ -143,14 +140,12 @@ pub fn next(lexer: *Tokenizer) Token {
         start,
         ident,
         slash,
-        period,
         colon,
         comment,
         doc_comment,
         dec_int,
         hex_int,
         bin_int,
-        dot_lit,
     };
 
     var state: State = .start;
@@ -212,7 +207,9 @@ pub fn next(lexer: *Tokenizer) Token {
                     state = .slash;
                 },
                 '.' => {
-                    state = .period;
+                    token.tag = .period;
+                    lexer.index += 1;
+                    break;
                 },
                 ',' => {
                     token.tag = .comma;
@@ -287,17 +284,6 @@ pub fn next(lexer: *Tokenizer) Token {
                 else => break,
             },
 
-            .period => switch (c) {
-                'a'...'z', 'A'...'Z' => {
-                    token.tag = .dot_literal;
-                    state = .dot_lit;
-                },
-                else => {
-                    token.tag = .period;
-                    break;
-                },
-            },
-
             .colon => switch (c) {
                 ':' => {
                     token.tag = .double_colon;
@@ -343,11 +329,6 @@ pub fn next(lexer: *Tokenizer) Token {
 
             .bin_int => switch (c) {
                 '0'...'1' => {},
-                else => break,
-            },
-
-            .dot_lit => switch (c) {
-                'a'...'z', 'A'...'Z', '0'...'9', '_' => {},
                 else => break,
             },
         }

@@ -1010,7 +1010,7 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
         },
         .expr_enum_value => {
             const value_lit = ast.nodeToken(node_idx);
-            const literal_name = ast.tokenSource(value_lit)[1..];
+            const literal_name = ast.parseIdentifier(value_lit);
 
             switch (target_type) {
                 .raw => |payload| switch (payload) {
@@ -1019,7 +1019,7 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
                             .tag = .expected_enum_field_or_decl,
                             .ast = ast,
                             .token = value_lit,
-                            .extra = .{ .expected_enum_field_or_decl = target_type },
+                            .extra = .{ .type = target_type },
                         });
                         return error.AnalyzeFailed;
                     },
@@ -1029,7 +1029,7 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
                             .tag = .expected_enum_field_or_decl,
                             .ast = ast,
                             .token = value_lit,
-                            .extra = .{ .expected_enum_field_or_decl = target_type },
+                            .extra = .{ .type = target_type },
                         });
                         return error.AnalyzeFailed;
                     },
@@ -1047,7 +1047,7 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
                             .tag = .expected_enum_field_or_decl,
                             .ast = ast,
                             .token = value_lit,
-                            .extra = .{ .expected_enum_field_or_decl = target_type },
+                            .extra = .{ .type = target_type },
                         });
                         return error.AnalyzeFailed;
                     },
@@ -1083,7 +1083,7 @@ pub fn resolveExprValue(sema: *Sema, target_type: TypeSymbol, node_idx: NodeInde
                 const field_token = ast.nodeToken(field_idx);
                 const field_data = ast.nodeData(field_idx).expr_init_field;
 
-                const field_name = ast.tokenSource(field_token)[1..];
+                const field_name = ast.parseIdentifier(field_token);
                 const field_type = get_type: {
                     switch (target_type.raw) {
                         .signed_int, .unsigned_int, .comptime_int, .@"enum" => unreachable,
@@ -1418,8 +1418,9 @@ pub const Error = struct {
         // Extra: expected_register_size
         expected_register_size,
         expected_mod_register_size,
-        // Extra: expected_enum_field_or_decl
+        // Extra: type
         expected_enum_field_or_decl,
+        no_members,
         // Extra: unsupported_register
         unsupported_register,
         // Extra: supported_registers
@@ -1470,7 +1471,7 @@ pub const Error = struct {
             expected: u16,
             actual: u16,
         },
-        expected_enum_field_or_decl: TypeSymbol,
+        type: TypeSymbol,
         unsupported_register: struct {
             register: RegisterType,
             message: []const u8,
@@ -1564,7 +1565,7 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
             err.ast.tokenSource(err.token),
             max_int_bitwidth,
         }),
-        .expected_intermediate_register => rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]intermediate register[reset], to hold [" ++ highlight ++ "]non-zero [reset]or [" ++ highlight ++ "]non-register[reset] values", .{err.ast.tokenSource(err.token)}),
+        .expected_intermediate_register => rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]intermediate register[reset], to hold [" ++ highlight ++ "]value being set", .{err.ast.tokenSource(err.token)}),
         .dependency_loop => rich.print(writer, tty_config, "Detected a [" ++ highlight ++ "]dependency loop", .{}),
 
         .duplicate_vector => rich.print(writer, tty_config, "Found duplicate interrupt vector [" ++ highlight ++ "]{s}", .{@tagName(err.extra.vector)}),
@@ -1650,8 +1651,11 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         }),
 
         .expected_enum_field_or_decl => rich.print(writer, tty_config, "Could not find an [" ++ highlight ++ "]enum field[reset] or a [" ++ highlight ++ "]declaration[reset] called [" ++ highlight ++ "]'{s}'[reset] on type [" ++ highlight ++ "]{}[reset]", .{
-            err.ast.tokenSource(err.token)[1..],
-            sema.fmtType(&err.extra.expected_enum_field_or_decl),
+            err.ast.tokenSource(err.token),
+            sema.fmtType(&err.extra.type),
+        }),
+        .no_members => rich.print(writer, tty_config, "Type [" ++ highlight ++ "]{}[reset] has no members", .{
+            sema.fmtType(&err.extra.type),
         }),
 
         .unsupported_register => rich.print(writer, tty_config, "Unsupported [" ++ highlight ++ "]intermediate register {s}[reset], for use with [" ++ highlight ++ "]{s}", .{
@@ -1676,10 +1680,10 @@ fn renderError(sema: Sema, writer: anytype, tty_config: std.io.tty.Config, err: 
         // TODO: Remove the `name` variant
         .unknown_field => switch (err.extra.unknown_field) {
             .name => |name| rich.print(writer, tty_config, "Unknown field [" ++ highlight ++ "]'{s}'[reset], for type [" ++ highlight ++ "]{s}", .{
-                err.ast.tokenSource(err.token)[1..], name,
+                err.ast.tokenSource(err.token), name,
             }),
             .symbol => |*sym| rich.print(writer, tty_config, "Unknown field [" ++ highlight ++ "]'{s}'[reset], for type [" ++ highlight ++ "]{s}", .{
-                err.ast.tokenSource(err.token)[1..], sema.fmtType(sym),
+                err.ast.tokenSource(err.token), sema.fmtType(sym),
             }),
         },
 

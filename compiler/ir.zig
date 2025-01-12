@@ -43,6 +43,14 @@ pub const Ir = struct {
             offset: u16 = 0,
         },
 
+        /// ANDs the accumulator with the value
+        and_value: Instruction.Imm816,
+        /// ANDs the accumulator with the variable
+        and_variable: struct {
+            symbol: SymbolIndex,
+            offset: u16 = 0,
+        },
+
         /// ORs the accumulator with the value
         or_value: Instruction.Imm816,
         /// ORs the accumulator with the variable
@@ -55,6 +63,18 @@ pub const Ir = struct {
         shift_accum_left: u16,
         /// Bit-Shift the value in the accumulator to the right
         shift_accum_right: u16,
+
+        /// Bit-Rotate the value in the accumulator to the left
+        rotate_accum_left: u16,
+        /// Bit-Rotate the value in the accumulator to the right
+        rotate_accum_right: u16,
+
+        /// Sets all bits in the target to 0 where the mask is 1
+        clear_bits: struct {
+            symbol: SymbolIndex,
+            offset: u16 = 0,
+            mask: Instruction.Imm816,
+        },
 
         call: struct {
             target: SymbolIndex,

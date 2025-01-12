@@ -69,7 +69,7 @@ pub const Node = struct {
         block,
 
         /// `data` is `assign_statement`
-        /// `main_token` is the `identifier` of the target
+        /// `main_token` is the `equal`
         assign_statement,
 
         /// `main_token` is the `identifier` of the target
@@ -81,6 +81,10 @@ pub const Node = struct {
 
         /// `main_token` is the `identifier` of the name
         label,
+
+        /// `data` is `sub_range`
+        /// `main_token` is the first `identifier` of the field chain
+        field_access,
 
         /// `main_token` is the `identifier` of the expression
         expr_ident,
@@ -148,8 +152,8 @@ pub const Node = struct {
             doc_comments: ExtraIndex,
         },
         assign_statement: struct {
-            value: NodeIndex,
-            intermediate_register: TokenIndex,
+            target: NodeIndex,
+            extra: ExtraIndex,
         },
         while_statement: struct {
             condition: NodeIndex,
@@ -204,6 +208,10 @@ pub const Node = struct {
     pub const StructFieldData = struct {
         type: NodeIndex,
         value: NodeIndex,
+    };
+    pub const AssignStatementData = struct {
+        value: NodeIndex,
+        intermediate_register: TokenIndex,
     };
 };
 
@@ -406,11 +414,11 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
     };
     return try std.fmt.parseInt(T, int_str[(if (number_base == 10) 0 else 1)..], number_base);
 }
-/// Parses the enum value of an `dot_literal`
+/// Parses the enum value of an enum literal
 pub fn parseEnumLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
-    std.debug.assert(tree.tokenTag(token_idx) == .dot_literal);
+    std.debug.assert(tree.tokenTag(token_idx) == .ident and tree.tokenTag(token_idx.prev()) == .period);
     const enum_str = tree.tokenSource(token_idx);
-    return std.meta.stringToEnum(T, enum_str[1..]) orelse error.UnknownField;
+    return std.meta.stringToEnum(T, enum_str) orelse error.UnknownField;
 }
 
 /// Checks if the index is of the specified token tag

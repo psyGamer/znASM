@@ -246,42 +246,25 @@ pub const TypeSymbol = union(enum) {
                         .signed_int => |other_bits| return other_bits >= bits,
                         .unsigned_int => return false,
                         .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"enum" => |other_backing_type| return other_backing_type.is_signed and other_backing_type.bits >= bits,
-                        .@"packed" => |other_backing_type| return other_backing_type.is_signed and other_backing_type.bits >= bits,
+                        .@"enum", .@"packed" => return false, // Require explicit cast
                     },
                     .unsigned_int => |bits| switch (other_payload) {
                         .signed_int => |other_bits| return other_bits > bits,
                         .unsigned_int => |other_bits| return other_bits >= bits,
                         .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"enum" => |other_backing_type| return other_backing_type.bits + @intFromBool(other_backing_type.is_signed) >= bits,
-                        .@"packed" => |other_backing_type| return other_backing_type.bits + @intFromBool(other_backing_type.is_signed) >= bits,
+                        .@"enum", .@"packed" => return false, // Require explicit cast
                     },
-                    .comptime_int => return true, // Depends on the size of the value
+                    .comptime_int => switch (other_payload) {
+                        .signed_int, .unsigned_int, .comptime_int => return true, // Depends on the size of the value
+                        .@"enum", .@"packed" => return false, // Require explicit cast
+                    },
                     .@"packed" => |backing_type| switch (other_payload) {
-                        .signed_int => |other_bits| return other_bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
-                        .unsigned_int => |other_bits| return backing_type.is_signed and other_bits >= backing_type.bits,
-                        .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"packed" => |other_backing_type| return if (backing_type.is_signed)
-                            other_backing_type.is_signed and other_backing_type.bits >= backing_type.bits
-                        else
-                            other_backing_type.bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
-                        .@"enum" => |other_backing_type| return if (backing_type.is_signed)
-                            other_backing_type.is_signed and other_backing_type.bits >= backing_type.bits
-                        else
-                            other_backing_type.bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
+                        .signed_int, .unsigned_int, .comptime_int, .@"enum" => return true, // Require explicit cast
+                        .@"packed" => |other_backing_type| return backing_type.symbol_index == other_backing_type.symbol_index,
                     },
                     .@"enum" => |backing_type| switch (other_payload) {
-                        .signed_int => |other_bits| return other_bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
-                        .unsigned_int => |other_bits| return backing_type.is_signed and other_bits >= backing_type.bits,
-                        .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"packed" => |other_backing_type| return if (backing_type.is_signed)
-                            other_backing_type.is_signed and other_backing_type.bits >= backing_type.bits
-                        else
-                            other_backing_type.bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
-                        .@"enum" => |other_backing_type| return if (backing_type.is_signed)
-                            other_backing_type.is_signed and other_backing_type.bits >= backing_type.bits
-                        else
-                            other_backing_type.bits >= backing_type.bits + @intFromBool(!backing_type.is_signed),
+                        .signed_int, .unsigned_int, .comptime_int, .@"packed" => return true, // Require explicit cast
+                        .@"enum" => |other_backing_type| return backing_type.symbol_index == other_backing_type.symbol_index,
                     },
                 }
             },

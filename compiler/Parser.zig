@@ -22,8 +22,8 @@ extra_data: std.ArrayListUnmanaged(Ast.CommonIndex) = .empty,
 
 errors: std.ArrayListUnmanaged(Error) = .{},
 
-/// Temporarily stores children of nodes
-scratch: std.ArrayListUnmanaged(NodeIndex) = .empty,
+/// Temporarily store range data for `extra_data`
+scratch: std.ArrayListUnmanaged(Ast.CommonIndex) = .empty,
 
 state_stack: std.ArrayListUnmanaged(struct {
     index: std.meta.Tag(TokenIndex),
@@ -57,7 +57,7 @@ pub fn parseRoot(p: *Parser) ParseError!void {
     _ = root; // autofix
 
     p.skipNewLines();
-    try p.scratch.append(p.allocator, try p.parseModuleDef());
+    try p.scratch.append(p.allocator, @intFromEnum(try p.parseModuleDef()));
 
     var doc_start: ?usize = null;
     while (true) {
@@ -69,11 +69,11 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         }
         if (t == .doc_comment) {
             doc_start = doc_start orelse p.scratch.items.len;
-            try p.scratch.append(p.allocator, try p.addNode(.{
+            try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
                 .tag = .doc_comment,
                 .main_token = @enumFromInt(p.index),
                 .data = undefined,
-            }));
+            })));
             p.index += 1;
             continue;
         }
@@ -95,42 +95,42 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         // Function Definition
         const fn_def = try p.parseFnDef(doc_comments);
         if (fn_def != .none) {
-            try p.scratch.append(p.allocator, fn_def);
+            try p.scratch.append(p.allocator, @intFromEnum(fn_def));
             continue;
         }
 
         // Constant Definition
         const const_def = try p.parseConstDef(doc_comments);
         if (const_def != .none) {
-            try p.scratch.append(p.allocator, const_def);
+            try p.scratch.append(p.allocator, @intFromEnum(const_def));
             continue;
         }
 
         // Variable Definition
         const var_def = try p.parseVarDef(doc_comments);
         if (var_def != .none) {
-            try p.scratch.append(p.allocator, var_def);
+            try p.scratch.append(p.allocator, @intFromEnum(var_def));
             continue;
         }
 
         // Register Definition
         const reg_def = try p.parseRegDef(doc_comments);
         if (reg_def != .none) {
-            try p.scratch.append(p.allocator, reg_def);
+            try p.scratch.append(p.allocator, @intFromEnum(reg_def));
             continue;
         }
 
         // Packed Definition
         const packed_def = try p.parsePackedDef(doc_comments, .top_level);
         if (packed_def != .none) {
-            try p.scratch.append(p.allocator, packed_def);
+            try p.scratch.append(p.allocator, @intFromEnum(packed_def));
             continue;
         }
 
         // Enum Definition
         const enum_def = try p.parseEnumDef(doc_comments, .top_level);
         if (enum_def != .none) {
-            try p.scratch.append(p.allocator, enum_def);
+            try p.scratch.append(p.allocator, @intFromEnum(enum_def));
             continue;
         }
 
@@ -333,11 +333,11 @@ fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
         }
         if (t == .doc_comment) {
             doc_start = doc_start orelse p.scratch.items.len;
-            try p.scratch.append(p.allocator, try p.addNode(.{
+            try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
                 .tag = .doc_comment,
                 .main_token = @enumFromInt(p.index),
                 .data = undefined,
-            }));
+            })));
             p.index += 1;
             continue;
         }
@@ -358,7 +358,7 @@ fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
         // Struct Field
         const field = try p.parseStructField(doc_comments);
         if (field != .none) {
-            try p.scratch.append(p.allocator, field);
+            try p.scratch.append(p.allocator, @intFromEnum(field));
             continue;
         }
         p.index = start_idx;
@@ -428,11 +428,11 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
         }
         if (t == .doc_comment) {
             doc_start = doc_start orelse p.scratch.items.len;
-            try p.scratch.append(p.allocator, try p.addNode(.{
+            try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
                 .tag = .doc_comment,
                 .main_token = @enumFromInt(p.index),
                 .data = undefined,
-            }));
+            })));
             p.index += 1;
             continue;
         }
@@ -462,7 +462,7 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
         // Enum Field
         const field = try p.parseEnumField(doc_comments);
         if (field != .none) {
-            try p.scratch.append(p.allocator, field);
+            try p.scratch.append(p.allocator, @intFromEnum(field));
             continue;
         }
         p.index = start_idx;
@@ -519,7 +519,8 @@ fn parseAccessAttr(p: *Parser) ParseError!NodeIndex {
         return .none;
 
     _ = try p.expectToken(.lparen);
-    const int_literal = try p.expectToken(.dot_literal);
+    _ = try p.expectToken(.period);
+    const int_literal = try p.expectToken(.ident);
     _ = try p.expectToken(.rparen);
 
     return p.addNode(.{
@@ -551,7 +552,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         // Asignment
         const assign = try p.parseAssignStatement();
         if (assign != .none) {
-            try p.scratch.append(p.allocator, assign);
+            try p.scratch.append(p.allocator, @intFromEnum(assign));
             continue;
         }
         p.index = start_idx;
@@ -559,7 +560,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         // Call
         const call = try p.parseCallStatement();
         if (call != .none) {
-            try p.scratch.append(p.allocator, call);
+            try p.scratch.append(p.allocator, @intFromEnum(call));
             continue;
         }
         p.index = start_idx;
@@ -567,7 +568,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         // While
         const @"while" = try p.parseWhileStatement();
         if (@"while" != .none) {
-            try p.scratch.append(p.allocator, @"while");
+            try p.scratch.append(p.allocator, @intFromEnum(@"while"));
             continue;
         }
         p.index = start_idx;
@@ -575,7 +576,7 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         // Label
         const label = try p.parseLabel();
         if (label != .none) {
-            try p.scratch.append(p.allocator, label);
+            try p.scratch.append(p.allocator, @intFromEnum(label));
             continue;
         }
         p.index = start_idx;
@@ -605,14 +606,35 @@ fn parseLabel(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// AssignStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) (DOUBLE_COLON IDENTIFIER)? EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
-fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
-    const ident_target = p.eatToken(.ident) orelse p.eatToken(.builtin_ident) orelse return .none;
-    if (p.eatToken(.double_colon)) |_| {
+/// FieldAccess <- ((IDENTIFIER | BUILTIN_IDENTIFIER) | (IDENTIFIER DOUBLE_COLON IDENTIFIER)) (PERIOD IDENTIFIER)*
+fn parseFieldAccess(p: *Parser) ParseError!NodeIndex {
+    const token_start = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(token_start);
+
+    const ident_main = p.eatToken(.ident) orelse p.eatToken(.builtin_ident) orelse return .none;
+    try p.scratch.append(p.allocator, @intFromEnum(ident_main));
+
+    if (p.tokenTag(ident_main) == .ident and p.eatToken(.double_colon) != null) {
         _ = try p.expectToken(.ident);
     }
 
-    _ = p.eatToken(.equal) orelse return .none;
+    while (p.eatToken(.period)) |_| {
+        try p.scratch.append(p.allocator, @intFromEnum(try p.expectToken(.ident)));
+    }
+
+    return p.addNode(.{
+        .tag = .field_access,
+        .main_token = ident_main,
+        .data = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[token_start..]) },
+    });
+}
+
+/// AssignStatement <- FieldAccess EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
+fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
+    const field_access = try p.parseFieldAccess();
+    if (field_access == .none) return .none;
+
+    const equal = p.eatToken(.equal) orelse return .none;
 
     const expr_value = try p.parseExpr();
     if (expr_value == .none) {
@@ -628,10 +650,13 @@ fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
 
     return try p.addNode(.{
         .tag = .assign_statement,
-        .main_token = ident_target,
+        .main_token = equal,
         .data = .{ .assign_statement = .{
-            .value = expr_value,
-            .intermediate_register = ident_register,
+            .target = field_access,
+            .extra = try p.writeExtraData(Node.AssignStatementData, .{
+                .value = expr_value,
+                .intermediate_register = ident_register,
+            }),
         } },
     });
 }
@@ -654,7 +679,7 @@ fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
             return p.fail(.expected_expr);
         }
 
-        try p.scratch.append(p.allocator, expr_param);
+        try p.scratch.append(p.allocator, @intFromEnum(expr_param));
 
         switch (p.token_tags[p.index]) {
             .comma => p.index += 1,
@@ -713,10 +738,10 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
             .data = undefined,
         });
     }
-    if (p.eatToken(.dot_literal)) |literal| {
+    if (p.eatTokens(&.{ .period, .ident })) |literal| {
         return try p.addNode(.{
             .tag = .expr_enum_value,
-            .main_token = literal,
+            .main_token = literal.next(),
             .data = undefined,
         });
     }
@@ -729,7 +754,7 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
     return .none;
 }
 /// InitExpr  <- PERIOD LBRACE NEW_LINE (InitField)* RBRACE
-/// InitField <- DOT_LITERAL EQUAL Expr COMMA NEW_LINE
+/// InitField <- PERIOD IDENTIFIER EQUAL Expr COMMA NEW_LINE
 fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
     const period = p.eatToken(.period) orelse return .none;
     _ = try p.expectToken(.lbrace);
@@ -741,7 +766,9 @@ fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
     while (true) {
         if (p.eatToken(.rbrace)) |_| break;
 
-        const name_literal = try p.expectToken(.dot_literal);
+        _ = try p.expectToken(.period);
+        const field_ident = try p.expectToken(.ident);
+
         _ = try p.expectToken(.equal);
         const value_expr = try p.parseExpr();
         if (value_expr == .none) {
@@ -753,13 +780,13 @@ fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
         };
         _ = try p.expectToken(.new_line);
 
-        try p.scratch.append(p.allocator, try p.addNode(.{
+        try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
             .tag = .expr_init_field,
-            .main_token = name_literal,
+            .main_token = field_ident,
             .data = .{ .expr_init_field = .{
                 .value = value_expr,
             } },
-        }));
+        })));
     }
 
     return p.addNode(.{
@@ -796,15 +823,15 @@ fn addNode(p: *Parser, node: Node) ParseError!NodeIndex {
     return @enumFromInt(p.nodes.len - 1);
 }
 
-/// Stores a list of sub-nodes into `extra`
-fn writeExtraSubRange(p: *Parser, list: []const NodeIndex) ParseError!Node.SubRange {
+/// Stores a list of sub-nodes into `extra_data`
+fn writeExtraSubRange(p: *Parser, list: []const Ast.CommonIndex) ParseError!Node.SubRange {
     const start: ExtraIndex = @enumFromInt(p.extra_data.items.len);
-    try p.extra_data.appendSlice(p.allocator, @ptrCast(list));
+    try p.extra_data.appendSlice(p.allocator, list);
     const end: ExtraIndex = @enumFromInt(p.extra_data.items.len);
 
     return .{ .extra_start = start, .extra_end = end };
 }
-/// Stores a custom data-type into `extra`
+/// Stores a custom data-type into `extra_data`
 fn writeExtraData(p: *Parser, comptime T: type, value: T) !ExtraIndex {
     const fields = std.meta.fields(T);
 
@@ -841,6 +868,15 @@ fn eatToken(p: *Parser, tag: Token.Tag) ?TokenIndex {
         p.nextToken()
     else
         null;
+}
+fn eatTokens(p: *Parser, tags: []const Token.Tag) ?TokenIndex {
+    if (p.index + tags.len <= p.token_tags.len and std.mem.eql(Token.Tag, p.token_tags[p.index .. p.index + tags.len], tags)) {
+        const result = p.index;
+        p.index += @intCast(tags.len);
+        return @enumFromInt(result);
+    }
+
+    return null;
 }
 fn expectToken(p: *Parser, tag: Token.Tag) ParseError!TokenIndex {
     if (p.token_tags[p.index] != tag) {
