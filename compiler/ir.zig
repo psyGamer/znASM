@@ -9,15 +9,23 @@ const BranchRelocation = @import("CodeGen.zig").BranchRelocation;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 
 pub const Ir = struct {
+    pub const ChangeStatusFlags = struct {
+        carry: ?bool = null,
+        zero: ?bool = null,
+        irq_disable: ?bool = null,
+        decimal: ?bool = null,
+        idx_8bit: ?bool = null,
+        mem_8bit: ?bool = null,
+        overflow: ?bool = null,
+        negative: ?bool = null,
+    };
+
     const Tag = union(enum) {
         instruction: struct {
             instr: Instruction,
             reloc: ?Relocation,
         },
-        change_size: struct {
-            target: Instruction.SizeType,
-            mode: Instruction.SizeMode,
-        },
+        change_status_flags: ChangeStatusFlags,
 
         /// Loads the immedate value into the register
         load_value: struct {
@@ -76,10 +84,12 @@ pub const Ir = struct {
             mask: Instruction.Imm816,
         },
 
+        /// Invokes the target method as a subroutine
         call: struct {
             target: SymbolIndex,
             target_offset: u16 = 0,
         },
+
         branch: BranchRelocation,
 
         label: []const u8,

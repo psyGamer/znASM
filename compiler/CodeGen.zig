@@ -79,6 +79,15 @@ pub fn process(sema: *Sema) !void {
         var builder: FunctionBuilder = .{
             .sema = sema,
             .symbol_idx = .cast(symbol_idx),
+
+            .mem_size = if (symbol.function.calling_convention.status_flags.mem_8bit) |mem_8bit|
+                if (mem_8bit) .@"8bit" else .@"16bit"
+            else
+                .none,
+            .idx_size = if (symbol.function.calling_convention.status_flags.idx_8bit) |idx_8bit|
+                if (idx_8bit) .@"8bit" else .@"16bit"
+            else
+                .none,
         };
         errdefer builder.instructions.deinit(sema.allocator);
         defer builder.labels.deinit(sema.allocator);
@@ -110,15 +119,15 @@ const FunctionBuilder = struct {
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
     /// Size of the A-Register / Memory instructions
-    mem_size: Instruction.SizeMode = .none,
+    mem_size: Instruction.SizeMode,
     /// Size of the X/Y-Registers
-    idx_size: Instruction.SizeMode = .none,
+    idx_size: Instruction.SizeMode,
 
     pub fn build(b: *FunctionBuilder) !void {
         for (b.function().ir) |ir| {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
-                .change_size => try b.handleChangeSize(ir),
+                .change_status_flags => try b.handleChangeStatusFlags(ir),
                 .load_value => try b.handleLoadValue(ir),
                 .load_variable => try b.handleLoadVariable(ir),
                 .store_variable => try b.handleStoreVariable(ir),
@@ -155,40 +164,34 @@ const FunctionBuilder = struct {
             .source = ir.node,
         });
     }
-    fn handleChangeSize(b: *FunctionBuilder, ir: Ir) !void {
-        const change_size = ir.tag.change_size;
+    fn handleChangeStatusFlags(b: *FunctionBuilder, ir: Ir) !void {
+        const change_flags = ir.tag.change_status_flags;
 
-        const curr_mode = switch (change_size.target) {
-            .mem => b.mem_size,
-            .idx => b.idx_size,
-            .none => unreachable,
-        };
-        if (change_size.mode == curr_mode) {
-            return;
+        var set: Instruction.StatusRegister = .{};
+        var clear: Instruction.StatusRegister = .{};
+
+        inline for (std.meta.fields(Instruction.StatusRegister)) |field| {
+            if (@field(change_flags, field.name)) |value| {
+                if (value) {
+                    @field(set, field.name) = true;
+                } else {
+                    @field(clear, field.name) = true;
+                }
+            }
         }
 
-        const flags: Instruction.StatusRegister = .{
-            .mem_8bit = change_size.target == .mem,
-            .idx_8bit = change_size.target == .idx,
-        };
+        if (set != @as(Instruction.StatusRegister, .{})) {
+            try b.emit(ir.node, .{ .sep = set });
+        }
+        if (clear != @as(Instruction.StatusRegister, .{})) {
+            try b.emit(ir.node, .{ .rep = clear });
+        }
 
-        try b.instructions.append(b.sema.allocator, .{
-            .instr = switch (change_size.mode) {
-                .@"8bit" => .{ .sep = flags },
-                .@"16bit" => .{ .rep = flags },
-                .none => unreachable,
-            },
-
-            .mem_size = b.mem_size,
-            .idx_size = b.idx_size,
-
-            .source = ir.node,
-        });
-
-        switch (change_size.target) {
-            .mem => b.mem_size = change_size.mode,
-            .idx => b.idx_size = change_size.mode,
-            .none => unreachable,
+        if (change_flags.mem_8bit) |mem_8bit| {
+            b.mem_size = if (mem_8bit) .@"8bit" else .@"16bit";
+        }
+        if (change_flags.idx_8bit) |idx_8bit| {
+            b.idx_size = if (idx_8bit) .@"8bit" else .@"16bit";
         }
     }
     fn handleLoadValue(b: *FunctionBuilder, ir: Ir) !void {
@@ -513,6 +516,28 @@ const FunctionBuilder = struct {
             .idx_size = b.idx_size,
 
             .source = ir.node,
+        });
+    }
+
+    fn emit(b: *FunctionBuilder, node: NodeIndex, instr: Instruction) !void {
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = instr,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = node,
+        });
+    }
+    fn emitReloc(b: *FunctionBuilder, node: NodeIndex, instr: Instruction, reloc: Relocation) !void {
+        try b.instructions.append(b.sema.allocator, .{
+            .instr = instr,
+            .reloc = reloc,
+
+            .mem_size = b.mem_size,
+            .idx_size = b.idx_size,
+
+            .source = node,
         });
     }
 

@@ -54,18 +54,12 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
     switch (expr) {
         .value, .variable => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
-            ana.ir.appendAssumeCapacity(.{
-                .tag = .{ .change_size = .{
-                    .target = switch (register_type) {
-                        .a8, .a16 => .mem,
-                        .x8, .x16, .y8, .y16 => .idx,
-                    },
-                    .mode = switch (register_type) {
-                        .a8, .x8, .y8 => .@"8bit",
-                        .a16, .x16, .y16 => .@"16bit",
-                    },
-                } },
-                .node = node_idx,
+            try ana.setSizeMode(node_idx, switch (register_type) {
+                .a8, .a16 => .mem,
+                .x8, .x16, .y8, .y16 => .idx,
+            }, switch (register_type) {
+                .a8, .x8, .y8 => .@"8bit",
+                .a16, .x16, .y16 => .@"16bit",
             });
 
             switch (expr) {

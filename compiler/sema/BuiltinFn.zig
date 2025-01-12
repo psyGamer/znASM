@@ -25,16 +25,16 @@ pub fn get(name: []const u8) ?BuiltinFn {
 }
 
 pub const all = [_]BuiltinFn{
-    .{
-        .name = "@setMemorySize",
-        .param_count = 1,
-        .handler_fn = sizeHandler(.mem),
-    },
-    .{
-        .name = "@setIndexSize",
-        .param_count = 1,
-        .handler_fn = sizeHandler(.idx),
-    },
+    // .{
+    //     .name = "@setMemorySize",
+    //     .param_count = 1,
+    //     .handler_fn = sizeHandler(.mem),
+    // },
+    // .{
+    //     .name = "@setIndexSize",
+    //     .param_count = 1,
+    //     .handler_fn = sizeHandler(.idx),
+    // },
     .{
         .name = "@branchAlways",
         .param_count = 1,

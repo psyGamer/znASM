@@ -2,6 +2,7 @@ const std = @import("std");
 const Ast = @import("Ast.zig");
 const Ir = @import("ir.zig").Ir;
 const Sema = @import("Sema.zig");
+const FunctionAnalyzer = @import("sema/FunctionAnalyzer.zig");
 const ExpressionValue = Sema.ExpressionValue;
 const SymbolIndex = Sema.SymbolIndex;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
@@ -57,6 +58,8 @@ pub const Symbol = union(enum) {
         bank: u8,
         /// Offset into the target bank
         bank_offset: u16 = undefined,
+
+        calling_convention: FunctionAnalyzer.CallingConvention,
 
         /// Intermediate representation for instructions
         ir: []const Ir,

@@ -119,6 +119,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     // Built-in module
     try modules.append(allocator, try builtin_module.init(allocator));
     const builtin_mod = &modules.items[0];
+    _ = builtin_mod; // autofix
 
     // User modules
     var has_errors = false;
@@ -153,7 +154,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     defer linker.deinit();
 
     // Generate ROM
-    const fallback_vector_idx = builtin_mod.symbol_map.get(builtin_module.empty_vector_name).?;
+    std.debug.assert(sema.interrupt_vectors.fallback.unpackSymbol() != null);
 
     var rom: Rom = .{
         .header = .{
@@ -173,16 +174,16 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
             .rom_version = 0,
         },
         .vectors = .{
-            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop.unpackSymbol() orelse fallback_vector_idx)),
-            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk.unpackSymbol() orelse fallback_vector_idx)),
-            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort.unpackSymbol() orelse fallback_vector_idx)), // Unused
-            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi.unpackSymbol() orelse fallback_vector_idx)),
-            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq.unpackSymbol() orelse fallback_vector_idx)),
-            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop.unpackSymbol() orelse fallback_vector_idx)),
-            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort.unpackSymbol() orelse fallback_vector_idx)), // Unused
-            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi.unpackSymbol() orelse fallback_vector_idx)),
-            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset.unpackSymbol() orelse fallback_vector_idx)),
-            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk.unpackSymbol() orelse fallback_vector_idx)),
+            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
+            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
+            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
         },
         .banks = linker.rom_bank_data,
     };

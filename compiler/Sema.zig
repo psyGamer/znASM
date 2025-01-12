@@ -109,6 +109,9 @@ const InterruptVectors = struct {
         symbol: SymbolIndex,
     };
 
+    // Should always be implemented by the built-in module
+    fallback: Location = .none,
+
     native_cop: Location = .none,
     native_brk: Location = .none,
     native_abort: Location = .none,
@@ -194,14 +197,6 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
         sema.deinit();
         return null;
     }
-
-    // Also analyze built-in fallback interrupt vector
-    const builtin_mod_idx = sema.module_map.get(builtin_module.module_name).?;
-    const builtin_mod = sema.getModule(builtin_mod_idx);
-    const fallback_vector_sym = sema.getSymbol(builtin_mod.symbol_map.get(builtin_module.empty_vector_name).?);
-
-    // The built-in modules is NEVER allowed to error
-    sema.analyzeSymbol(fallback_vector_sym, .none, builtin_mod_idx) catch unreachable;
 
     return sema;
 }
@@ -312,6 +307,8 @@ fn gatherFunctionSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
             .bank = bank.?,
 
             // To be determined during analyzation
+            .calling_convention = .{},
+
             .ir = &.{},
             .labels = &.{},
             .instructions = &.{},
@@ -545,12 +542,27 @@ fn analyzeFunction(sema: *Sema, fn_sym: *Symbol.Function, module_idx: ModuleInde
     // Mark as done early, to prevent recursion counting as a dependency loop
     fn_sym.common.analyze_status = .done;
 
+    const symbol_idx: SymbolIndex = sema.getModule(fn_sym.common.module_index).symbol_map.values()[@intFromEnum(fn_sym.common.module_symbol_index)];
+    const is_interrupt_vector = check_vectors: {
+        inline for (std.meta.fields(InterruptVectors)) |field| {
+            if (@field(sema.interrupt_vectors, field.name).unpack()) |vector_loc| {
+                if (vector_loc.symbol == symbol_idx) {
+                    break :check_vectors true;
+                }
+            }
+        }
+        break :check_vectors false;
+    };
+
     var analyzer: FunctionAnalyzer = .{
         .sema = sema,
         .symbol = fn_sym,
         .module_idx = module_idx,
+        .is_interrupt_vector = is_interrupt_vector,
     };
     errdefer analyzer.deinit();
+
+    // Interrupt vectors cannot rely on a calling convention
 
     try analyzer.handleFnDef(fn_sym.common.node);
 
@@ -559,6 +571,8 @@ fn analyzeFunction(sema: *Sema, fn_sym: *Symbol.Function, module_idx: ModuleInde
     for (analyzer.ir.items) |ir| {
         std.log.debug(" - {}", .{ir});
     }
+
+    fn_sym.calling_convention = analyzer.calling_conv;
     fn_sym.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
 }
 fn analyzeConstant(sema: *Sema, const_sym: *Symbol.Constant, module_idx: ModuleIndex) AnalyzeError!void {

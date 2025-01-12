@@ -17,10 +17,18 @@ const BuiltinVar = @import("BuiltinVar.zig");
 const Analyzer = @This();
 const Error = Sema.AnalyzeError;
 
+pub const Scope = struct {};
+pub const CallingConvention = struct {
+    status_flags: Ir.ChangeStatusFlags = .{},
+};
+
 sema: *Sema,
 
 symbol: *Symbol.Function,
 module_idx: Sema.ModuleIndex,
+
+/// Interrupt vectors cannot rely on a calling convention
+is_interrupt_vector: bool,
 
 /// List of intermediate instructions, used to generate machine code
 ir: std.ArrayListUnmanaged(Ir) = .empty,
@@ -29,6 +37,10 @@ ir: std.ArrayListUnmanaged(Ir) = .empty,
 mem_size: Instruction.SizeMode = .none,
 /// Size of the X/Y-Registers
 idx_size: Instruction.SizeMode = .none,
+
+calling_conv: CallingConvention = .{},
+
+scope_stack: std.ArrayListUnmanaged(Scope) = .empty,
 
 // Used to generate unique labels for loops
 while_loops: u16 = 0,
@@ -47,11 +59,61 @@ pub inline fn ast(ana: *Analyzer) *Ast {
     return &ana.module().ast;
 }
 
+// Helper functions
+
+pub fn setSizeMode(ana: *Analyzer, node: NodeIndex, target: Instruction.SizeType, mode: Instruction.SizeMode) !void {
+    if (target == .mem and ana.mem_size == mode or
+        target == .idx and ana.idx_size == mode)
+    {
+        // Nothing to do
+        return;
+    }
+
+    // Forward to calling convention
+    if (!ana.is_interrupt_vector and target == .mem and ana.mem_size == .none) {
+        ana.calling_conv.status_flags.mem_8bit = mode == .@"8bit";
+        return;
+    }
+    if (!ana.is_interrupt_vector and target == .idx and ana.idx_size == .none) {
+        ana.calling_conv.status_flags.idx_8bit = mode == .@"8bit";
+        return;
+    }
+
+    // TODO: Clobber register data
+    try ana.ir.append(ana.sema.allocator, .{
+        .tag = .{ .change_status_flags = switch (target) {
+            .mem => .{ .mem_8bit = mode == .@"8bit" },
+            .idx => .{ .idx_8bit = mode == .@"8bit" },
+            else => unreachable,
+        } },
+        .node = node,
+    });
+}
+
+// AST node handling
+
 pub fn handleFnDef(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     try ana.handleBlock(ana.ast().nodeData(node_idx).fn_def.block);
+
+    // Implicit return after function body
+    // Maintain same status flags as for start of function
+    try ana.ir.append(ana.sema.allocator, .{
+        .tag = .{ .change_status_flags = ana.calling_conv.status_flags },
+        .node = node_idx,
+    });
+    try ana.ir.append(ana.sema.allocator, .{
+        .tag = .{ .instruction = .{
+            .instr = .rts,
+            .reloc = null,
+        } },
+        .node = node_idx,
+    });
 }
 
 pub fn handleBlock(ana: *Analyzer, node_idx: NodeIndex) Error!void {
+    try ana.scope_stack.append(ana.sema.allocator, .{});
+    defer _ = ana.scope_stack.pop();
+
     const range = ana.ast().nodeData(node_idx).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra_idx| {
         const child_idx: NodeIndex = @enumFromInt(ana.ast().extra_data[extra_idx]);
@@ -337,15 +399,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 if (value_expr == .value and value_expr.value == 0) {
                     // If an intermediate register exists, use it for the size
                     if (opt_register_type) |register_type| {
-                        try ana.ir.append(ana.sema.allocator, .{
-                            .tag = .{ .change_size = .{
-                                .target = .mem,
-                                .mode = switch (register_type) {
-                                    .a8, .x8, .y8 => .@"8bit",
-                                    .a16, .x16, .y16 => .@"16bit",
-                                },
-                            } },
-                            .node = node_idx,
+                        try ana.setSizeMode(node_idx, switch (register_type) {
+                            .a8, .a16 => .mem,
+                            .x8, .x16, .y8, .y16 => .idx,
+                        }, switch (register_type) {
+                            .a8, .x8, .y8 => .@"8bit",
+                            .a16, .x16, .y16 => .@"16bit",
                         });
                     }
 
@@ -374,18 +433,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 
                     // 1 size change + 2n load/stores
                     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(target_size, register_size) * 2);
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .change_size = .{
-                            .target = switch (register_type) {
-                                .a8, .a16 => .mem,
-                                .x8, .x16, .y8, .y16 => .idx,
-                            },
-                            .mode = switch (register_type) {
-                                .a8, .x8, .y8 => .@"8bit",
-                                .a16, .x16, .y16 => .@"16bit",
-                            },
-                        } },
-                        .node = node_idx,
+                    try ana.setSizeMode(node_idx, switch (register_type) {
+                        .a8, .a16 => .mem,
+                        .x8, .x16, .y8, .y16 => .idx,
+                    }, switch (register_type) {
+                        .a8, .x8, .y8 => .@"8bit",
+                        .a16, .x16, .y16 => .@"16bit",
                     });
 
                     var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
@@ -434,15 +487,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             .packed_fields => |fields| {
                 // If an intermediate register exists, use it for the size
                 if (opt_register_type) |register_type| {
-                    try ana.ir.append(ana.sema.allocator, .{
-                        .tag = .{ .change_size = .{
-                            .target = .mem,
-                            .mode = switch (register_type) {
-                                .a8, .x8, .y8 => .@"8bit",
-                                .a16, .x16, .y16 => .@"16bit",
-                            },
-                        } },
-                        .node = node_idx,
+                    try ana.setSizeMode(node_idx, switch (register_type) {
+                        .a8, .a16 => .mem,
+                        .x8, .x16, .y8, .y16 => .idx,
+                    }, switch (register_type) {
+                        .a8, .x8, .y8 => .@"8bit",
+                        .a16, .x16, .y16 => .@"16bit",
                     });
                 }
 
@@ -653,16 +703,10 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
 
                 // Adjust current memory size mode
-                try ana.ir.append(ana.sema.allocator, .{
-                    .tag = .{ .change_size = .{
-                        .target = .mem,
-                        .mode = switch (register_type) {
-                            .a8 => .@"8bit",
-                            .a16 => .@"16bit",
-                            else => unreachable,
-                        },
-                    } },
-                    .node = node_idx,
+                try ana.setSizeMode(node_idx, .mem, switch (register_type) {
+                    .a8 => .@"8bit",
+                    .a16 => .@"16bit",
+                    else => unreachable,
                 });
 
                 // Values can be optimized by pre-shifting them
@@ -969,7 +1013,13 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         const symbol, const symbol_idx = try ana.sema.resolveSymbol(target_ident, ana.module_idx);
 
         switch (symbol.*) {
-            .function => {
+            .function => |fn_sym| {
+                // TODO: Clobber register data
+                try ana.ir.append(ana.sema.allocator, .{
+                    .tag = .{ .change_status_flags = fn_sym.calling_convention.status_flags },
+                    .node = node_idx,
+                });
+
                 try ana.ir.append(ana.sema.allocator, .{
                     .tag = .{ .call = .{ .target = symbol_idx } },
                     .node = node_idx,

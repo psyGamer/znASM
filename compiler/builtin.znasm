@@ -1,7 +1,7 @@
 module builtin
 
 /// Used as a fallback for when an interrupt vector isn't defiend
-fn empty_vector() {
+fn @fallback() {
     // rti
     while (true) {
         
