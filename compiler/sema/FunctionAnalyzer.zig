@@ -3,6 +3,8 @@ const Ast = @import("../Ast.zig");
 const Module = @import("../Module.zig");
 const NodeIndex = Ast.NodeIndex;
 const Sema = @import("../Sema.zig");
+const ExpressionIndex = Sema.ExpressionIndex;
+const TypeExpressionIndex = Sema.TypeExpressionIndex;
 const Ir = @import("../ir.zig").Ir;
 const Symbol = @import("../symbol.zig").Symbol;
 const SymbolIndex = @import("../Sema.zig").SymbolIndex;
@@ -13,6 +15,7 @@ const Opcode = @import("../instruction.zig").Opcode;
 const Relocation = @import("../CodeGen.zig").Relocation;
 const BuiltinFn = @import("BuiltinFn.zig");
 const BuiltinVar = @import("BuiltinVar.zig");
+const RegisterType = Ir.RegisterType;
 
 const Analyzer = @This();
 const Error = Sema.AnalyzeError;
@@ -132,20 +135,8 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     const label_token = ana.ast().nodeToken(node_idx);
     const label = ana.ast().parseIdentifier(label_token);
 
-    if (ana.module().symbol_map.get(label)) |existing_sym_idx| {
-        const existing_sym = ana.sema.getSymbol(existing_sym_idx);
-
-        try ana.sema.errors.append(ana.sema.allocator, .{
-            .tag = .duplicate_label,
-            .ast = ana.ast(),
-            .token = label_token,
-        });
-        try ana.sema.errors.append(ana.sema.allocator, .{
-            .tag = .existing_symbol,
-            .is_note = true,
-            .ast = ana.ast(),
-            .token = ana.ast().nodeToken(existing_sym.common().node),
-        });
+    if (ana.module().symbol_map.get(label)) |existing_symbol_idx| {
+        try ana.sema.errDuplicateSymbol(label_token, ana.module_idx, label, existing_symbol_idx, .label);
         return error.AnalyzeFailed;
     }
     for (ana.ir.items) |ir| {
@@ -155,17 +146,8 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 
         const existing_label = ir.tag.label;
         if (std.mem.eql(u8, label, existing_label)) {
-            try ana.sema.errors.append(ana.sema.allocator, .{
-                .tag = .duplicate_label,
-                .ast = ana.ast(),
-                .token = label_token,
-            });
-            try ana.sema.errors.append(ana.sema.allocator, .{
-                .tag = .existing_label,
-                .is_note = true,
-                .ast = ana.ast(),
-                .token = ana.ast().nodeToken(ir.node),
-            });
+            try ana.sema.emitError(label_token, ana.module_idx, .duplicate_label, .{label});
+            try ana.sema.emitNote(ana.ast().nodeToken(ir.node), ana.module_idx, .existing_label, .{});
             return error.AnalyzeFailed;
         }
     }
@@ -176,729 +158,857 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     });
 }
 
-const Field = union(enum) {
-    builtin: BuiltinVar,
-    symbol: struct {
-        main_symbol: SymbolIndex,
-        target_type: TypeSymbol,
-        byte_offset: u16,
-
-        /// Offset into a packed struct.
-        /// `std.math.maxInt(u8)` indicates a regular struct
-        bit_offset: u8 = std.math.maxInt(u8),
-    },
-};
-
-fn resolveField(ana: *Analyzer, field_access: NodeIndex) Error!Field {
-    var main_symbol_idx: SymbolIndex = undefined;
-    var current_type: TypeSymbol = undefined;
-
-    const byte_offset: u16 = 0;
-    var bit_offset: u8 = 0;
-    var is_packed: bool = false;
-
-    const field_range = ana.ast().nodeData(field_access).sub_range;
-    for (@intFromEnum(field_range.extra_start)..@intFromEnum(field_range.extra_end)) |extra_idx| {
-        const field_token: Ast.TokenIndex = .cast(ana.ast().extra_data[extra_idx]);
-
-        // Main target symbol
-        if (extra_idx == @intFromEnum(field_range.extra_start)) {
-            if (ana.ast().tokenTag(field_token) == .builtin_ident) {
-                // Built-in variable
-                if (BuiltinVar.get(ana.ast().parseIdentifier(field_token))) |builtin| {
-                    // Built-ins don't support field access
-                    std.debug.assert(extra_idx + 1 == @intFromEnum(field_range.extra_end));
-
-                    return .{ .builtin = builtin };
-                } else {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .invalid_builtin,
-                        .ast = ana.ast(),
-                        .token = ana.ast().nodeToken(field_access),
-                    });
-                    return error.AnalyzeFailed;
-                }
-            } else {
-                // User variable
-                const main_symbol, main_symbol_idx = try ana.sema.resolveSymbol(field_token, ana.module_idx);
-                current_type = switch (main_symbol.*) {
-                    .constant => |const_sym| const_sym.type,
-                    .variable => |var_sym| var_sym.type,
-                    .register => |reg_sym| reg_sym.type,
-                    else => {
-                        try ana.sema.errors.append(ana.sema.allocator, .{
-                            .tag = .expected_const_var_reg_symbol,
-                            .ast = ana.ast(),
-                            .token = ana.ast().nodeToken(field_access),
-                            .extra = .{ .actual_symbol = main_symbol.* },
-                        });
-                        return error.AnalyzeFailed;
-                    },
-                };
-                continue;
-            }
-        }
-
-        // Fields
-        const field_name = ana.ast().parseIdentifier(field_token);
-        current_type = switch (current_type.raw) {
-            .@"packed" => |packed_type_sym| b: {
-                is_packed = true;
-
-                const packed_sym = ana.sema.getSymbol(packed_type_sym.symbol_index).@"packed";
-
-                for (packed_sym.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) {
-                        break :b field.type;
-                    }
-
-                    bit_offset += field.type.bitSize();
-                }
-
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .unknown_field,
-                    .ast = ana.ast(),
-                    .token = field_token,
-                    .extra = .{ .unknown_field = .{ .symbol = current_type } },
-                });
-                return error.AnalyzeFailed;
-            },
-            else => {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .no_members,
-                    .ast = ana.ast(),
-                    .token = ana.ast().nodeToken(field_access),
-                    .extra = .{ .type = current_type },
-                });
-                return error.AnalyzeFailed;
-            },
-        };
-    }
-
-    return .{ .symbol = .{
-        .main_symbol = main_symbol_idx,
-        .target_type = current_type,
-        .byte_offset = byte_offset,
-        .bit_offset = if (is_packed) bit_offset else std.math.maxInt(u8),
-    } };
-}
-
 fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
+    const Target = union(enum) {
+        builtin: BuiltinVar,
+        global: struct {
+            symbol: SymbolIndex,
+            type: TypeExpressionIndex,
+            bit_offset: u16,
+        },
+    };
+
     const assign = ana.ast().nodeData(node_idx).assign_statement;
     const data = ana.ast().readExtraData(Ast.Node.AssignStatementData, assign.extra);
 
-    const target = try ana.resolveField(assign.target);
-    const target_type = switch (target) {
-        .builtin => |builtin| builtin.type,
-        .symbol => |symbol| symbol.target_type,
-    };
+    // Resolve assignment target
+    const target: Target = get_target: {
+        var symbol_idx: SymbolIndex = undefined;
+        var current_type: TypeExpressionIndex = undefined;
+        var bit_offset: u16 = 0;
 
-    const value_expr = try ana.sema.resolveExprValue(target_type, data.value, ana.module_idx);
-    defer value_expr.deinit(ana.sema.allocator);
+        const field_range = ana.ast().nodeData(assign.target).sub_range;
+        for (@intFromEnum(field_range.extra_start)..@intFromEnum(field_range.extra_end)) |extra_idx| {
+            const field_token: Ast.TokenIndex = .cast(ana.ast().extra_data[extra_idx]);
 
-    const opt_register_type = get_register: {
-        if (value_expr != .register) {
-            if (data.intermediate_register == .none) {
-                break :get_register null;
+            // Main target symbol
+            if (extra_idx == @intFromEnum(field_range.extra_start)) {
+                if (ana.ast().tokenTag(field_token) == .builtin_ident) {
+                    // Built-in variable
+                    if (BuiltinVar.get(ana.ast().parseIdentifier(field_token))) |builtin| {
+                        // Built-ins don't support field access
+                        std.debug.assert(extra_idx + 1 == @intFromEnum(field_range.extra_end));
+
+                        break :get_target .{ .builtin = builtin };
+                    } else {
+                        try ana.sema.emitError(field_token, ana.module_idx, .invalid_builtin_var, .{ana.ast().tokenSource(field_token)});
+                        return error.AnalyzeFailed;
+                    }
+                } else {
+                    // User variable
+                    const symbol, symbol_idx = try ana.sema.resolveSymbol(field_token, ana.module_idx);
+                    current_type = switch (symbol.*) {
+                        .constant => |const_sym| const_sym.type,
+                        .variable => |var_sym| var_sym.type,
+                        .register => |reg_sym| reg_sym.type,
+                        else => {
+                            try ana.sema.emitError(field_token, ana.module_idx, .expected_const_var_reg_symbol, .{@tagName(symbol.*)});
+                            return error.AnalyzeFailed;
+                        },
+                    };
+                    continue;
+                }
             }
 
-            const register_name = ana.ast().tokenSource(data.intermediate_register);
-            break :get_register std.meta.stringToEnum(Sema.RegisterType, register_name) orelse {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .invalid_register,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                });
-                return error.AnalyzeFailed;
+            // Fields
+            const field_name = ana.ast().parseIdentifier(field_token);
+            current_type = switch (ana.sema.getTypeExpression(current_type).*) {
+                .@"struct" => |struct_symbol_idx| b: {
+                    const struct_sym = ana.sema.getSymbol(struct_symbol_idx).@"struct";
+                    for (struct_sym.fields) |field| {
+                        if (std.mem.eql(u8, field.name, field_name)) {
+                            break :b field.type;
+                        }
+
+                        bit_offset += field.type.byteSize(ana.sema) * 8;
+                    }
+
+                    try ana.sema.emitError(field_token, ana.module_idx, .unknown_field, .{ field_name, current_type.fmt(ana.sema) });
+                    return error.AnalyzeFailed;
+                },
+                .@"packed" => |packed_symbol_idx| b: {
+                    const packed_sym = ana.sema.getSymbol(packed_symbol_idx).@"packed";
+                    for (packed_sym.fields) |field| {
+                        if (std.mem.eql(u8, field.name, field_name)) {
+                            break :b field.type;
+                        }
+
+                        bit_offset += field.type.bitSize(ana.sema);
+                    }
+
+                    try ana.sema.emitError(field_token, ana.module_idx, .unknown_field, .{ field_name, current_type.fmt(ana.sema) });
+                    return error.AnalyzeFailed;
+                },
+                else => {
+                    try ana.sema.emitError(field_token, ana.module_idx, .no_members, .{current_type.fmt(ana.sema)});
+                    return error.AnalyzeFailed;
+                },
             };
-        } else {
-            break :get_register value_expr.register;
         }
+
+        break :get_target .{ .global = .{
+            .symbol = symbol_idx,
+            .type = current_type,
+            .bit_offset = bit_offset,
+        } };
+    };
+    const target_type: TypeExpressionIndex = switch (target) {
+        .builtin => |builtin| b: {
+            try ana.sema.type_expressions.append(ana.sema.allocator, builtin.type);
+            break :b @enumFromInt(@as(u32, @intCast(ana.sema.type_expressions.items.len - 1)));
+        },
+        .global => |global| global.type,
+    };
+
+    const value_expr: ExpressionIndex = try .resolve(ana.sema, target_type, data.value, ana.module_idx);
+
+    const intermediate_register: RegisterType = get_register: {
+        if (data.intermediate_register == .none) {
+            break :get_register .none;
+        }
+
+        const register_name = ana.ast().parseIdentifier(data.intermediate_register);
+        break :get_register std.meta.stringToEnum(RegisterType, register_name) orelse {
+            try ana.sema.emitError(data.intermediate_register, ana.module_idx, .invalid_intermediate_register, .{register_name});
+            return error.AnalyzeFailed;
+        };
     };
 
     // Forward to built-in implementation
     if (target == .builtin) {
-        if (!std.mem.containsAtLeast(?Sema.RegisterType, target.builtin.allowed_registers, 1, &.{opt_register_type})) {
-            if (opt_register_type) |register_type| {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .unsupported_register,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                    .extra = .{ .unsupported_register = .{
-                        .register = register_type,
-                        .message = target.builtin.name,
-                    } },
-                });
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .supported_registers,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                    .is_note = true,
-                    .extra = .{ .supported_registers = target.builtin.allowed_registers },
-                });
-                return error.AnalyzeFailed;
+        if (!std.mem.containsAtLeast(RegisterType, target.builtin.allowed_registers, 1, &.{intermediate_register})) {
+            if (intermediate_register != .none) {
+                return ana.sema.failUnsupportedIntermediateRegister(data.intermediate_register, ana.module_idx, intermediate_register, target.builtin.allowed_registers, target.builtin.name);
             } else {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_intermediate_register,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                });
+                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_intermediate_register, .{});
                 return error.AnalyzeFailed;
             }
         }
 
-        try target.builtin.write(ana, node_idx, value_expr, opt_register_type);
+        try target.builtin.write(ana, node_idx, value_expr, intermediate_register);
         return;
     }
 
-    const register_size: u8 = if (opt_register_type) |register_type|
-        switch (register_type) {
-            .a8, .x8, .y8 => 1,
-            .a16, .x16, .y16 => 2,
-        }
-    else switch (ana.mem_size) {
-        .none => @panic("TODO"),
-        .@"8bit" => 1,
-        .@"16bit" => 2,
-    };
+    var operations: std.ArrayListUnmanaged(Ir.StoreOperation) = .empty;
+    defer operations.deinit(ana.sema.allocator);
 
-    if (target.symbol.bit_offset == std.math.maxInt(u8)) {
-        // Regular field
-        const target_size = target_type.size();
-        if (value_expr == .register) {
-            if (target_size != register_size) {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_register_size,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                    .extra = .{ .expected_register_size = .{
-                        .expected = target_size * 8,
-                        .actual = register_size * 8,
-                    } },
-                });
-                return error.AnalyzeFailed;
-            }
-        } else {
-            if (target_size % register_size != 0) {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_mod_register_size,
-                    .ast = ana.ast(),
-                    .token = data.intermediate_register,
-                    .extra = .{ .expected_register_size = .{
-                        .expected = target_size * 8,
-                        .actual = register_size * 8,
-                    } },
-                });
-                return error.AnalyzeFailed;
-            }
-        }
+    try ana.storeValue(&operations, target_type, value_expr, target.global.bit_offset, intermediate_register);
 
-        switch (value_expr) {
-            .value, .variable => {
-                // Storing zero doesn't require an intermediate register
-                if (value_expr == .value and value_expr.value == 0) {
-                    // If an intermediate register exists, use it for the size
-                    if (opt_register_type) |register_type| {
-                        try ana.setSizeMode(node_idx, switch (register_type) {
-                            .a8, .a16 => .mem,
-                            .x8, .x16, .y8, .y16 => .idx,
-                        }, switch (register_type) {
-                            .a8, .x8, .y8 => .@"8bit",
-                            .a16, .x16, .y16 => .@"16bit",
-                        });
-                    }
+    // TODO: Validate operations
 
-                    // n stores
-                    try ana.ir.ensureUnusedCapacity(ana.sema.allocator, @divExact(target_size, register_size));
+    try ana.ir.ensureTotalCapacity(ana.sema.allocator, operations.items.len + 1);
+    ana.ir.appendAssumeCapacity(.{
+        .tag = .{ .store = .{
+            .intermediate_register = intermediate_register,
+            .symbol = target.global.symbol,
+            .operations = @intCast(operations.items.len),
+        } },
+        .node = node_idx,
+    });
+    for (operations.items) |op| {
+        ana.ir.appendAssumeCapacity(.{
+            .tag = .{ .store_operation = op },
+            .node = node_idx,
+        });
+    }
 
-                    var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
-                    while (offset < target_size) : (offset += @intCast(register_size * 8)) {
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .zero_variable = .{
-                                .symbol = target.symbol.main_symbol,
-                                .offset = offset + target.symbol.byte_offset,
-                            } },
-                            .node = node_idx,
-                        });
-                    }
-                } else {
-                    const register_type = opt_register_type orelse {
-                        try ana.sema.errors.append(ana.sema.allocator, .{
-                            .tag = .expected_intermediate_register,
-                            .ast = ana.ast(),
-                            .token = ana.ast().nodeToken(node_idx),
-                        });
-                        return error.AnalyzeFailed;
-                    };
+    // const register_size: u8 = if (opt_register_type) |register_type|
+    //     switch (register_type) {
+    //         .a8, .x8, .y8 => 1,
+    //         .a16, .x16, .y16 => 2,
+    //     }
+    // else switch (ana.mem_size) {
+    //     .none => @panic("TODO"),
+    //     .@"8bit" => 1,
+    //     .@"16bit" => 2,
+    // };
 
-                    // 1 size change + 2n load/stores
-                    try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(target_size, register_size) * 2);
-                    try ana.setSizeMode(node_idx, switch (register_type) {
-                        .a8, .a16 => .mem,
-                        .x8, .x16, .y8, .y16 => .idx,
-                    }, switch (register_type) {
-                        .a8, .x8, .y8 => .@"8bit",
-                        .a16, .x16, .y16 => .@"16bit",
-                    });
+    // if (target.symbol.bit_offset == std.math.maxInt(u16)) {
+    //     // Regular field
+    //     const target_size = target_type.size(ana.sema);
+    //     if (value_expr == .register) {
+    //         if (target_size != register_size) {
+    //             try ana.sema.errors.append(ana.sema.allocator, .{
+    //                 .tag = .expected_register_size,
+    //                 .ast = ana.ast(),
+    //                 .token = data.intermediate_register,
+    //                 .extra = .{ .expected_register_size = .{
+    //                     .expected = target_size * 8,
+    //                     .actual = register_size * 8,
+    //                 } },
+    //             });
+    //             return error.AnalyzeFailed;
+    //         }
+    //     } else {
+    //         if (target_size % register_size != 0) {
+    //             try ana.sema.errors.append(ana.sema.allocator, .{
+    //                 .tag = .expected_mod_register_size,
+    //                 .ast = ana.ast(),
+    //                 .token = data.intermediate_register,
+    //                 .extra = .{ .expected_register_size = .{
+    //                     .expected = target_size * 8,
+    //                     .actual = register_size * 8,
+    //                 } },
+    //             });
+    //             return error.AnalyzeFailed;
+    //         }
+    //     }
 
-                    var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
-                    while (offset < target_size) : (offset += @intCast(register_size * 8)) {
-                        switch (value_expr) {
-                            .value => |value| {
-                                ana.ir.appendAssumeCapacity(.{
-                                    .tag = .{
-                                        .load_value = .{
-                                            .register = register_type,
-                                            .value = switch (register_type) {
-                                                .a8, .x8, .y8 => .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
-                                                .a16, .x16, .y16 => .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
-                                            },
-                                        },
-                                    },
-                                    .node = node_idx,
-                                });
-                            },
-                            .variable => |sym_loc| {
-                                ana.ir.appendAssumeCapacity(.{
-                                    .tag = .{
-                                        .load_variable = .{
-                                            .register = register_type,
-                                            .symbol = sym_loc,
-                                            .offset = offset,
-                                        },
-                                    },
-                                    .node = node_idx,
-                                });
-                            },
-                            else => unreachable,
-                        }
+    //     switch (value_expr) {
+    //         .value, .variable => {
+    //             // Storing zero doesn't require an intermediate register
+    //             if (value_expr == .value and value_expr.value == 0) {
+    //                 // If an intermediate register exists, use it for the size
+    //                 if (opt_register_type) |register_type| {
+    //                     try ana.setSizeMode(node_idx, switch (register_type) {
+    //                         .a8, .a16 => .mem,
+    //                         .x8, .x16, .y8, .y16 => .idx,
+    //                     }, switch (register_type) {
+    //                         .a8, .x8, .y8 => .@"8bit",
+    //                         .a16, .x16, .y16 => .@"16bit",
+    //                     });
+    //                 }
 
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .store_variable = .{
-                                .register = register_type,
-                                .symbol = target.symbol.main_symbol,
-                                .offset = offset + target.symbol.byte_offset,
-                            } },
-                            .node = node_idx,
-                        });
-                    }
-                }
-            },
-            .packed_fields => |fields| {
-                // If an intermediate register exists, use it for the size
-                if (opt_register_type) |register_type| {
-                    try ana.setSizeMode(node_idx, switch (register_type) {
-                        .a8, .a16 => .mem,
-                        .x8, .x16, .y8, .y16 => .idx,
-                    }, switch (register_type) {
-                        .a8, .x8, .y8 => .@"8bit",
-                        .a16, .x16, .y16 => .@"16bit",
-                    });
-                }
+    //                 // n stores
+    //                 try ana.ir.ensureUnusedCapacity(ana.sema.allocator, @divExact(target_size, register_size));
 
-                inline for (&.{ u8, u16 }) |T| {
-                    if (register_size == @sizeOf(T)) {
-                        var byte_offset: u8 = 0;
-                        var bit_offset: u8 = 0;
+    //                 var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
+    //                 while (offset < target_size) : (offset += @intCast(register_size * 8)) {
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .zero_variable = .{
+    //                             .symbol = target.symbol.main_symbol,
+    //                             .offset = offset + target.symbol.byte_offset,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+    //                 }
+    //             } else {
+    //                 const register_type = opt_register_type orelse {
+    //                     try ana.sema.errors.append(ana.sema.allocator, .{
+    //                         .tag = .expected_intermediate_register,
+    //                         .ast = ana.ast(),
+    //                         .token = ana.ast().nodeToken(node_idx),
+    //                     });
+    //                     return error.AnalyzeFailed;
+    //                 };
 
-                        var used_symbols: std.ArrayListUnmanaged(PackedSymbol) = .empty;
-                        defer used_symbols.deinit(ana.sema.allocator);
+    //                 // 1 size change + 2n load/stores
+    //                 try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(target_size, register_size) * 2);
+    //                 try ana.setSizeMode(node_idx, switch (register_type) {
+    //                     .a8, .a16 => .mem,
+    //                     .x8, .x16, .y8, .y16 => .idx,
+    //                 }, switch (register_type) {
+    //                     .a8, .x8, .y8 => .@"8bit",
+    //                     .a16, .x16, .y16 => .@"16bit",
+    //                 });
 
-                        while (byte_offset < target_size) : (byte_offset += @sizeOf(T)) {
-                            var curr_value: T = 0;
-                            used_symbols.clearRetainingCapacity();
+    //                 var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
+    //                 while (offset < target_size) : (offset += @intCast(register_size * 8)) {
+    //                     switch (value_expr) {
+    //                         .value => |value| {
+    //                             ana.ir.appendAssumeCapacity(.{
+    //                                 .tag = .{
+    //                                     .load_value = .{
+    //                                         .register = register_type,
+    //                                         .value = switch (register_type) {
+    //                                             .a8, .x8, .y8 => .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
+    //                                             .a16, .x16, .y16 => .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
+    //                                         },
+    //                                     },
+    //                                 },
+    //                                 .node = node_idx,
+    //                             });
+    //                         },
+    //                         .variable => |sym_loc| {
+    //                             ana.ir.appendAssumeCapacity(.{
+    //                                 .tag = .{
+    //                                     .load_variable = .{
+    //                                         .register = register_type,
+    //                                         .symbol = sym_loc,
+    //                                         .offset = offset,
+    //                                     },
+    //                                 },
+    //                                 .node = node_idx,
+    //                             });
+    //                         },
+    //                         else => unreachable,
+    //                     }
 
-                            try ana.resolvePackedFields(T, node_idx, fields, &curr_value, &used_symbols, byte_offset, &bit_offset, 0);
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .store_variable = .{
+    //                             .register = register_type,
+    //                             .symbol = target.symbol.main_symbol,
+    //                             .offset = offset + target.symbol.byte_offset,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+    //                 }
+    //             }
+    //         },
+    //         .struct_fields => |fields| {
+    //             // If an intermediate register exists, use it for the size
+    //             if (opt_register_type) |register_type| {
+    //                 try ana.setSizeMode(node_idx, switch (register_type) {
+    //                     .a8, .a16 => .mem,
+    //                     .x8, .x16, .y8, .y16 => .idx,
+    //                 }, switch (register_type) {
+    //                     .a8, .x8, .y8 => .@"8bit",
+    //                     .a16, .x16, .y16 => .@"16bit",
+    //                 });
+    //             }
 
-                            if (used_symbols.items.len == 0) {
-                                // No variables involved
-                                if (curr_value == 0) {
-                                    try ana.ir.append(ana.sema.allocator, .{
-                                        .tag = .{ .zero_variable = .{
-                                            .symbol = target.symbol.main_symbol,
-                                            .offset = byte_offset + target.symbol.byte_offset,
-                                        } },
-                                        .node = node_idx,
-                                    });
-                                } else {
-                                    const register_type = opt_register_type orelse {
-                                        try ana.sema.errors.append(ana.sema.allocator, .{
-                                            .tag = .expected_intermediate_register,
-                                            .ast = ana.ast(),
-                                            .token = ana.ast().nodeToken(node_idx),
-                                        });
-                                        return error.AnalyzeFailed;
-                                    };
+    //             var byte_offset: u16 = 0;
+    //             while (byte_offset < target_size) : (byte_offset += @intCast(register_size)) {
+    //                 switch (register_size) {
+    //                     1 => {
+    //                         const field, const field_offset = get_field: {
+    //                             var offset: u16 = 0;
+    //                             for (fields) |field| {
+    //                                 if (byte_offset >= offset and byte_offset < offset + field.byte_size) {
+    //                                     break :get_field .{ field, offset };
+    //                                 }
+    //                                 offset += field.byte_size;
+    //                             }
 
-                                    try ana.ir.append(ana.sema.allocator, .{
-                                        .tag = .{ .load_value = .{
-                                            .register = register_type,
-                                            .value = if (T == u8)
-                                                .{ .imm8 = curr_value }
-                                            else
-                                                .{ .imm16 = curr_value },
-                                        } },
-                                        .node = node_idx,
-                                    });
-                                    try ana.ir.append(ana.sema.allocator, .{
-                                        .tag = .{ .store_variable = .{
-                                            .register = register_type,
-                                            .symbol = target.symbol.main_symbol,
-                                            .offset = byte_offset + target.symbol.byte_offset,
-                                        } },
-                                        .node = node_idx,
-                                    });
-                                }
-                            } else {
-                                // Some variables involved
-                                const register_type = opt_register_type orelse {
-                                    try ana.sema.errors.append(ana.sema.allocator, .{
-                                        .tag = .expected_intermediate_register,
-                                        .ast = ana.ast(),
-                                        .token = ana.ast().nodeToken(node_idx),
-                                    });
-                                    return error.AnalyzeFailed;
-                                };
-                                if (register_type != .a8 and register_type != .a16) {
-                                    try ana.sema.errors.append(ana.sema.allocator, .{
-                                        .tag = .unsupported_register,
-                                        .ast = ana.ast(),
-                                        .token = data.intermediate_register,
-                                        .extra = .{ .unsupported_register = .{
-                                            .register = register_type,
-                                            .message = "object-initializer including variables",
-                                        } },
-                                    });
-                                    try ana.sema.errors.append(ana.sema.allocator, .{
-                                        .tag = .supported_registers,
-                                        .ast = ana.ast(),
-                                        .token = data.intermediate_register,
-                                        .is_note = true,
-                                        .extra = .{ .supported_registers = &.{ .a8, .a16 } },
-                                    });
-                                    return error.AnalyzeFailed;
-                                }
+    //                             unreachable;
+    //                         };
 
-                                // Shift in variables
-                                var i: u8 = @intCast(used_symbols.items.len - 1);
-                                while (true) : (i -= 1) {
-                                    const curr_symbol = used_symbols.items[i];
+    //                         // Storing zero doesn't require an intermediate register
+    //                         if (field.value == .value and field.value.value == 0) {
+    //                             try ana.ir.append(ana.sema.allocator, .{
+    //                                 .tag = .{ .zero_variable = .{
+    //                                     .symbol = target.symbol.main_symbol,
+    //                                     .offset = target.symbol.byte_offset + byte_offset,
+    //                                 } },
+    //                                 .node = node_idx,
+    //                             });
+    //                         } else {}
+    //                     },
+    //                     2 => {},
+    //                     else => unreachable,
+    //                 }
+    //             }
 
-                                    if (i == used_symbols.items.len - 1) {
-                                        // First variable
-                                        try ana.ir.append(ana.sema.allocator, .{
-                                            .tag = .{ .load_variable = .{
-                                                .register = register_type,
-                                                .symbol = curr_symbol.symbol,
-                                                .offset = curr_symbol.byte_offset,
-                                            } },
-                                            .node = node_idx,
-                                        });
-                                    } else {
-                                        // Other variable
-                                        const prev_symbol = used_symbols.items[i + 1];
+    //             for (fields) |field| {
+    //                 // Storing zero doesn't require an intermediate register
+    //                 if (field.value == .value and field.value.value == 0) {
+    //                     // n stores
+    //                     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, @divExact(field.byte_size, register_size));
 
-                                        try ana.ir.append(ana.sema.allocator, .{
-                                            .tag = .{ .shift_accum_left = prev_symbol.shift_offset - curr_symbol.shift_offset },
-                                            .node = node_idx,
-                                        });
-                                        try ana.ir.append(ana.sema.allocator, .{
-                                            .tag = .{ .or_variable = .{
-                                                .symbol = curr_symbol.symbol,
-                                                .offset = curr_symbol.byte_offset,
-                                            } },
-                                            .node = node_idx,
-                                        });
-                                    }
+    //                     var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
+    //                     while (offset < field.byte_size) : (offset += @intCast(register_size * 8)) {
+    //                         ana.ir.appendAssumeCapacity(.{
+    //                             .tag = .{ .zero_variable = .{
+    //                                 .symbol = target.symbol.main_symbol,
+    //                                 .offset = field.byte_offset + offset + target.symbol.byte_offset,
+    //                             } },
+    //                             .node = node_idx,
+    //                         });
+    //                     }
+    //                 } else {
+    //                     const register_type = opt_register_type orelse {
+    //                         try ana.sema.errors.append(ana.sema.allocator, .{
+    //                             .tag = .expected_intermediate_register,
+    //                             .ast = ana.ast(),
+    //                             .token = ana.ast().nodeToken(node_idx),
+    //                         });
+    //                         return error.AnalyzeFailed;
+    //                     };
 
-                                    if (i == 0) break;
-                                }
+    //                     // 1 size change + 2n load/stores
+    //                     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1 + @divExact(field.byte_size, register_size) * 2);
 
-                                try ana.ir.append(ana.sema.allocator, .{
-                                    .tag = .{ .shift_accum_left = used_symbols.items[0].shift_offset },
-                                    .node = node_idx,
-                                });
+    //                     var offset: std.math.Log2Int(TypeSymbol.ComptimeIntValue) = 0;
+    //                     while (offset < field.byte_size) : (offset += @intCast(register_size * 8)) {
+    //                         switch (field.value) {
+    //                             .value => |value| {
+    //                                 ana.ir.appendAssumeCapacity(.{
+    //                                     .tag = .{ .load_value = .{
+    //                                         .register = register_type,
+    //                                         .value = switch (register_type) {
+    //                                             .a8, .x8, .y8 => .{ .imm8 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
+    //                                             .a16, .x16, .y16 => .{ .imm16 = @truncate(@as(TypeSymbol.UnsignedComptimeIntValue, @bitCast(value)) >> offset) },
+    //                                         },
+    //                                     } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                             },
+    //                             .variable => |sym_loc| {
+    //                                 ana.ir.appendAssumeCapacity(.{
+    //                                     .tag = .{ .load_variable = .{
+    //                                         .register = register_type,
+    //                                         .symbol = sym_loc,
+    //                                         .offset = offset,
+    //                                     } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                             },
+    //                             else => unreachable,
+    //                         }
 
-                                // OR-in constant value
-                                if (curr_value != 0) {
-                                    try ana.ir.append(ana.sema.allocator, .{
-                                        .tag = .{ .or_value = if (T == u8)
-                                            .{ .imm8 = curr_value }
-                                        else
-                                            .{ .imm16 = curr_value } },
-                                        .node = node_idx,
-                                    });
-                                }
+    //                         ana.ir.appendAssumeCapacity(.{
+    //                             .tag = .{ .store_variable = .{
+    //                                 .register = register_type,
+    //                                 .symbol = target.symbol.main_symbol,
+    //                                 .offset = field.byte_offset + offset + target.symbol.byte_offset,
+    //                             } },
+    //                             .node = node_idx,
+    //                         });
+    //                     }
+    //                 }
+    //             }
+    //         },
+    //         .packed_fields => |fields| {
+    //             // If an intermediate register exists, use it for the size
+    //             if (opt_register_type) |register_type| {
+    //                 try ana.setSizeMode(node_idx, switch (register_type) {
+    //                     .a8, .a16 => .mem,
+    //                     .x8, .x16, .y8, .y16 => .idx,
+    //                 }, switch (register_type) {
+    //                     .a8, .x8, .y8 => .@"8bit",
+    //                     .a16, .x16, .y16 => .@"16bit",
+    //                 });
+    //             }
 
-                                // Store final value
-                                try ana.ir.append(ana.sema.allocator, .{
-                                    .tag = .{ .store_variable = .{
-                                        .register = register_type,
-                                        .symbol = target.symbol.main_symbol,
-                                        .offset = byte_offset + target.symbol.byte_offset,
-                                    } },
-                                    .node = node_idx,
-                                });
-                            }
-                        }
-                        return;
-                    }
-                }
-                unreachable;
-            },
-            .register => |reg| {
-                try ana.ir.append(ana.sema.allocator, .{
-                    .tag = .{ .store_variable = .{
-                        .register = reg,
-                        .symbol = target.symbol.main_symbol,
-                        .offset = target.symbol.byte_offset,
-                    } },
-                    .node = node_idx,
-                });
-            },
-        }
-    } else {
-        // Packed field
-        const target_bitsize = target_type.bitSize();
+    //             inline for (&.{ u8, u16 }) |T| {
+    //                 if (register_size == @sizeOf(T)) {
+    //                     var byte_offset: u16 = 0;
+    //                     var bit_offset: u16 = 0;
 
-        // Prevent crossing register boundry
-        if (target.symbol.bit_offset % register_size * 8 > target.symbol.bit_offset + target_bitsize % register_size * 8) {
-            try ana.sema.errors.append(ana.sema.allocator, .{
-                .tag = .fields_cross_register_boundry,
-                .ast = ana.ast(),
-                .token = ana.ast().nodeToken(node_idx),
-                .extra = .{ .bit_size = 8 },
+    //                     var used_symbols: std.ArrayListUnmanaged(PackedSymbol) = .empty;
+    //                     defer used_symbols.deinit(ana.sema.allocator);
+
+    //                     while (byte_offset < target_size) : (byte_offset += @sizeOf(T)) {
+    //                         var curr_value: T = 0;
+    //                         used_symbols.clearRetainingCapacity();
+
+    //                         try ana.resolvePackedFields(T, node_idx, fields, &curr_value, &used_symbols, byte_offset, &bit_offset, 0);
+
+    //                         if (used_symbols.items.len == 0) {
+    //                             // No variables involved
+    //                             if (curr_value == 0) {
+    //                                 try ana.ir.append(ana.sema.allocator, .{
+    //                                     .tag = .{ .zero_variable = .{
+    //                                         .symbol = target.symbol.main_symbol,
+    //                                         .offset = byte_offset + target.symbol.byte_offset,
+    //                                     } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                             } else {
+    //                                 const register_type = opt_register_type orelse {
+    //                                     try ana.sema.errors.append(ana.sema.allocator, .{
+    //                                         .tag = .expected_intermediate_register,
+    //                                         .ast = ana.ast(),
+    //                                         .token = ana.ast().nodeToken(node_idx),
+    //                                     });
+    //                                     return error.AnalyzeFailed;
+    //                                 };
+
+    //                                 try ana.ir.append(ana.sema.allocator, .{
+    //                                     .tag = .{ .load_value = .{
+    //                                         .register = register_type,
+    //                                         .value = if (T == u8)
+    //                                             .{ .imm8 = curr_value }
+    //                                         else
+    //                                             .{ .imm16 = curr_value },
+    //                                     } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                                 try ana.ir.append(ana.sema.allocator, .{
+    //                                     .tag = .{ .store_variable = .{
+    //                                         .register = register_type,
+    //                                         .symbol = target.symbol.main_symbol,
+    //                                         .offset = byte_offset + target.symbol.byte_offset,
+    //                                     } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                             }
+    //                         } else {
+    //                             // Some variables involved
+    //                             const register_type = opt_register_type orelse {
+    //                                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                                     .tag = .expected_intermediate_register,
+    //                                     .ast = ana.ast(),
+    //                                     .token = ana.ast().nodeToken(node_idx),
+    //                                 });
+    //                                 return error.AnalyzeFailed;
+    //                             };
+    //                             if (register_type != .a8 and register_type != .a16) {
+    //                                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                                     .tag = .unsupported_register,
+    //                                     .ast = ana.ast(),
+    //                                     .token = data.intermediate_register,
+    //                                     .extra = .{ .unsupported_register = .{
+    //                                         .register = register_type,
+    //                                         .message = "object-initializer including variables",
+    //                                     } },
+    //                                 });
+    //                                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                                     .tag = .supported_registers,
+    //                                     .ast = ana.ast(),
+    //                                     .token = data.intermediate_register,
+    //                                     .is_note = true,
+    //                                     .extra = .{ .supported_registers = &.{ .a8, .a16 } },
+    //                                 });
+    //                                 return error.AnalyzeFailed;
+    //                             }
+
+    //                             // Shift in variables
+    //                             var i: u8 = @intCast(used_symbols.items.len - 1);
+    //                             while (true) : (i -= 1) {
+    //                                 const curr_symbol = used_symbols.items[i];
+
+    //                                 if (i == used_symbols.items.len - 1) {
+    //                                     // First variable
+    //                                     try ana.ir.append(ana.sema.allocator, .{
+    //                                         .tag = .{ .load_variable = .{
+    //                                             .register = register_type,
+    //                                             .symbol = curr_symbol.symbol,
+    //                                             .offset = curr_symbol.byte_offset,
+    //                                         } },
+    //                                         .node = node_idx,
+    //                                     });
+    //                                 } else {
+    //                                     // Other variable
+    //                                     const prev_symbol = used_symbols.items[i + 1];
+
+    //                                     try ana.ir.append(ana.sema.allocator, .{
+    //                                         .tag = .{ .shift_accum_left = prev_symbol.shift_offset - curr_symbol.shift_offset },
+    //                                         .node = node_idx,
+    //                                     });
+    //                                     try ana.ir.append(ana.sema.allocator, .{
+    //                                         .tag = .{ .or_variable = .{
+    //                                             .symbol = curr_symbol.symbol,
+    //                                             .offset = curr_symbol.byte_offset,
+    //                                         } },
+    //                                         .node = node_idx,
+    //                                     });
+    //                                 }
+
+    //                                 if (i == 0) break;
+    //                             }
+
+    //                             try ana.ir.append(ana.sema.allocator, .{
+    //                                 .tag = .{ .shift_accum_left = used_symbols.items[0].shift_offset },
+    //                                 .node = node_idx,
+    //                             });
+
+    //                             // OR-in constant value
+    //                             if (curr_value != 0) {
+    //                                 try ana.ir.append(ana.sema.allocator, .{
+    //                                     .tag = .{ .or_value = if (T == u8)
+    //                                         .{ .imm8 = curr_value }
+    //                                     else
+    //                                         .{ .imm16 = curr_value } },
+    //                                     .node = node_idx,
+    //                                 });
+    //                             }
+
+    //                             // Store final value
+    //                             try ana.ir.append(ana.sema.allocator, .{
+    //                                 .tag = .{ .store_variable = .{
+    //                                     .register = register_type,
+    //                                     .symbol = target.symbol.main_symbol,
+    //                                     .offset = byte_offset + target.symbol.byte_offset,
+    //                                 } },
+    //                                 .node = node_idx,
+    //                             });
+    //                         }
+    //                     }
+    //                     return;
+    //                 }
+    //             }
+    //             unreachable;
+    //         },
+    //         .register => |reg| {
+    //             try ana.ir.append(ana.sema.allocator, .{
+    //                 .tag = .{ .store_variable = .{
+    //                     .register = reg,
+    //                     .symbol = target.symbol.main_symbol,
+    //                     .offset = target.symbol.byte_offset,
+    //                 } },
+    //                 .node = node_idx,
+    //             });
+    //         },
+    //     }
+    // } else {
+    //     // Packed field
+    //     const target_bitsize = target_type.bitSize(ana.sema);
+
+    //     // Prevent crossing register boundry
+    //     if (target.symbol.bit_offset % register_size * 8 > target.symbol.bit_offset + target_bitsize % register_size * 8) {
+    //         try ana.sema.errors.append(ana.sema.allocator, .{
+    //             .tag = .fields_cross_register_boundry,
+    //             .ast = ana.ast(),
+    //             .token = ana.ast().nodeToken(node_idx),
+    //             .extra = .{ .bit_size = 8 },
+    //         });
+    //         return error.AnalyzeFailed;
+    //     }
+
+    //     switch (value_expr) {
+    //         .value, .variable => {
+    //             const register_type = opt_register_type orelse {
+    //                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                     .tag = .expected_intermediate_register,
+    //                     .ast = ana.ast(),
+    //                     .token = ana.ast().nodeToken(node_idx),
+    //                 });
+    //                 return error.AnalyzeFailed;
+    //             };
+    //             if (register_type != .a8 and register_type != .a16) {
+    //                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                     .tag = .unsupported_register,
+    //                     .ast = ana.ast(),
+    //                     .token = data.intermediate_register,
+    //                     .extra = .{ .unsupported_register = .{
+    //                         .register = register_type,
+    //                         .message = "packed field access",
+    //                     } },
+    //                 });
+    //                 try ana.sema.errors.append(ana.sema.allocator, .{
+    //                     .tag = .supported_registers,
+    //                     .ast = ana.ast(),
+    //                     .token = data.intermediate_register,
+    //                     .is_note = true,
+    //                     .extra = .{ .supported_registers = &.{ .a8, .a16 } },
+    //                 });
+    //                 return error.AnalyzeFailed;
+    //             }
+
+    //             // Adjust current memory size mode
+    //             try ana.setSizeMode(node_idx, .mem, switch (register_type) {
+    //                 .a8 => .@"8bit",
+    //                 .a16 => .@"16bit",
+    //                 else => unreachable,
+    //             });
+
+    //             // Values can be optimized by pre-shifting them
+    //             if (value_expr == .value) {
+    //                 if (value_expr.value == 0) {
+    //                     try ana.ir.append(ana.sema.allocator, .{
+    //                         .tag = .{ .clear_bits = .{
+    //                             .symbol = target.symbol.main_symbol,
+    //                             .offset = target.symbol.byte_offset,
+    //                             .mask = switch (register_size) {
+    //                                 1 => .{ .imm8 = ((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
+    //                                 2 => .{ .imm16 = ((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
+    //                                 else => unreachable,
+    //                             },
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+    //                 } else {
+    //                     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 4);
+
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .load_variable = .{
+    //                             .register = register_type,
+    //                             .symbol = target.symbol.main_symbol,
+    //                             .offset = target.symbol.byte_offset,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .and_value = switch (register_size) {
+    //                             1 => .{ .imm8 = ~(((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset)) },
+    //                             2 => .{ .imm16 = ~(((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset)) },
+    //                             else => unreachable,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .or_value = switch (register_size) {
+    //                             1 => .{ .imm8 = @as(u8, @intCast(value_expr.value)) << @intCast(target.symbol.bit_offset) },
+    //                             2 => .{ .imm16 = @as(u16, @intCast(value_expr.value)) << @intCast(target.symbol.bit_offset) },
+    //                             else => unreachable,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .store_variable = .{
+    //                             .register = register_type,
+    //                             .symbol = target.symbol.main_symbol,
+    //                             .offset = target.symbol.byte_offset,
+    //                         } },
+    //                         .node = node_idx,
+    //                     });
+    //                 }
+    //                 return;
+    //             }
+
+    //             // Cycle Count
+    //             //     Rotate: 4 + 2n + 2 + 2/4 + 2n + 4 = 12/14 + 4n
+    //             //     Reset:  2 + 6 + 2/4 + 2n + 4 + 4  = 18/20 + 2n
+    //             // Bytes
+    //             //     Rotate: 3 + n + 3 + 3 + n + 3 = 12 + 2n
+    //             //     Reset:  3 + 3 + 3 + n + 3 + 3 = 15 +  n
+    //             const rotate_rights = target.symbol.bit_offset;
+    //             const rotate_lefts = register_size * 8 - target.symbol.bit_offset + 1;
+
+    //             // Rotate is faster for < 3 rotations; otherwise Reset is >=
+    //             // For = 3 rotations, both implementations are exactly the same
+    //             if (@min(rotate_rights, rotate_lefts) < 3) {
+    //                 // 'Rotate' method
+    //                 try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 6);
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .load_variable = .{
+    //                         .register = register_type,
+    //                         .symbol = target.symbol.main_symbol,
+    //                         .offset = target.symbol.byte_offset,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+
+    //                 if (rotate_rights < rotate_lefts) {
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .rotate_accum_right = rotate_rights },
+    //                         .node = node_idx,
+    //                     });
+    //                 } else {
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .rotate_accum_left = rotate_lefts },
+    //                         .node = node_idx,
+    //                     });
+    //                 }
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .and_value = switch (register_size) {
+    //                         1 => .{ .imm8 = ~((@as(u8, 1) << @intCast(target_bitsize)) - 1) },
+    //                         2 => .{ .imm16 = ~((@as(u16, 1) << @intCast(target_bitsize)) - 1) },
+    //                         else => unreachable,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .or_variable = .{
+    //                         .symbol = value_expr.variable,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+
+    //                 if (rotate_rights < rotate_lefts) {
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .rotate_accum_left = rotate_rights },
+    //                         .node = node_idx,
+    //                     });
+    //                 } else {
+    //                     ana.ir.appendAssumeCapacity(.{
+    //                         .tag = .{ .rotate_accum_right = rotate_lefts },
+    //                         .node = node_idx,
+    //                     });
+    //                 }
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .store_variable = .{
+    //                         .register = register_type,
+    //                         .symbol = target.symbol.main_symbol,
+    //                         .offset = target.symbol.byte_offset,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+    //             } else {
+    //                 // 'Reset' method
+    //                 try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 5);
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .clear_bits = .{
+    //                         .symbol = target.symbol.main_symbol,
+    //                         .offset = target.symbol.byte_offset,
+    //                         .mask = switch (register_size) {
+    //                             1 => .{ .imm8 = ((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
+    //                             2 => .{ .imm16 = ((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
+    //                             else => unreachable,
+    //                         },
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .load_variable = .{
+    //                         .register = register_type,
+    //                         .symbol = value_expr.variable,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .shift_accum_left = target.symbol.bit_offset },
+    //                     .node = node_idx,
+    //                 });
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .or_variable = .{
+    //                         .symbol = target.symbol.main_symbol,
+    //                         .offset = target.symbol.byte_offset,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+
+    //                 ana.ir.appendAssumeCapacity(.{
+    //                     .tag = .{ .store_variable = .{
+    //                         .register = register_type,
+    //                         .symbol = target.symbol.main_symbol,
+    //                         .offset = target.symbol.byte_offset,
+    //                     } },
+    //                     .node = node_idx,
+    //                 });
+    //             }
+    //         },
+    //         .struct_fields => |fields| {
+    //             _ = fields; // autofix
+    //             @panic("TODO");
+    //         },
+    //         .packed_fields => |fields| {
+    //             _ = fields; // autofix
+    //             @panic("TODO");
+    //         },
+    //         .register => |reg| {
+    //             _ = reg; // autofix
+    //             // try ana.ir.append(ana.sema.allocator, .{
+    //             //     .tag = .{ .store_variable = .{
+    //             //         .register = reg,
+    //             //         .symbol = target.symbol.main_symbol,
+    //             //         .offset = target.symbol.byte_offset,
+    //             //     } },
+    //             //     .node = node_idx,
+    //             // });
+    //             @panic("TODO");
+    //         },
+    //     }
+    // }
+}
+
+fn storeValue(ana: *Analyzer, operations: *std.ArrayListUnmanaged(Ir.StoreOperation), target_type: TypeExpressionIndex, expr_value: ExpressionIndex, bit_offset: u16, intermediate_register: RegisterType) Error!void {
+    switch (ana.sema.getExpression(expr_value).*) {
+        .immediate => |value| {
+            try operations.append(ana.sema.allocator, .{
+                .value = .{ .immediate = value },
+                .bit_offset = bit_offset,
+                .bit_size = target_type.bitSize(ana.sema),
             });
-            return error.AnalyzeFailed;
-        }
-
-        switch (value_expr) {
-            .value, .variable => {
-                const register_type = opt_register_type orelse {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .expected_intermediate_register,
-                        .ast = ana.ast(),
-                        .token = ana.ast().nodeToken(node_idx),
-                    });
-                    return error.AnalyzeFailed;
-                };
-                if (register_type != .a8 and register_type != .a16) {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .unsupported_register,
-                        .ast = ana.ast(),
-                        .token = data.intermediate_register,
-                        .extra = .{ .unsupported_register = .{
-                            .register = register_type,
-                            .message = "packed field access",
-                        } },
-                    });
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .supported_registers,
-                        .ast = ana.ast(),
-                        .token = data.intermediate_register,
-                        .is_note = true,
-                        .extra = .{ .supported_registers = &.{ .a8, .a16 } },
-                    });
-                    return error.AnalyzeFailed;
-                }
-
-                // Adjust current memory size mode
-                try ana.setSizeMode(node_idx, .mem, switch (register_type) {
-                    .a8 => .@"8bit",
-                    .a16 => .@"16bit",
-                    else => unreachable,
-                });
-
-                // Values can be optimized by pre-shifting them
-                if (value_expr == .value) {
-                    if (value_expr.value == 0) {
-                        try ana.ir.append(ana.sema.allocator, .{
-                            .tag = .{ .clear_bits = .{
-                                .symbol = target.symbol.main_symbol,
-                                .offset = target.symbol.byte_offset,
-                                .mask = switch (register_size) {
-                                    1 => .{ .imm8 = ((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
-                                    2 => .{ .imm16 = ((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
-                                    else => unreachable,
-                                },
-                            } },
-                            .node = node_idx,
-                        });
-                    } else {
-                        try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 4);
-
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .load_variable = .{
-                                .register = register_type,
-                                .symbol = target.symbol.main_symbol,
-                                .offset = target.symbol.byte_offset,
-                            } },
-                            .node = node_idx,
-                        });
-
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .and_value = switch (register_size) {
-                                1 => .{ .imm8 = ~(((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset)) },
-                                2 => .{ .imm16 = ~(((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset)) },
-                                else => unreachable,
-                            } },
-                            .node = node_idx,
-                        });
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .or_value = switch (register_size) {
-                                1 => .{ .imm8 = @as(u8, @intCast(value_expr.value)) << @intCast(target.symbol.bit_offset) },
-                                2 => .{ .imm16 = @as(u16, @intCast(value_expr.value)) << @intCast(target.symbol.bit_offset) },
-                                else => unreachable,
-                            } },
-                            .node = node_idx,
-                        });
-
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .store_variable = .{
-                                .register = register_type,
-                                .symbol = target.symbol.main_symbol,
-                                .offset = target.symbol.byte_offset,
-                            } },
-                            .node = node_idx,
-                        });
-                    }
-                    return;
-                }
-
-                // Cycle Count
-                //     Rotate: 4 + 2n + 2 + 2/4 + 2n + 4 = 12/14 + 4n
-                //     Reset:  2 + 6 + 2/4 + 2n + 4 + 4  = 18/20 + 2n
-                // Bytes
-                //     Rotate: 3 + n + 3 + 3 + n + 3 = 12 + 2n
-                //     Reset:  3 + 3 + 3 + n + 3 + 3 = 15 +  n
-                const rotate_rights = target.symbol.bit_offset;
-                const rotate_lefts = register_size * 8 - target.symbol.bit_offset + 1;
-
-                // Rotate is faster for < 3 rotations; otherwise Reset is >=
-                // For = 3 rotations, both implementations are exactly the same
-                if (@min(rotate_rights, rotate_lefts) < 3) {
-                    // 'Rotate' method
-                    try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 6);
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .load_variable = .{
-                            .register = register_type,
-                            .symbol = target.symbol.main_symbol,
-                            .offset = target.symbol.byte_offset,
-                        } },
-                        .node = node_idx,
-                    });
-
-                    if (rotate_rights < rotate_lefts) {
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .rotate_accum_right = rotate_rights },
-                            .node = node_idx,
-                        });
-                    } else {
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .rotate_accum_left = rotate_lefts },
-                            .node = node_idx,
-                        });
-                    }
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .and_value = switch (register_size) {
-                            1 => .{ .imm8 = ~((@as(u8, 1) << @intCast(target_bitsize)) - 1) },
-                            2 => .{ .imm16 = ~((@as(u16, 1) << @intCast(target_bitsize)) - 1) },
-                            else => unreachable,
-                        } },
-                        .node = node_idx,
-                    });
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .or_variable = .{
-                            .symbol = value_expr.variable,
-                        } },
-                        .node = node_idx,
-                    });
-
-                    if (rotate_rights < rotate_lefts) {
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .rotate_accum_left = rotate_rights },
-                            .node = node_idx,
-                        });
-                    } else {
-                        ana.ir.appendAssumeCapacity(.{
-                            .tag = .{ .rotate_accum_right = rotate_lefts },
-                            .node = node_idx,
-                        });
-                    }
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .store_variable = .{
-                            .register = register_type,
-                            .symbol = target.symbol.main_symbol,
-                            .offset = target.symbol.byte_offset,
-                        } },
-                        .node = node_idx,
-                    });
-                } else {
-                    // 'Reset' method
-                    try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 5);
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .clear_bits = .{
-                            .symbol = target.symbol.main_symbol,
-                            .offset = target.symbol.byte_offset,
-                            .mask = switch (register_size) {
-                                1 => .{ .imm8 = ((@as(u8, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
-                                2 => .{ .imm16 = ((@as(u16, 1) << @intCast(target_bitsize)) - 1) << @intCast(target.symbol.bit_offset) },
-                                else => unreachable,
-                            },
-                        } },
-                        .node = node_idx,
-                    });
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .load_variable = .{
-                            .register = register_type,
-                            .symbol = value_expr.variable,
-                        } },
-                        .node = node_idx,
-                    });
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .shift_accum_left = target.symbol.bit_offset },
-                        .node = node_idx,
-                    });
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .or_variable = .{
-                            .symbol = target.symbol.main_symbol,
-                            .offset = target.symbol.byte_offset,
-                        } },
-                        .node = node_idx,
-                    });
-
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .store_variable = .{
-                            .register = register_type,
-                            .symbol = target.symbol.main_symbol,
-                            .offset = target.symbol.byte_offset,
-                        } },
-                        .node = node_idx,
-                    });
-                }
-            },
-            .packed_fields => |fields| {
-                _ = fields; // autofix
-                @panic("TODO");
-            },
-            .register => |reg| {
-                _ = reg; // autofix
-                // try ana.ir.append(ana.sema.allocator, .{
-                //     .tag = .{ .store_variable = .{
-                //         .register = reg,
-                //         .symbol = target.symbol.main_symbol,
-                //         .offset = target.symbol.byte_offset,
-                //     } },
-                //     .node = node_idx,
-                // });
-                @panic("TODO");
-            },
-        }
+        },
+        .symbol => |symbol| {
+            try operations.append(ana.sema.allocator, .{
+                .value = .{
+                    .global = .{
+                        .symbol = symbol,
+                        .bit_offset = 0, // TODO: Support bit_offset for source symbols
+                    },
+                },
+                .bit_offset = bit_offset,
+                .bit_size = target_type.bitSize(ana.sema),
+            });
+        },
+        .field_initializer => |field| {
+            try ana.storeValue(operations, field.type, field.value, bit_offset + field.bit_offset, intermediate_register);
+        },
+        .object_initializer => |fields| {
+            for (@intFromEnum(fields.fields_start)..@intFromEnum(fields.fields_end)) |field_idx| {
+                try ana.storeValue(operations, target_type, @enumFromInt(@as(u32, @intCast(field_idx))), bit_offset, intermediate_register);
+            }
+        },
     }
 }
 
@@ -907,7 +1017,7 @@ const PackedSymbol = struct {
     byte_offset: u8,
     shift_offset: u8,
 };
-fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fields: []const Sema.ExpressionValue.PackedField, curr_value: *T, used_symbols: *std.ArrayListUnmanaged(PackedSymbol), byte_offset: u8, bit_offset: *u8, base_bit_offset: u8) Error!void {
+fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fields: []const Sema.ExpressionValue.PackedField, curr_value: *T, used_symbols: *std.ArrayListUnmanaged(PackedSymbol), byte_offset: u16, bit_offset: *u16, base_bit_offset: u16) Error!void {
     while (bit_offset.* < (byte_offset + @sizeOf(T)) * 8) {
         const field = find_field: {
             for (fields) |field| {
@@ -946,13 +1056,13 @@ fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fi
                     else => unreachable,
                 };
 
-                if (target_type.size() % @sizeOf(T) != 0) {
+                if (target_type.size(ana.sema) % @sizeOf(T) != 0) {
                     try ana.sema.errors.append(ana.sema.allocator, .{
                         .tag = .expected_mod_register_size,
                         .ast = ana.ast(),
                         .token = ana.ast().nodeToken(field.node_idx),
                         .extra = .{ .expected_register_size = .{
-                            .expected = target_type.size() * 8,
+                            .expected = target_type.size(ana.sema) * 8,
                             .actual = @sizeOf(T) * 8,
                         } },
                     });
@@ -969,6 +1079,8 @@ fn resolvePackedFields(ana: *Analyzer, comptime T: type, node_idx: NodeIndex, fi
                 _ = register; // autofix
                 @panic("TODO");
             },
+            // TODO: Prevent regular structs in packed structs during Sema
+            .struct_fields => unreachable,
             .packed_fields => |nested_fields| {
                 try ana.resolvePackedFields(T, node_idx, nested_fields, curr_value, used_symbols, byte_offset, bit_offset, field.bit_offset + base_bit_offset);
             },
@@ -987,25 +1099,13 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         // Built-in call
         if (BuiltinFn.get(target_name)) |builtin| {
             if (builtin.param_count != params.len) {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_arguments,
-                    .ast = ana.ast(),
-                    .token = ana.ast().nodeToken(node_idx),
-                    .extra = .{ .arguments = .{
-                        .expected = builtin.param_count,
-                        .actual = @intCast(params.len),
-                    } },
-                });
+                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_arguments, .{ builtin.param_count, if (builtin.param_count == 1) "" else "s", params.len });
                 return error.AnalyzeFailed;
             }
 
             try builtin.handler_fn(ana, node_idx, params);
         } else {
-            try ana.sema.errors.append(ana.sema.allocator, .{
-                .tag = .invalid_builtin,
-                .ast = ana.ast(),
-                .token = ana.ast().nodeToken(node_idx),
-            });
+            try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .invalid_builtin_fn, .{target_name});
             return error.AnalyzeFailed;
         }
     } else {
@@ -1027,12 +1127,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             },
             // TODO: Support macros
             else => {
-                try ana.sema.errors.append(ana.sema.allocator, .{
-                    .tag = .expected_fn_symbol,
-                    .ast = ana.ast(),
-                    .token = ana.ast().nodeToken(node_idx),
-                    .extra = .{ .actual_symbol = symbol.* },
-                });
+                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_fn_symbol, .{@tagName(symbol.*)});
                 return error.AnalyzeFailed;
             },
         }

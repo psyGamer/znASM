@@ -54,7 +54,6 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         .main_token = undefined,
         .data = undefined,
     });
-    _ = root; // autofix
 
     p.skipNewLines();
     try p.scratch.append(p.allocator, @intFromEnum(try p.parseModuleDef()));
@@ -120,6 +119,13 @@ pub fn parseRoot(p: *Parser) ParseError!void {
             continue;
         }
 
+        // Struct Definition
+        const struct_def = try p.parseStructDef(doc_comments, .top_level);
+        if (struct_def != .none) {
+            try p.scratch.append(p.allocator, @intFromEnum(struct_def));
+            continue;
+        }
+
         // Packed Definition
         const packed_def = try p.parsePackedDef(doc_comments, .top_level);
         if (packed_def != .none) {
@@ -137,7 +143,7 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         return p.fail(.expected_toplevel);
     }
 
-    p.nodes.items(.data)[@intFromEnum(NodeIndex.root)] = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[tld_start..]) };
+    p.nodes.items(.data)[@intFromEnum(root)] = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[tld_start..]) };
 }
 
 /// ModuleDef <- KEYWORD_module IDENTIFIER NEW_LINE
@@ -262,6 +268,24 @@ fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
 }
 
 const DeclType = enum { top_level, anonymous };
+
+///     StructDef <- (KEYWORD_pub)? KEYWORD_struct IDENTIFIER StructBlock
+/// AnonStructDef <- KEYWORD_struct StructBlock
+fn parseStructDef(p: *Parser, doc_comments: Node.SubRange, decl_type: DeclType) ParseError!NodeIndex {
+    if (decl_type == .top_level) _ = p.eatToken(.keyword_pub);
+    const keyword_struct = p.eatToken(.keyword_struct) orelse return .none;
+    if (decl_type == .top_level) _ = try p.expectToken(.ident);
+    const struct_block = try p.parseStructBlock();
+
+    return try p.addNode(.{
+        .tag = .struct_def,
+        .main_token = keyword_struct,
+        .data = .{ .struct_def = .{
+            .block = struct_block,
+            .doc_comments = try p.writeExtraData(Node.SubRange, doc_comments),
+        } },
+    });
+}
 
 ///     PackedDef <- (KEYWORD_pub)? KEYWORD_packed IDENTIFIER LPAREN TypeExpr RPAREN StructBlock
 /// AnonPackedDef <- KEYWORD_packed LPAREN TypeExpr RPAREN StructBlock

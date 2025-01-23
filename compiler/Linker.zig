@@ -111,7 +111,7 @@ pub fn symbolLocation(link: Linker, symbol_idx: SymbolIndex) u24 {
         .constant => |const_sym| memory_map.bankOffsetToAddr(link.mapping_mode, const_sym.bank, const_sym.bank_offset),
         .variable => |var_sym| memory_map.wramOffsetToAddr(var_sym.wram_offset),
         .register => |reg_sym| reg_sym.address,
-        .@"packed", .@"enum" => unreachable,
+        .@"struct", .@"packed", .@"enum" => unreachable,
     };
 }
 
@@ -144,7 +144,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
             },
             .variable => |*var_sym| {
                 // TODO: Place variables from high addr-variance to low addr-variance and from large to small
-                const var_size = var_sym.type.size();
+                const var_size = var_sym.type.size(link.sema);
                 const possible = used_ram[var_sym.wram_offset_min..var_sym.wram_offset_max];
 
                 var last_start: u16 = 0;
@@ -172,7 +172,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
                     } },
                 });
             },
-            .register, .@"packed", .@"enum" => {}, // Don't require space in the ROM
+            .register, .@"struct", .@"packed", .@"enum" => {}, // Don't require space in the ROM
         }
     }
 }
@@ -499,10 +499,10 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
                     }
 
-                    if (var_sym.type.size() == 1) {
+                    if (var_sym.type.size(link.sema) == 1) {
                         try writer.print("SnesWorkRam:{x}:{s}", .{ var_sym.wram_offset, debug_sym_name });
                     } else {
-                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size() - 1, debug_sym_name });
+                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size(link.sema) - 1, debug_sym_name });
                     }
                     for (comments.items, 0..) |comment, i| {
                         if (i == 0) {
@@ -546,7 +546,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                     }
                     try writer.writeByte('\n');
                 },
-                .@"packed", .@"enum" => {
+                .@"struct", .@"packed", .@"enum" => {
                     // Don't have symbols representing them
                 },
             }
@@ -622,7 +622,7 @@ pub fn generateCdlData(link: Linker, rom: []const u8) ![]const u8 {
             .variable, .register => {
                 // Not in ROM
             },
-            .@"packed", .@"enum" => {
+            .@"struct", .@"packed", .@"enum" => {
                 // Doesn't exist at runtime
             },
         }

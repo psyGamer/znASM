@@ -1,4 +1,4 @@
-module builtin
+module BuiltIn
 
 /// Used as a fallback for when an interrupt vector isn't defiend
 fn @fallback() {
@@ -6,4 +6,10 @@ fn @fallback() {
     while (true) {
         
     }
+}
+
+/// Access patters for memory-mapped I/O registers
+pub enum AccessType(u8) {
+    /// Write-Only 8-bit
+    w8 = 0,
 }

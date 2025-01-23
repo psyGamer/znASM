@@ -10,7 +10,7 @@ const BuiltinFn = @This();
 const HandlerFn = fn (*Analyzer, NodeIndex, []const NodeIndex) Sema.AnalyzeError!void;
 
 name: []const u8,
-param_count: u8,
+param_count: u8, // TODO: Provide types for parameters
 handler_fn: *const HandlerFn,
 
 /// Retrieves the built-in function with the specified name
@@ -162,49 +162,48 @@ pub const all = [_]BuiltinFn{
     },
 };
 
-fn sizeHandler(comptime target: Instruction.SizeType) HandlerFn {
-    return struct {
-        pub fn handler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
-            const size_node = params[0];
-            const size_literal = try ana.sema.expectToken(ana.ast(), size_node, .int_literal);
-            const size_value = try ana.sema.parseInt(u8, ana.ast(), size_literal);
+// fn sizeHandler(comptime target: Instruction.SizeType) HandlerFn {
+//     _ = target; // autofix
+//     return struct {
+//         pub fn handler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
+//             const size_node = params[0];
+//             const size_value = try ana.sema.parseInt(u8, ana.ast(), size_literal);
 
-            const size_mode: Instruction.SizeMode = switch (size_value) {
-                8 => .@"8bit",
-                16 => .@"16bit",
-                else => {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .invalid_size_mode,
-                        .ast = ana.ast(),
-                        .token = size_literal,
-                    });
-                    return error.AnalyzeFailed;
-                },
-            };
+//             const size_mode: Instruction.SizeMode = switch (size_value) {
+//                 8 => .@"8bit",
+//                 16 => .@"16bit",
+//                 else => {
+//                     try ana.sema.errors.append(ana.sema.allocator, .{
+//                         .tag = .invalid_size_mode,
+//                         .ast = ana.ast(),
+//                         .token = size_literal,
+//                     });
+//                     return error.AnalyzeFailed;
+//                 },
+//             };
 
-            try ana.ir.append(ana.sema.allocator, .{
-                .tag = .{ .change_size = .{
-                    .target = target,
-                    .mode = size_mode,
-                } },
-                .node = node_idx,
-            });
+//             try ana.ir.append(ana.sema.allocator, .{
+//                 .tag = .{ .change_size = .{
+//                     .target = target,
+//                     .mode = size_mode,
+//                 } },
+//                 .node = node_idx,
+//             });
 
-            switch (target) {
-                .mem => ana.mem_size = size_mode,
-                .idx => ana.idx_size = size_mode,
-                .none => unreachable,
-            }
-        }
-    }.handler;
-}
+//             switch (target) {
+//                 .mem => ana.mem_size = size_mode,
+//                 .idx => ana.idx_size = size_mode,
+//                 .none => unreachable,
+//             }
+//         }
+//     }.handler;
+// }
 
 fn branchHandler(comptime branch_type: BranchRelocation.Type) HandlerFn {
     return struct {
         pub fn handler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
             const target_node = params[0];
-            const target_ident = try ana.sema.expectToken(ana.ast(), target_node, .ident);
-            const target_name = ana.ast().tokenSource(target_ident);
+            const target_name = ana.ast().parseIdentifier(ana.ast().nodeToken(target_node));
 
             try ana.ir.append(ana.sema.allocator, .{
                 .tag = .{ .branch = .{
@@ -233,7 +232,7 @@ fn instructionHandler(comptime instruction: Instruction) HandlerFn {
 
 fn pushValueHandler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeIndex) Sema.AnalyzeError!void {
     const size_node = params[0];
-    const size_value = try ana.sema.parseInt(u16, ana.ast(), ana.ast().nodeToken(size_node));
+    const size_value = try ana.sema.parseInt(u16, ana.ast().nodeToken(size_node), ana.module_idx);
 
     try ana.ir.append(ana.sema.allocator, .{
         .tag = .{ .instruction = .{

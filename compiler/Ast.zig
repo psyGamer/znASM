@@ -1,5 +1,6 @@
 const std = @import("std");
 const rich = @import("util/rich.zig");
+const SymbolLocation = @import("symbol.zig").SymbolLocation;
 
 pub const Node = struct {
     /// Documents the valid data for each tag. If something is undocumented, the data is undefined to use
@@ -32,6 +33,11 @@ pub const Node = struct {
         /// `main_token + 1` is the `identifier` of the name
         reg_def,
 
+        /// `data` is `struct_def`
+        /// `main_token - 1` is the optional `keyword_pub`
+        /// `main_token + 1` is the `identifier` of the name
+        struct_def,
+
         /// `data` is `packed_def`
         /// `main_token - 1` is the optional `keyword_pub`
         /// `main_token + 1` is the `identifier` of the name
@@ -46,7 +52,7 @@ pub const Node = struct {
         /// `main_token` is the `lbrace`
         struct_block,
 
-        /// `data` is `enum_field`
+        /// `data` is `struct_field`
         /// `main_token` is the `identifier` of the name
         struct_field,
 
@@ -134,6 +140,10 @@ pub const Node = struct {
         },
         reg_def: struct {
             extra: ExtraIndex,
+        },
+        struct_def: struct {
+            block: NodeIndex,
+            doc_comments: ExtraIndex,
         },
         packed_def: struct {
             block: NodeIndex,
@@ -412,13 +422,65 @@ pub fn parseIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
         '0'...'9' => 10,
         else => unreachable,
     };
+
     return try std.fmt.parseInt(T, int_str[(if (number_base == 10) 0 else 1)..], number_base);
+}
+/// Parses the big-int value of an `int_literal`
+pub fn parseBigIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex, allocator: std.mem.Allocator) !T {
+    std.debug.assert(tree.tokenTag(token_idx) == .int_literal);
+    const int_str = tree.tokenSource(token_idx);
+    const number_base: u8 = switch (int_str[0]) {
+        '$' => 16,
+        '%' => 2,
+        '0'...'9' => 10,
+        else => unreachable,
+    };
+
+    var int: std.math.big.int.Managed = try .init(allocator);
+    errdefer int.deinit();
+
+    try int.setString(number_base, int_str[(if (number_base == 10) 0 else 1)..]);
+
+    switch (T) {
+        std.math.big.int.Const => {
+            if (allocator.resize(int.limbs, int.len())) {
+                return int.toConst();
+            } else {
+                // Shrink allocation to avoid leaking excess capacity
+                const limbs = try allocator.alloc(std.math.big.Limb, int.len());
+                @memcpy(limbs, int.limbs[0..int.len()]);
+                defer int.deinit();
+
+                return .{
+                    .limbs = limbs,
+                    .positive = int.isPositive(),
+                };
+            }
+        },
+        std.math.big.int.Mutable => return int.toMutable(),
+        std.math.big.int.Managed => return int,
+        else => @compileError(@typeName(T) ++ " is not supported for big integers"),
+    }
 }
 /// Parses the enum value of an enum literal
 pub fn parseEnumLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex) !T {
     std.debug.assert(tree.tokenTag(token_idx) == .ident and tree.tokenTag(token_idx.prev()) == .period);
     const enum_str = tree.tokenSource(token_idx);
     return std.meta.stringToEnum(T, enum_str) orelse error.UnknownField;
+}
+/// Parse a `name` or `module::name` symbol location
+pub fn parseSymbolLocation(tree: *const Ast, token_idx: Ast.TokenIndex) SymbolLocation {
+    if (tree.tokenTag(token_idx.next()) == .double_colon) {
+        return .{
+            .module = tree.parseIdentifier(token_idx),
+            .name = tree.parseIdentifier(token_idx.offset(2)),
+        };
+    } else {
+        return .{
+            .module = "",
+            .name = tree.parseIdentifier(token_idx),
+        };
+    }
 }
 
 /// Checks if the index is of the specified token tag

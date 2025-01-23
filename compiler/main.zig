@@ -107,6 +107,8 @@ pub fn main() !u8 {
 }
 
 fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const u8, source_files: []const []const u8) !u8 {
+    _ = rom_name; // autofix
+    _ = output_file; // autofix
     // Parse all files into modules
     var modules: std.ArrayListUnmanaged(Module) = .{};
     defer {
@@ -143,79 +145,82 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     }
 
     // Run semantic analysis
-    var sema = try Sema.process(allocator, modules.items, .lorom) orelse return 1;
+    var sema = Sema.process(allocator, modules.items, .lorom) catch |err| switch (err) {
+        error.AnalyzeFailed => return 1,
+        else => |e| return e,
+    };
     defer sema.deinit();
 
     // Generate code
-    try CodeGen.process(&sema);
+    // try CodeGen.process(&sema);
 
-    // Link assembly together
-    var linker = try Linker.process(&sema) orelse return 1;
-    defer linker.deinit();
+    // // Link assembly together
+    // var linker = try Linker.process(&sema) orelse return 1;
+    // defer linker.deinit();
 
-    // Generate ROM
-    std.debug.assert(sema.interrupt_vectors.fallback.unpackSymbol() != null);
+    // // Generate ROM
+    // std.debug.assert(sema.interrupt_vectors.fallback.unpackSymbol() != null);
 
-    var rom: Rom = .{
-        .header = .{
-            .title = rom_name,
-            // TODO: Configurable Mode / Chipset / Country / Version
-            .mode = .{
-                .map = sema.mapping_mode,
-                .speed = .fast,
-            },
-            .chipset = .{
-                .components = .rom,
-                .coprocessor = .none,
-            },
-            .rom_size_log2_kb = undefined,
-            .ram_size_log2_kb = 0,
-            .country = .usa,
-            .rom_version = 0,
-        },
-        .vectors = .{
-            .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
-            .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
-            .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-            .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
-        },
-        .banks = linker.rom_bank_data,
-    };
-    rom.computeRomSize();
+    // var rom: Rom = .{
+    //     .header = .{
+    //         .title = rom_name,
+    //         // TODO: Configurable Mode / Chipset / Country / Version
+    //         .mode = .{
+    //             .map = sema.mapping_mode,
+    //             .speed = .fast,
+    //         },
+    //         .chipset = .{
+    //             .components = .rom,
+    //             .coprocessor = .none,
+    //         },
+    //         .rom_size_log2_kb = undefined,
+    //         .ram_size_log2_kb = 0,
+    //         .country = .usa,
+    //         .rom_version = 0,
+    //     },
+    //     .vectors = .{
+    //         .native_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .native_brk = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_brk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .native_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
+    //         .native_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .native_irq = @truncate(linker.symbolLocation(sema.interrupt_vectors.native_irq.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .emulation_cop = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_cop.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .emulation_abort = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_abort.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)), // Unused
+    //         .emulation_nmi = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_nmi.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .emulation_reset = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_reset.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //         .emulation_irqbrk = @truncate(linker.symbolLocation(sema.interrupt_vectors.emulation_irqbrk.unpackSymbol() orelse sema.interrupt_vectors.fallback.symbol)),
+    //     },
+    //     .banks = linker.rom_bank_data,
+    // };
+    // rom.computeRomSize();
 
-    const rom_data = try rom.generate(allocator);
-    defer allocator.free(rom_data);
+    // const rom_data = try rom.generate(allocator);
+    // defer allocator.free(rom_data);
 
-    const rom_file = try std.fs.cwd().createFile(output_file, .{});
-    defer rom_file.close();
+    // const rom_file = try std.fs.cwd().createFile(output_file, .{});
+    // defer rom_file.close();
 
-    try rom_file.writeAll(rom_data);
+    // try rom_file.writeAll(rom_data);
 
-    // Debug Data
-    const debug = true; // TODO: Configurable
-    if (debug) {
-        const mlb_file_path = try changeExtension(allocator, output_file, ".mlb");
-        defer allocator.free(mlb_file_path);
-        const cdl_file_path = try changeExtension(allocator, output_file, ".cdl");
-        defer allocator.free(cdl_file_path);
+    // // Debug Data
+    // const debug = true; // TODO: Configurable
+    // if (debug) {
+    //     const mlb_file_path = try changeExtension(allocator, output_file, ".mlb");
+    //     defer allocator.free(mlb_file_path);
+    //     const cdl_file_path = try changeExtension(allocator, output_file, ".cdl");
+    //     defer allocator.free(cdl_file_path);
 
-        const mlb_file = try std.fs.cwd().createFile(mlb_file_path, .{});
-        defer mlb_file.close();
-        const cdl_file = try std.fs.cwd().createFile(cdl_file_path, .{});
-        defer cdl_file.close();
+    //     const mlb_file = try std.fs.cwd().createFile(mlb_file_path, .{});
+    //     defer mlb_file.close();
+    //     const cdl_file = try std.fs.cwd().createFile(cdl_file_path, .{});
+    //     defer cdl_file.close();
 
-        try linker.writeMlbSymbols(mlb_file.writer());
+    //     try linker.writeMlbSymbols(mlb_file.writer());
 
-        const cdl_data = try linker.generateCdlData(rom_data);
-        defer allocator.free(cdl_data);
-        try cdl_file.writeAll(cdl_data);
-    }
+    //     const cdl_data = try linker.generateCdlData(rom_data);
+    //     defer allocator.free(cdl_data);
+    //     try cdl_file.writeAll(cdl_data);
+    // }
 
     return 0;
 }

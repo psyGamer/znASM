@@ -2,13 +2,28 @@
 const std = @import("std");
 const Instruction = @import("instruction.zig").Instruction;
 const SymbolIndex = @import("Sema.zig").SymbolIndex;
-const RegisterType = @import("Sema.zig").RegisterType;
-const ExpressionValue = @import("Sema.zig").ExpressionValue;
 const Relocation = @import("CodeGen.zig").Relocation;
 const BranchRelocation = @import("CodeGen.zig").BranchRelocation;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 
 pub const Ir = struct {
+    pub const RegisterType = enum {
+        none,
+        a8,
+        a16,
+        x8,
+        x16,
+        y8,
+        y16,
+
+        pub fn size(reg: RegisterType) u16 {
+            return switch (reg) {
+                .none => unreachable,
+                .a8, .x8, .y8 => 1,
+                .a16, .x16, .y16 => 2,
+            };
+        }
+    };
     pub const ChangeStatusFlags = struct {
         carry: ?bool = null,
         zero: ?bool = null,
@@ -20,12 +35,35 @@ pub const Ir = struct {
         negative: ?bool = null,
     };
 
+    /// Micro-Operation which compose `store_...` instructions
+    pub const StoreOperation = struct {
+        value: union(enum) {
+            immediate: std.math.big.int.Const,
+            global: struct {
+                symbol: SymbolIndex,
+                bit_offset: u16,
+            },
+        },
+
+        bit_offset: u16,
+        bit_size: u16,
+    };
+
     const Tag = union(enum) {
         instruction: struct {
             instr: Instruction,
             reloc: ?Relocation,
         },
         change_status_flags: ChangeStatusFlags,
+
+        /// Stores the value of the following `store_operation`s using the intermediate-register into the target
+        store: struct {
+            intermediate_register: RegisterType,
+            symbol: SymbolIndex,
+            operations: u16,
+        },
+        /// Immediatly followed `store.operations`-times after a `store` instruction
+        store_operation: StoreOperation,
 
         /// Loads the immedate value into the register
         load_value: struct {

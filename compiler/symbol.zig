@@ -3,8 +3,9 @@ const Ast = @import("Ast.zig");
 const Ir = @import("ir.zig").Ir;
 const Sema = @import("Sema.zig");
 const FunctionAnalyzer = @import("sema/FunctionAnalyzer.zig");
-const ExpressionValue = Sema.ExpressionValue;
 const SymbolIndex = Sema.SymbolIndex;
+const ExpressionIndex = Sema.ExpressionIndex;
+const TypeExpressionIndex = Sema.TypeExpressionIndex;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
@@ -26,12 +27,10 @@ pub const SymbolLocation = struct {
 
     pub fn format(value: SymbolLocation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.writeAll(value.module);
-        try writer.writeAll("::");
+        try writer.writeAll(separator);
         try writer.writeAll(value.name);
     }
 };
-
-const A = enum(u2) {};
 
 pub const Symbol = union(enum) {
     pub const Common = struct {
@@ -80,9 +79,9 @@ pub const Symbol = union(enum) {
         bank_offset: u16 = undefined,
 
         /// Type of this constant
-        type: TypeSymbol,
+        type: TypeExpressionIndex,
         /// Value of this constant
-        value: ExpressionValue,
+        value: ExpressionIndex,
     };
     pub const Variable = struct {
         /// Commonly shared data between symbols
@@ -97,7 +96,7 @@ pub const Symbol = union(enum) {
         wram_offset: u17 = undefined,
 
         /// Type of this variable
-        type: TypeSymbol,
+        type: TypeExpressionIndex,
     };
     pub const Register = struct {
         pub const AccessType = enum {
@@ -114,36 +113,49 @@ pub const Symbol = union(enum) {
         /// Bank-independant address of this register
         address: u16,
         /// Type of this register
-        type: TypeSymbol,
+        type: TypeExpressionIndex,
     };
 
+    pub const Struct = struct {
+        pub const Field = struct {
+            name: []const u8,
+            type: TypeExpressionIndex,
+            default_value: ExpressionIndex,
+        };
+
+        /// Commonly shared data between symbols
+        common: Common,
+
+        /// Fields of this struct
+        fields: []const Field,
+    };
     pub const Packed = struct {
         pub const Field = struct {
             name: []const u8,
-            type: TypeSymbol,
-            default_value: ?ExpressionValue,
+            type: TypeExpressionIndex,
+            default_value: ExpressionIndex,
         };
 
         /// Commonly shared data between symbols
         common: Common,
 
         /// Backing type of this enum
-        backing_type: TypeSymbol,
+        backing_type: TypeExpressionIndex,
 
-        /// Fields representable by this enum
+        /// Fields of this packed
         fields: []const Field,
     };
     pub const Enum = struct {
         pub const Field = struct {
             name: []const u8,
-            value: ExpressionValue,
+            value: ExpressionIndex,
         };
 
         /// Commonly shared data between symbols
         common: Common,
 
         /// Backing type of this enum
-        backing_type: TypeSymbol,
+        backing_type: TypeExpressionIndex,
 
         /// Fields representable by this enum
         fields: []const Field,
@@ -154,6 +166,7 @@ pub const Symbol = union(enum) {
     variable: Variable,
     register: Register,
 
+    @"struct": Struct,
     @"packed": Packed,
     @"enum": Enum,
 
@@ -163,6 +176,7 @@ pub const Symbol = union(enum) {
             .constant => |*const_sym| &const_sym.common,
             .variable => |*var_sym| &var_sym.common,
             .register => |*reg_sym| &reg_sym.common,
+            .@"struct" => |*struct_sym| &struct_sym.common,
             .@"packed" => |*packed_sym| &packed_sym.common,
             .@"enum" => |*enum_sym| &enum_sym.common,
         };
@@ -182,177 +196,16 @@ pub const Symbol = union(enum) {
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },
-            .constant => |const_sym| {
-                const_sym.value.deinit(allocator);
+            .@"struct" => |struct_sym| {
+                allocator.free(struct_sym.fields);
             },
-            .variable => {},
-            .register => {},
             .@"packed" => |packed_sym| {
-                for (packed_sym.fields) |field| {
-                    if (field.default_value) |default| {
-                        default.deinit(allocator);
-                    }
-                }
                 allocator.free(packed_sym.fields);
             },
             .@"enum" => |enum_sym| {
-                for (enum_sym.fields) |field| {
-                    field.value.deinit(allocator);
-                }
                 allocator.free(enum_sym.fields);
             },
+            else => {},
         }
-    }
-};
-
-pub const TypeSymbol = union(enum) {
-    // Backing types for comptime variables
-    // Allows representing up both u64/i64
-    pub const ComptimeIntValue = i65;
-    /// Useful when working with just the bytes
-    pub const UnsignedComptimeIntValue = u65;
-
-    const Payload = union(enum) {
-        // Payload indicates bit-size
-        signed_int: u8,
-        unsigned_int: u8,
-        // Payload indicates value
-        comptime_int: ComptimeIntValue,
-
-        @"packed": struct {
-            is_signed: bool,
-            bits: u8,
-            symbol_index: SymbolIndex,
-        },
-        @"enum": struct {
-            is_signed: bool,
-            bits: u8,
-            symbol_index: SymbolIndex,
-        },
-    };
-
-    /// Simple type with no extra annotations
-    raw: Payload,
-
-    /// Checks if `type_sym` is assigable to `other_sym`
-    pub fn isAssignableTo(type_sym: TypeSymbol, other_sym: TypeSymbol) bool {
-        if (std.meta.activeTag(type_sym) != std.meta.activeTag(other_sym)) {
-            return false;
-        }
-
-        switch (type_sym) {
-            .raw => |payload| {
-                const other_payload = other_sym.raw;
-
-                switch (payload) {
-                    .signed_int => |bits| switch (other_payload) {
-                        .signed_int => |other_bits| return other_bits >= bits,
-                        .unsigned_int => return false,
-                        .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"enum", .@"packed" => return false, // Require explicit cast
-                    },
-                    .unsigned_int => |bits| switch (other_payload) {
-                        .signed_int => |other_bits| return other_bits > bits,
-                        .unsigned_int => |other_bits| return other_bits >= bits,
-                        .comptime_int => unreachable, // Cannot assign to a comptime_int
-                        .@"enum", .@"packed" => return false, // Require explicit cast
-                    },
-                    .comptime_int => switch (other_payload) {
-                        .signed_int, .unsigned_int, .comptime_int => return true, // Depends on the size of the value
-                        .@"enum", .@"packed" => return false, // Require explicit cast
-                    },
-                    .@"packed" => |backing_type| switch (other_payload) {
-                        .signed_int, .unsigned_int, .comptime_int, .@"enum" => return true, // Require explicit cast
-                        .@"packed" => |other_backing_type| return backing_type.symbol_index == other_backing_type.symbol_index,
-                    },
-                    .@"enum" => |backing_type| switch (other_payload) {
-                        .signed_int, .unsigned_int, .comptime_int, .@"packed" => return true, // Require explicit cast
-                        .@"enum" => |other_backing_type| return backing_type.symbol_index == other_backing_type.symbol_index,
-                    },
-                }
-            },
-        }
-    }
-
-    /// Calculates the size of this type in bytes
-    pub fn size(type_sym: TypeSymbol) u16 {
-        switch (type_sym) {
-            .raw => |payload| return payloadSize(payload),
-        }
-    }
-    fn payloadSize(payload: Payload) u16 {
-        return switch (payload) {
-            .signed_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
-            .unsigned_int => |bits| std.mem.alignForward(u16, bits, 8) / 8,
-            .comptime_int => unreachable,
-            .@"packed" => |backing_type| std.mem.alignForward(u16, backing_type.bits, 8) / 8,
-            .@"enum" => |backing_type| std.mem.alignForward(u16, backing_type.bits, 8) / 8,
-        };
-    }
-
-    /// Calculates the size of this type in bits
-    pub fn bitSize(type_sym: TypeSymbol) u8 {
-        switch (type_sym) {
-            .raw => |payload| return payloadBitSize(payload),
-        }
-    }
-    fn payloadBitSize(payload: Payload) u8 {
-        return switch (payload) {
-            .signed_int => |bits| bits,
-            .unsigned_int => |bits| bits,
-            .comptime_int => unreachable,
-            .@"packed" => |backing_type| backing_type.bits,
-            .@"enum" => |backing_type| backing_type.bits,
-        };
-    }
-
-    pub fn format(type_sym: TypeSymbol, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (type_sym) {
-            .raw => |payload| return formatPayload(payload, writer),
-        }
-    }
-    fn formatPayload(payload: Payload, writer: anytype) !void {
-        return switch (payload) {
-            .signed_int => |bits| writer.print("i{d}", .{bits}),
-            .unsigned_int => |bits| writer.print("u{d}", .{bits}),
-            .comptime_int => writer.writeAll("comptime_int"),
-            .@"packed" => |backing_type| if (backing_type.is_signed)
-                writer.print("packed(i{d})", .{backing_type.bits})
-            else
-                writer.print("packed(u{d})", .{backing_type.bits}),
-            .@"enum" => |backing_type| if (backing_type.is_signed)
-                writer.print("enum(i{d})", .{backing_type.bits})
-            else
-                writer.print("enum(u{d})", .{backing_type.bits}),
-        };
-    }
-
-    pub fn formatDetailed(type_sym: *const TypeSymbol, sema: *const Sema, writer: anytype) !void {
-        switch (type_sym.*) {
-            .raw => |payload| return formatPayloadDetailed(payload, sema, writer),
-        }
-    }
-    fn formatPayloadDetailed(payload: Payload, sema: *const Sema, writer: anytype) !void {
-        return switch (payload) {
-            .signed_int => |bits| writer.print("i{d}", .{bits}),
-            .unsigned_int => |bits| writer.print("u{d}", .{bits}),
-            .comptime_int => writer.writeAll("comptime_int"),
-            .@"packed" => |packed_type_sym| {
-                const packed_sym_loc = sema.getSymbolLocation(packed_type_sym.symbol_index);
-
-                if (packed_type_sym.is_signed)
-                    try writer.print("packed {}(i{d})", .{ packed_sym_loc, packed_type_sym.bits })
-                else
-                    try writer.print("packed {}(u{d})", .{ packed_sym_loc, packed_type_sym.bits });
-            },
-            .@"enum" => |enum_type_sym| {
-                const enum_sym_loc = sema.getSymbolLocation(enum_type_sym.symbol_index);
-
-                if (enum_type_sym.is_signed)
-                    try writer.print("enum {}(i{d})", .{ enum_sym_loc, enum_type_sym.bits })
-                else
-                    try writer.print("enum {}(u{d})", .{ enum_sym_loc, enum_type_sym.bits });
-            },
-        };
     }
 };

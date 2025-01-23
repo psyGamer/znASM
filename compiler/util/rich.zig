@@ -1,6 +1,9 @@
 //! Rich terminal printing, through comptime parsing
 const std = @import("std");
 
+/// [!]Hello World[] is highlighed with this style
+pub const highlight_style = "bold bright_magenta";
+
 /// Parsed [] as printing escape sequences, keeping {} for formatting
 /// Example: "Hello [bold red]World[reset]: [blue]{s}"
 pub fn print(writer: anytype, tty_config: std.io.tty.Config, comptime fmt: []const u8, args: anytype) !void {
@@ -130,8 +133,10 @@ pub fn print(writer: anytype, tty_config: std.io.tty.Config, comptime fmt: []con
                     },
                 };
 
-                const arg_to_print = comptime arg_state.nextArg(arg_pos) orelse
+                const arg_to_print = comptime arg_state.nextArg(arg_pos) orelse {
+                    @compileLog(fmt, args);
                     @compileError("too few arguments");
+                };
 
                 try std.fmt.formatType(
                     @field(args, fields_info[arg_to_print].name),
@@ -176,7 +181,24 @@ pub fn print(writer: anytype, tty_config: std.io.tty.Config, comptime fmt: []con
         comptime std.debug.assert(fmt[i] == ']');
         i += 1;
 
-        comptime var style_iter = std.mem.tokenizeAny(u8, fmt[style_begin..style_end], " \t\n\r");
+        const style_text = fmt[style_begin..style_end];
+
+        // Reset for empty block
+        if (style_text.len == 0) {
+            try tty_config.setColor(writer, .reset);
+            continue;
+        }
+        // Highlight for !
+        if (style_text.len == 1 and style_text[0] == '!') {
+            comptime var style_iter = std.mem.tokenizeAny(u8, highlight_style, " \t\n\r");
+            inline while (comptime style_iter.next()) |style| {
+                try tty_config.setColor(writer, comptime std.meta.stringToEnum(std.io.tty.Color, style).?);
+            }
+            continue;
+        }
+
+        // Regular style handling
+        comptime var style_iter = std.mem.tokenizeAny(u8, style_text, " \t\n\r");
         inline while (comptime style_iter.next()) |style| {
             try tty_config.setColor(writer, comptime std.meta.stringToEnum(std.io.tty.Color, style).?);
         }

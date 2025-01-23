@@ -3,20 +3,20 @@
 const std = @import("std");
 const NodeIndex = @import("../Ast.zig").NodeIndex;
 const Sema = @import("../Sema.zig");
-const ExpressionValue = Sema.ExpressionValue;
-const RegisterType = Sema.RegisterType;
-const TypeSymbol = @import("../symbol.zig").TypeSymbol;
-const Instruction = @import("../instruction.zig").Instruction;
+const RegisterType = @import("../ir.zig").Ir.RegisterType;
 const Analyzer = @import("FunctionAnalyzer.zig");
+const TypeExpressionIndex = Sema.TypeExpressionIndex;
+const TypeExpression = @import("type_expression.zig").TypeExpression;
+const ExpressionIndex = Sema.ExpressionIndex;
 const BuiltinVar = @This();
 
-const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionValue, ?RegisterType) Sema.AnalyzeError!void;
+const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionIndex, RegisterType) Sema.AnalyzeError!void;
 
 name: []const u8,
-type: TypeSymbol,
+type: TypeExpression,
 
 /// List of allowed intermediate registers
-allowed_registers: []const ?RegisterType,
+allowed_registers: []const RegisterType,
 
 // read: ?HandleReadFn,
 write: *const HandleWriteFn,
@@ -35,48 +35,43 @@ pub fn get(name: []const u8) ?BuiltinVar {
 pub const all = [_]BuiltinVar{
     .{
         .name = "@stack_pointer",
-        .type = .{ .raw = .{ .unsigned_int = 16 } },
+        .type = .{ .integer = .{ .signedness = .unsigned, .bits = 16 } },
         .allowed_registers = &.{ .a16, .x8, .x16 },
         .write = handleStackPointerWrite,
     },
 };
 
-fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: ExpressionValue, opt_register_type: ?RegisterType) Sema.AnalyzeError!void {
-    const register_type = opt_register_type orelse {
-        try ana.sema.errors.append(ana.sema.allocator, .{
-            .tag = .expected_intermediate_register,
-            .ast = ana.ast(),
-            .token = ana.ast().nodeToken(node_idx),
-        });
-        return error.AnalyzeFailed;
-    };
+fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: ExpressionIndex, intermediate_register: RegisterType) Sema.AnalyzeError!void {
+    const expr = ana.sema.getExpression(expr_idx).*;
 
     switch (expr) {
-        .value, .variable => {
+        .immediate, .symbol => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
-            try ana.setSizeMode(node_idx, switch (register_type) {
-                .a8, .a16 => .mem,
-                .x8, .x16, .y8, .y16 => .idx,
-            }, switch (register_type) {
-                .a8, .x8, .y8 => .@"8bit",
-                .a16, .x16, .y16 => .@"16bit",
+            try ana.setSizeMode(node_idx, switch (intermediate_register) {
+                .a16 => .mem,
+                .x8, .x16 => .idx,
+                else => unreachable,
+            }, switch (intermediate_register) {
+                .x8 => .@"8bit",
+                .a16, .x16 => .@"16bit",
+                else => unreachable,
             });
 
             switch (expr) {
-                .value => |value| {
+                .immediate => |value| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_value = .{
-                            .register = register_type,
-                            .value = .{ .imm16 = @intCast(value) },
+                            .register = intermediate_register,
+                            .value = .{ .imm16 = value.to(u16) catch unreachable },
                         } },
                         .node = node_idx,
                     });
                 },
-                .variable => |sym_loc| {
+                .symbol => |symbol_idx| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_variable = .{
-                            .register = register_type,
-                            .symbol = sym_loc,
+                            .register = intermediate_register,
+                            .symbol = symbol_idx,
                         } },
                         .node = node_idx,
                     });
@@ -84,7 +79,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                 else => unreachable,
             }
 
-            switch (register_type) {
+            switch (intermediate_register) {
                 .a16 => {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .instruction = .{ .instr = .tcs, .reloc = null } },
@@ -97,50 +92,9 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr: Expression
                         .node = node_idx,
                     });
                 },
-                else => {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .unsupported_register,
-                        .ast = ana.ast(),
-                        .token = ana.ast().nodeToken(node_idx),
-                        .extra = .{ .unsupported_register = .{
-                            .register = register_type,
-                            .message = "@stack_pointer",
-                        } },
-                    });
-                    return error.AnalyzeFailed;
-                },
+                else => unreachable,
             }
         },
-        .register => |reg| {
-            try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 1);
-
-            switch (reg) {
-                .a16 => {
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .instruction = .{ .instr = .tcs, .reloc = null } },
-                        .node = node_idx,
-                    });
-                },
-                .x8, .x16 => {
-                    ana.ir.appendAssumeCapacity(.{
-                        .tag = .{ .instruction = .{ .instr = .txs, .reloc = null } },
-                        .node = node_idx,
-                    });
-                },
-                else => {
-                    try ana.sema.errors.append(ana.sema.allocator, .{
-                        .tag = .unsupported_register,
-                        .ast = ana.ast(),
-                        .token = ana.ast().nodeToken(node_idx),
-                        .extra = .{ .unsupported_register = .{
-                            .register = register_type,
-                            .message = "@stack_pointer",
-                        } },
-                    });
-                    return error.AnalyzeFailed;
-                },
-            }
-        },
-        .packed_fields => unreachable,
+        else => unreachable,
     }
 }
