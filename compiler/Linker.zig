@@ -144,7 +144,7 @@ pub fn resolveSymbolAddresses(link: *Linker) !void {
             },
             .variable => |*var_sym| {
                 // TODO: Place variables from high addr-variance to low addr-variance and from large to small
-                const var_size = var_sym.type.size(link.sema);
+                const var_size = var_sym.type.byteSize(link.sema);
                 const possible = used_ram[var_sym.wram_offset_min..var_sym.wram_offset_max];
 
                 var last_start: u16 = 0;
@@ -499,10 +499,10 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                         }
                     }
 
-                    if (var_sym.type.size(link.sema) == 1) {
+                    if (var_sym.type.byteSize(link.sema) == 1) {
                         try writer.print("SnesWorkRam:{x}:{s}", .{ var_sym.wram_offset, debug_sym_name });
                     } else {
-                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.size(link.sema) - 1, debug_sym_name });
+                        try writer.print("SnesWorkRam:{x}-{x}:{s}", .{ var_sym.wram_offset, var_sym.wram_offset + var_sym.type.byteSize(link.sema) - 1, debug_sym_name });
                     }
                     for (comments.items, 0..) |comment, i| {
                         if (i == 0) {

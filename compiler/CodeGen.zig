@@ -8,6 +8,7 @@ const Module = @import("Module.zig");
 const Symbol = @import("symbol.zig").Symbol;
 const TypeSymbol = @import("symbol.zig").TypeSymbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
+const SymbolIndex = Sema.SymbolIndex;
 const Sema = @import("Sema.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const Opcode = @import("instruction.zig").Opcode;
@@ -115,6 +116,8 @@ const FunctionBuilder = struct {
 
     symbol_idx: Sema.SymbolIndex,
 
+    ir_idx: u32 = 0,
+
     instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
@@ -124,23 +127,30 @@ const FunctionBuilder = struct {
     idx_size: Instruction.SizeMode,
 
     pub fn build(b: *FunctionBuilder) !void {
-        for (b.function().ir) |ir| {
+        try b.emit(.none, .clc);
+        try b.emit(.none, .xce);
+
+        while (b.ir_idx < b.function().ir.len) : (b.ir_idx += 1) {
+            const ir = b.function().ir[b.ir_idx];
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
                 .change_status_flags => try b.handleChangeStatusFlags(ir),
-                .load_value => try b.handleLoadValue(ir),
-                .load_variable => try b.handleLoadVariable(ir),
-                .store_variable => try b.handleStoreVariable(ir),
-                .zero_variable => try b.handleZeroVariable(ir),
-                .and_value => try b.handleAndValue(ir),
-                .and_variable => try b.handleAndVariable(ir),
-                .or_value => try b.handleOrValue(ir),
-                .or_variable => try b.handleOrVariable(ir),
-                .shift_accum_left => try b.handleShiftAccumLeft(ir),
-                .shift_accum_right => try b.handleShiftAccumRight(ir),
-                .rotate_accum_left => try b.handleRotateAccumLeft(ir),
-                .rotate_accum_right => try b.handleRotateAccumRight(ir),
-                .clear_bits => try b.handleClearBits(ir),
+                .store => try b.handleStore(ir),
+                .store_operation => unreachable,
+                // .load_value => try b.handleLoadValue(ir),
+                // .load_variable => try b.handleLoadVariable(ir),
+                // .store_variable => try b.handleStoreVariable(ir),
+                // .zero_variable => try b.handleZeroVariable(ir),
+                // .and_value => try b.handleAndValue(ir),
+                // .and_variable => try b.handleAndVariable(ir),
+                // .or_value => try b.handleOrValue(ir),
+                // .or_variable => try b.handleOrVariable(ir),
+                // .shift_accum_left => try b.handleShiftAccumLeft(ir),
+                // .shift_accum_right => try b.handleShiftAccumRight(ir),
+                // .rotate_accum_left => try b.handleRotateAccumLeft(ir),
+                // .rotate_accum_right => try b.handleRotateAccumRight(ir),
+                // .clear_bits => try b.handleClearBits(ir),
+                inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
                 .call => try b.handleCall(ir),
                 .branch => try b.handleBranch(ir),
                 .label => try b.handleLabel(ir),
@@ -194,6 +204,224 @@ const FunctionBuilder = struct {
             b.idx_size = if (idx_8bit) .@"8bit" else .@"16bit";
         }
     }
+
+    fn handleStore(b: *FunctionBuilder, ir: Ir) !void {
+        const store = ir.tag.store;
+        const operations = b.function().ir[(b.ir_idx + 1)..(b.ir_idx + store.operations + 1)];
+        std.debug.assert(operations.len != 0);
+
+        b.ir_idx += store.operations;
+
+        var start_idx: usize = 0;
+        var curr_offset = operations[start_idx].tag.store_operation.write_offset;
+        for (operations, 0..) |op_ir, op_idx| {
+            const op = op_ir.tag.store_operation;
+            if (op_idx != operations.len - 1 and operations[op_idx + 1].tag.store_operation.write_offset == curr_offset) {
+                continue;
+            }
+            defer if (op_idx != operations.len - 1) {
+                start_idx = op_idx + 1;
+                curr_offset = operations[start_idx].tag.store_operation.write_offset;
+            };
+
+            // Boundry of current write
+            var immediate_value: u16 = 0;
+            var mask_value: u16 = 0;
+            // var shift_offset: u16 = 0;
+            var variables = [_]packed struct { symbol: SymbolIndex, bit_size: u16 }{.{ .symbol = .none, .bit_size = undefined }} ** 16;
+
+            // Iterate in reverse, since most-significant bits need to come first
+            var iter = std.mem.reverseIterator(operations[start_idx..(op_idx + 1)]);
+            while (iter.next()) |curr_op_ir| {
+                const curr_op = curr_op_ir.tag.store_operation;
+                switch (curr_op.value) {
+                    .immediate => |value| {
+                        immediate_value |= (value.to(u16) catch unreachable) << @intCast(curr_op.bit_offset % store.intermediate_register.bitSize());
+                    },
+                    .global => |info| {
+                        // TODO: Support packed field loads
+                        std.debug.assert(info.bit_offset % 8 == 0);
+
+                        variables[curr_op.bit_offset % store.intermediate_register.bitSize()] = .{
+                            .symbol = info.symbol,
+                            .bit_size = curr_op.bit_size,
+                        };
+                    },
+                }
+
+                mask_value |= ((@as(u16, 1) << @intCast(curr_op.bit_size)) - 1) << @intCast(curr_op.bit_offset % store.intermediate_register.bitSize());
+            }
+
+            // Next byte will be overwritten anyway
+            if (op.write_offset == curr_offset + 1) {
+                mask_value |= std.math.maxInt(u8) << 8;
+            }
+
+            // Flush current write
+            const full_write = switch (store.intermediate_register) {
+                .a8, .x8, .y8 => mask_value & std.math.maxInt(u8) == std.math.maxInt(u8),
+                .a16, .x16, .y16 => mask_value & std.math.maxInt(u16) == std.math.maxInt(u16),
+                .none => true,
+            };
+            const imm_value: Instruction.Imm816 = switch (store.intermediate_register) {
+                .a8, .x8, .y8 => .{ .imm8 = @intCast(immediate_value) },
+                .a16, .x16, .y16 => .{ .imm16 = @intCast(immediate_value) },
+                else => undefined,
+            };
+            std.log.info("FLUSH {} @ {} || {} {b} {}", .{ immediate_value, curr_offset, full_write, mask_value, imm_value });
+
+            if (full_write) {
+                // Full register write
+                var shift_offset: u8 = std.math.maxInt(u8);
+                for (variables, 0..) |variable, bit_offset| {
+                    if (variable.symbol == .none) {
+                        continue;
+                    }
+
+                    if (shift_offset == std.math.maxInt(u8)) {
+                        try b.emitReloc(ir.node, switch (store.intermediate_register) {
+                            .a8, .a16 => .{ .lda_addr16 = undefined },
+                            .x8, .x16 => .{ .ldx_addr16 = undefined },
+                            .y8, .y16 => .{ .ldy_addr16 = undefined },
+                            else => unreachable,
+                        }, .{
+                            .type = .addr16,
+                            .target_symbol = variable.symbol,
+                            .target_offset = @intCast(@divExact(bit_offset, 8)),
+                        });
+                    } else {
+                        std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+
+                        for (0..(shift_offset - bit_offset)) |_| {
+                            try b.emit(ir.node, .asl_accum);
+                        }
+                        try b.emitReloc(ir.node, .{ .ora_addr16 = undefined }, .{
+                            .type = .addr16,
+                            .target_symbol = store.symbol,
+                            .target_offset = curr_offset,
+                        });
+                    }
+
+                    shift_offset = @intCast(bit_offset);
+                }
+                if (shift_offset == std.math.maxInt(u8)) {
+                    try b.emit(op_ir.node, switch (store.intermediate_register) {
+                        .a8, .a16 => .{ .lda_imm = imm_value },
+                        .x8, .x16 => .{ .ldx_imm = imm_value },
+                        .y8, .y16 => .{ .ldy_imm = imm_value },
+                        else => unreachable,
+                    });
+                } else {
+                    std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+
+                    for (0..shift_offset) |_| {
+                        try b.emit(op_ir.node, .asl_accum);
+                    }
+                    try b.emit(op_ir.node, .{ .ora_imm = imm_value });
+                }
+
+                const instr: Instruction = if (store.intermediate_register == .none or (immediate_value == 0 and shift_offset == 0))
+                    .{ .stz_addr16 = undefined }
+                else switch (store.intermediate_register) {
+                    .a8, .a16 => .{ .sta_addr16 = undefined },
+                    .x8, .x16 => .{ .stx_addr16 = undefined },
+                    .y8, .y16 => .{ .sty_addr16 = undefined },
+                    else => unreachable,
+                };
+
+                try b.emitReloc(op_ir.node, instr, .{
+                    .type = .addr16,
+                    .target_symbol = store.symbol,
+                    .target_offset = curr_offset,
+                });
+            } else {
+                // Partial register write
+                std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+
+                var min_left_shifts: u8 = std.math.maxInt(u8);
+                var min_left_offset: u8 = undefined;
+                var min_right_shifts: u8 = std.math.maxInt(u8);
+                var min_right_offset: u8 = undefined;
+
+                var bit_offset: u8 = 0;
+                var shift_offset: u8 = 0;
+                var has_variables = false;
+
+                const rotate_size: u8 = switch (store.intermediate_register) {
+                    // +1 since the carry bit is included when rotating
+                    .a8 => 8 + 1,
+                    .a16 => 16 + 1,
+                    else => unreachable,
+                };
+
+                while (true) : (bit_offset += 1) {
+                    if (bit_offset == variables.len) {
+                        if (min_left_shifts == std.math.maxInt(u8) or min_right_shifts == std.math.maxInt(u8)) {
+                            break;
+                        }
+
+                        std.log.warn("MinLeft {} @ {}", .{ min_left_shifts, min_left_offset });
+                        std.log.warn("MinRight {} @ {}", .{ min_left_shifts, min_left_offset });
+                        if (min_left_shifts <= min_right_shifts) {
+                            shift_offset = min_left_offset;
+                        } else {
+                            shift_offset = min_right_offset;
+                        }
+
+                        if (has_variables) {} else {}
+
+                        variables[shift_offset].symbol = .none; // Mark variable as used
+                        has_variables = true;
+
+                        // Repeat for next variable
+                        bit_offset = 0;
+                        continue;
+                    }
+
+                    if (variables[bit_offset].symbol == .none) {
+                        continue;
+                    }
+
+                    const left_shifts: u8 = @intCast(@mod(@as(i8, @intCast(bit_offset)) - @as(i8, @intCast(shift_offset)), @as(i8, @intCast(rotate_size))));
+                    const right_shifts: u8 = @intCast(@mod(rotate_size - bit_offset + shift_offset, rotate_size));
+                    std.log.info("SHIFT at {d} from {d} << {d} | >> {d}", .{ bit_offset, shift_offset, left_shifts, right_shifts });
+
+                    if (left_shifts < min_left_shifts) {
+                        min_left_shifts = left_shifts;
+                        min_left_offset = bit_offset;
+                    }
+                    if (right_shifts < min_right_shifts) {
+                        min_right_shifts = right_shifts;
+                        min_right_offset = bit_offset;
+                    }
+                }
+
+                if (has_variables) {
+                    @panic("TODO");
+                } else {
+                    try b.emitReloc(op_ir.node, .{ .lda_addr16 = undefined }, .{
+                        .type = .addr16,
+                        .target_symbol = store.symbol,
+                        .target_offset = curr_offset,
+                    });
+                    try b.emit(op_ir.node, .{ .and_imm = switch (store.intermediate_register) {
+                        .a8 => .{ .imm8 = @truncate(~mask_value) },
+                        .a16 => .{ .imm16 = @truncate(~mask_value) },
+                        else => undefined,
+                    } });
+                    try b.emit(op_ir.node, .{ .ora_imm = imm_value });
+                    try b.emitReloc(op_ir.node, .{ .sta_addr16 = undefined }, .{
+                        .type = .addr16,
+                        .target_symbol = store.symbol,
+                        .target_offset = curr_offset,
+                    });
+                }
+            }
+        }
+        // const operations
+
+    }
+
     fn handleLoadValue(b: *FunctionBuilder, ir: Ir) !void {
         const load = ir.tag.load_value;
 
@@ -202,6 +430,7 @@ const FunctionBuilder = struct {
                 .a8, .a16 => .{ .lda_imm = load.value },
                 .x8, .x16 => .{ .ldx_imm = load.value },
                 .y8, .y16 => .{ .ldy_imm = load.value },
+                .none => unreachable,
             },
 
             .mem_size = b.mem_size,
@@ -245,6 +474,8 @@ const FunctionBuilder = struct {
                 } }
             else
                 unreachable,
+
+            .none => unreachable,
         };
 
         try b.instructions.append(b.sema.allocator, .{

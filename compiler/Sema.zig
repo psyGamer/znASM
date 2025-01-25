@@ -30,20 +30,18 @@ pub const ExpressionIndex = enum(u32) {
 
     /// Parses the expression and resolves an index to it
     pub fn resolve(sema: *Sema, target_type_idx: TypeExpressionIndex, node_idx: NodeIndex, module_idx: ModuleIndex) AnalyzeError!ExpressionIndex {
-        const index: ExpressionIndex = @enumFromInt(@as(u32, @intCast(sema.expressions.items.len)));
         try sema.expressions.append(sema.allocator, try .parse(sema, target_type_idx, node_idx, module_idx));
-        return index;
+        return @enumFromInt(@as(u32, @intCast(sema.expressions.items.len - 1)));
     }
 };
 pub const TypeExpressionIndex = enum(u32) {
     none = std.math.maxInt(u32),
     _,
 
-    /// Parses the type-expression and resolves an index to it
+    /// Parses the type-expr ession and resolves an index to it
     pub fn resolve(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex, parent: SymbolIndex) AnalyzeError!TypeExpressionIndex {
-        const index: TypeExpressionIndex = @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len)));
         try sema.type_expressions.append(sema.allocator, try .parse(sema, node_idx, module_idx, parent));
-        return index;
+        return @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len - 1)));
     }
 
     /// Computes the exact byte-size required for this type
@@ -852,8 +850,10 @@ pub const ErrorTag = enum {
     value_too_large,
     int_bitwidth_too_large,
     packed_too_large,
+    intermediate_register_too_large,
     no_members,
     dependency_loop,
+    fields_cross_register_boundry,
 
     pub fn message(tag: ErrorTag) []const u8 {
         return switch (tag) {
@@ -892,8 +892,10 @@ pub const ErrorTag = enum {
             .value_too_large => "Value [!]{}[] is too large to fit into {s} [!]{s} {}-bit number",
             .int_bitwidth_too_large => "Bit-width of primitive integer type [!]{s}[] exceedes maximum bit-width of [!]{d}",
             .packed_too_large => "Backing-type [!]{}[], has a maximum bit-size of [!]{d}[], but the packed struct fields have a total bit-size of [!]{d}",
+            .intermediate_register_too_large => "Intermediate register [!]{s}[] cannot write [!]single byte[] values",
             .no_members => "Type [!]{}[] has no members",
             .dependency_loop => "Detected a [!]dependency loop",
+            .fields_cross_register_boundry => "Packed fields cross [!]{d}-bit register boudry",
         };
     }
 };
@@ -981,12 +983,12 @@ pub fn errInvalidVectorBank(sema: *Sema, token_idx: Ast.TokenIndex, module_idx: 
     try writeErrorEpilogue(note_ctx);
 }
 
-pub fn failUnsupportedIntermediateRegister(sema: *Sema, token_idx: Ast.TokenIndex, module_idx: ModuleIndex, used_register: Ir.RegisterType, allowed_registers: []const Ir.RegisterType, usage: []const u8) AnalyzeError!void {
-    const err_ctx = try sema.writeErrorPrologue(token_idx, module_idx, .err);
-    try err_ctx.print("Unsupported [!]intermediate register {s}[], for use with [!]{s}", .{ @tagName(used_register), usage });
+pub fn failUnsupportedIntermediateRegister(sema: *Sema, expr_token_idx: Ast.TokenIndex, register_token_idx: Ast.TokenIndex, module_idx: ModuleIndex, used_register: Ir.RegisterType, allowed_registers: []const Ir.RegisterType, usage: []const u8) AnalyzeError!void {
+    const err_ctx = try sema.writeErrorPrologue(expr_token_idx, module_idx, .err);
+    try err_ctx.print("Unsupported intermediate register [!]{s}[], for use with [!]{s}", .{ @tagName(used_register), usage });
     try writeErrorEpilogue(err_ctx);
 
-    const note_ctx = try sema.writeErrorPrologue(token_idx, module_idx, .note);
+    const note_ctx = try sema.writeErrorPrologue(register_token_idx, module_idx, .note);
     try note_ctx.print("Supported intermediate registers are: ", .{});
     for (allowed_registers, 0..) |register, i| {
         if (i > 0) {
@@ -1035,8 +1037,8 @@ fn writeErrorPrologue(sema: *Sema, token_idx: Ast.TokenIndex, module_idx: Module
 
         const src_args = .{ ast.source_path, src_loc.line + 1, src_loc.column + 1 };
         switch (msg_type) {
-            .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", src_args),
-            .note => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", src_args),
+            .err => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [red]error: ", src_args),
+            .note => try rich.print(writer, tty_config, "[bold]{s}:{}:{}: [cyan]note: ", src_args),
         }
 
         return .{
@@ -1048,8 +1050,8 @@ fn writeErrorPrologue(sema: *Sema, token_idx: Ast.TokenIndex, module_idx: Module
         };
     } else {
         switch (msg_type) {
-            .err => try rich.print(writer, tty_config, "[bold cyan]note: ", .{}),
-            .note => try rich.print(writer, tty_config, "[bold red]error: ", .{}),
+            .err => try rich.print(writer, tty_config, "[bold red]error: ", .{}),
+            .note => try rich.print(writer, tty_config, "[bold cyan]note: ", .{}),
         }
 
         return .{

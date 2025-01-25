@@ -16,11 +16,18 @@ pub const Ir = struct {
         y8,
         y16,
 
-        pub fn size(reg: RegisterType) u16 {
+        pub fn byteSize(reg: RegisterType) u16 {
             return switch (reg) {
                 .none => unreachable,
                 .a8, .x8, .y8 => 1,
                 .a16, .x16, .y16 => 2,
+            };
+        }
+        pub fn bitSize(reg: RegisterType) u16 {
+            return switch (reg) {
+                .none => unreachable,
+                .a8, .x8, .y8 => 8,
+                .a16, .x16, .y16 => 16,
             };
         }
     };
@@ -47,6 +54,9 @@ pub const Ir = struct {
 
         bit_offset: u16,
         bit_size: u16,
+
+        /// Byte-offset for the register write for this operation
+        write_offset: u16 = undefined,
     };
 
     const Tag = union(enum) {

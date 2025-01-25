@@ -21,7 +21,7 @@ const ExpressionIndex = Sema.ExpressionIndex;
 const TypeExpressionIndex = Sema.TypeExpressionIndex;
 
 /// A parsed value, used for assignments and function calls
-pub const Expression = union(enum) {
+pub const Expression = struct {
     pub const Field = struct {
         type: TypeExpressionIndex,
         value: ExpressionIndex,
@@ -29,27 +29,28 @@ pub const Expression = union(enum) {
         bit_offset: u16,
     };
 
-    /// Compile-time known arbitrarily sized value
-    immediate: std.math.big.int.Const,
+    value: union(enum) {
+        /// Compile-time known arbitrarily sized value
+        immediate: std.math.big.int.Const,
 
-    /// Runtime symbol reference
-    symbol: SymbolIndex,
+        /// Runtime symbol reference
+        symbol: SymbolIndex,
 
-    /// Initializer for fields on objects (struct, packed)
-    field_initializer: Field,
+        /// Initializer for fields on objects (struct, packed)
+        field_initializer: Field,
 
-    /// Initializer for full objects (struct, packed)
-    /// Colletion of `field_initializer`s for all fields
-    object_initializer: struct {
-        fields_start: ExpressionIndex,
-        fields_end: ExpressionIndex,
+        /// Initializer for full objects (struct, packed)
+        /// Colletion of `field_initializer`s for all fields
+        object_initializer: struct {
+            fields_start: ExpressionIndex,
+            fields_end: ExpressionIndex,
+        },
     },
+    node: NodeIndex,
 
     pub fn parse(sema: *Sema, target_type_idx: TypeExpressionIndex, node_idx: NodeIndex, module_idx: ModuleIndex) Error!Expression {
         const module = sema.getModule(module_idx);
         const ast = &module.ast;
-
-        const target_type = sema.getTypeExpression(target_type_idx);
 
         switch (ast.nodeTag(node_idx)) {
             .expr_ident => {
@@ -67,14 +68,15 @@ pub const Expression = union(enum) {
                 });
 
                 // Validate type
+                const target_type = sema.getTypeExpression(target_type_idx);
                 if (!target_type.isAssignableFrom(source_type)) {
                     try sema.emitError(source_symbol_ident, module_idx, .expected_type, .{ target_type.fmt(sema), source_type.fmt(sema) });
                     return error.AnalyzeFailed;
                 }
 
                 return switch (source_symbol.*) {
-                    .constant => |const_sym| .{ .immediate = sema.getExpression(const_sym.value).immediate },
-                    .variable, .register => .{ .symbol = source_symbol_idx },
+                    .constant => |const_sym| .{ .value = .{ .immediate = sema.getExpression(const_sym.value).value.immediate }, .node = node_idx },
+                    .variable, .register => .{ .value = .{ .symbol = source_symbol_idx }, .node = node_idx },
                     else => unreachable,
                 };
             },
@@ -82,6 +84,7 @@ pub const Expression = union(enum) {
                 const value_lit = ast.nodeToken(node_idx);
                 const value = try sema.parseBigInt(std.math.big.int.Const, value_lit, module_idx);
 
+                const target_type = sema.getTypeExpression(target_type_idx);
                 if (!target_type.isAssignableFrom(&.comptime_integer)) {
                     try sema.emitError(value_lit, module_idx, .expected_type, .{ target_type.fmt(sema), "comptime_int" });
                     return error.AnalyzeFailed;
@@ -103,12 +106,13 @@ pub const Expression = union(enum) {
                     else => unreachable,
                 }
 
-                return .{ .immediate = value };
+                return .{ .value = .{ .immediate = value }, .node = node_idx };
             },
             .expr_enum_value => {
                 const value_lit = ast.nodeToken(node_idx);
                 const literal_name = ast.parseIdentifier(value_lit);
 
+                const target_type = sema.getTypeExpression(target_type_idx);
                 switch (target_type.*) {
                     .@"enum" => |symbol_idx| {
                         const enum_sym = sema.getSymbol(symbol_idx).@"enum";
@@ -134,6 +138,7 @@ pub const Expression = union(enum) {
                 }
             },
             .expr_init => {
+                const target_type = sema.getTypeExpression(target_type_idx);
                 switch (target_type.*) {
                     inline .@"struct", .@"packed" => |symbol_idx, tag| {
                         var fields: std.StringArrayHashMapUnmanaged(Field) = .empty;
@@ -244,13 +249,13 @@ pub const Expression = union(enum) {
 
                         try sema.expressions.ensureUnusedCapacity(sema.allocator, fields.count());
                         for (fields.values()) |field| {
-                            sema.expressions.appendAssumeCapacity(.{ .field_initializer = field });
+                            sema.expressions.appendAssumeCapacity(.{ .value = .{ .field_initializer = field }, .node = sema.getExpression(field.value).node });
                         }
 
-                        return .{ .object_initializer = .{
+                        return .{ .value = .{ .object_initializer = .{
                             .fields_start = start_idx,
                             .fields_end = end_idx,
-                        } };
+                        } }, .node = node_idx };
                     },
                     else => {
                         try sema.emitError(ast.nodeToken(node_idx), module_idx, .expected_type, .{ target_type.fmt(sema), "object-initializer" });

@@ -44,7 +44,7 @@ pub const all = [_]BuiltinVar{
 fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: ExpressionIndex, intermediate_register: RegisterType) Sema.AnalyzeError!void {
     const expr = ana.sema.getExpression(expr_idx).*;
 
-    switch (expr) {
+    switch (expr.value) {
         .immediate, .symbol => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
             try ana.setSizeMode(node_idx, switch (intermediate_register) {
@@ -57,7 +57,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expres
                 else => unreachable,
             });
 
-            switch (expr) {
+            switch (expr.value) {
                 .immediate => |value| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_value = .{

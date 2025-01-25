@@ -443,10 +443,10 @@ pub fn parseBigIntLiteral(tree: Ast, comptime T: type, token_idx: TokenIndex, al
 
     switch (T) {
         std.math.big.int.Const => {
+            // Shrink allocation to avoid leaking excess capacity
             if (allocator.resize(int.limbs, int.len())) {
                 return int.toConst();
             } else {
-                // Shrink allocation to avoid leaking excess capacity
                 const limbs = try allocator.alloc(std.math.big.Limb, int.len());
                 @memcpy(limbs, int.limbs[0..int.len()]);
                 defer int.deinit();
