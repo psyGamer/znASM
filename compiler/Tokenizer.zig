@@ -5,7 +5,6 @@ const Tokenizer = @This();
 pub const Token = struct {
     pub const Tag = enum {
         invalid,
-        new_line,
         eof,
 
         period,
@@ -45,7 +44,6 @@ pub const Token = struct {
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
                 .invalid,
-                .new_line,
                 .eof,
                 .ident,
                 .builtin_ident,
@@ -86,7 +84,6 @@ pub const Token = struct {
         pub fn symbol(tag: Tag) []const u8 {
             return tag.lexeme() orelse switch (tag) {
                 .invalid => "invalid bytes",
-                .new_line => "a new-line",
                 .ident => "an identifier",
                 .builtin_ident => "a built-in identifier",
                 .int_literal => "a number literal",
@@ -172,13 +169,8 @@ pub fn next(lexer: *Tokenizer) Token {
 
         switch (state) {
             .start => switch (c) {
-                ' ', '\t' => {
+                ' ', '\t', '\n', '\r' => {
                     token.loc.start = lexer.index + 1;
-                },
-                '\n', '\r' => {
-                    token.tag = .new_line;
-                    lexer.index += 1;
-                    break;
                 },
 
                 'a'...'z', 'A'...'Z', '_' => {
@@ -301,9 +293,7 @@ pub fn next(lexer: *Tokenizer) Token {
                     state = .doc_comment;
                 },
                 '\n', '\r' => {
-                    token.tag = .new_line;
-                    lexer.index += 1;
-                    break;
+                    state = .start;
                 },
                 else => {},
             },

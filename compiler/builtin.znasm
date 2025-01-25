@@ -1,4 +1,4 @@
-module BuiltIn
+module BuiltIn;
 
 /// Used as a fallback for when an interrupt vector isn't defiend
 fn @fallback() {

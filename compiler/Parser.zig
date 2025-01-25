@@ -55,17 +55,12 @@ pub fn parseRoot(p: *Parser) ParseError!void {
         .data = undefined,
     });
 
-    p.skipNewLines();
     try p.scratch.append(p.allocator, @intFromEnum(try p.parseModuleDef()));
 
     var doc_start: ?usize = null;
     while (true) {
         const t = p.token_tags[p.index];
         std.log.info("t {}", .{t});
-        if (t == .new_line) {
-            p.index += 1;
-            continue;
-        }
         if (t == .doc_comment) {
             doc_start = doc_start orelse p.scratch.items.len;
             try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
@@ -146,11 +141,11 @@ pub fn parseRoot(p: *Parser) ParseError!void {
     p.nodes.items(.data)[@intFromEnum(root)] = .{ .sub_range = try p.writeExtraSubRange(p.scratch.items[tld_start..]) };
 }
 
-/// ModuleDef <- KEYWORD_module IDENTIFIER NEW_LINE
+/// ModuleDef <- KEYWORD_module IDENTIFIER SEMICOLON
 fn parseModuleDef(p: *Parser) ParseError!NodeIndex {
     _ = try p.expectToken(.keyword_module);
     const ident = try p.expectToken(.ident);
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     // TODO: Verify module name is legal
     return try p.addNode(.{
@@ -186,7 +181,7 @@ fn parseFnDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// ConstDef <- (KEYWORD_pub)? KEYWORD_const IDENTIFIER COLON TypeExpr (BankAttr)? EQUAL Expr NEW_LINE
+/// ConstDef <- (KEYWORD_pub)? KEYWORD_const IDENTIFIER COLON TypeExpr (BankAttr)? EQUAL Expr SEMICOLON
 fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_const = p.eatToken(.keyword_const) orelse return .none;
@@ -199,7 +194,7 @@ fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     if (value_expr == .none) {
         return p.fail(.expected_expr);
     }
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     return try p.addNode(.{
         .tag = .const_def,
@@ -216,7 +211,7 @@ fn parseConstDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// VarDef <- (KEYWORD_pub)? KEYWORD_var IDENTIFIER COLON TypeExpr (BankAttr)? NEW_LINE
+/// VarDef <- (KEYWORD_pub)? KEYWORD_var IDENTIFIER COLON TypeExpr (BankAttr)? SEMICOLON
 fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_var = p.eatToken(.keyword_var) orelse return .none;
@@ -224,7 +219,7 @@ fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = try p.expectToken(.colon);
     const type_expr = try p.parseTypeExpr();
     const bank_attr = try p.parseBankAttr();
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     return try p.addNode(.{
         .tag = .var_def,
@@ -240,7 +235,7 @@ fn parseVarDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     });
 }
 
-/// RegDef <- (KEYWORD_pub)? KEYWORD_reg IDENTIFIER COLON TypeExpr AccessAttr EQUAL INT_LITERAL NEW_LINE
+/// RegDef <- (KEYWORD_pub)? KEYWORD_reg IDENTIFIER COLON TypeExpr AccessAttr EQUAL INT_LITERAL SEMICOLON
 fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     _ = p.eatToken(.keyword_pub);
     const keyword_reg = p.eatToken(.keyword_reg) orelse return .none;
@@ -250,7 +245,7 @@ fn parseRegDef(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     const access_attr = try p.parseAccessAttr();
     _ = try p.expectToken(.equal);
     const ident_address = try p.expectToken(.int_literal);
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     return try p.addNode(.{
         .tag = .reg_def,
@@ -337,19 +332,20 @@ fn parseEnumDef(p: *Parser, doc_comments: Node.SubRange, decl_type: DeclType) Pa
     });
 }
 
-/// StructBlock <- LBRACE NEW_LINE (StructField)* RBRACE
+/// StructBlock <- LBRACE StructField? (COMMA StructField)* RBRACE
 fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     const lbrace = try p.expectToken(.lbrace);
-    _ = try p.expectToken(.new_line);
 
     var doc_start: ?usize = null;
+    var has_comma = true; // First argument doesn't need a comma before it
     while (true) {
         const t = p.token_tags[p.index];
-        if (t == .new_line) {
+        if (t == .comma and !has_comma) {
             p.index += 1;
+            has_comma = true;
             continue;
         }
         if (t == .rbrace) {
@@ -365,6 +361,15 @@ fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
             p.index += 1;
             continue;
         }
+
+        if (!has_comma) {
+            // Most likely just missing. Can continue parsing
+            try p.errors.append(p.allocator, .{
+                .tag = .expected_comma_after_arg,
+                .token = @enumFromInt(p.index),
+            });
+        }
+        has_comma = false;
 
         const doc_comments: Node.SubRange = get_comments: {
             if (doc_start) |start| {
@@ -390,7 +395,6 @@ fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
         return p.fail(.expected_enum_member);
     }
     _ = try p.expectToken(.rbrace);
-    _ = try p.expectToken(.new_line);
 
     return p.addNode(.{
         .tag = .struct_block,
@@ -399,7 +403,7 @@ fn parseStructBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// StructField <- IDENTIFIER COLON TypeExpr (EQUAL Expr)? COMMA NEW_LINE
+/// StructField <- IDENTIFIER COLON TypeExpr (EQUAL Expr)?
 fn parseStructField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeIndex {
     const ident_name = p.eatToken(.ident) orelse return .none;
     _ = try p.expectToken(.colon);
@@ -409,9 +413,6 @@ fn parseStructField(p: *Parser, doc_comments: Node.SubRange) ParseError!NodeInde
         try p.parseExpr()
     else
         .none;
-
-    _ = try p.expectToken(.comma);
-    _ = try p.expectToken(.new_line);
 
     return try p.addNode(.{
         .tag = .struct_field,
@@ -432,16 +433,11 @@ fn parseEnumBlock(p: *Parser) ParseError!NodeIndex {
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     const lbrace = try p.expectToken(.lbrace);
-    _ = try p.expectToken(.new_line);
 
     var doc_start: ?usize = null;
     var has_comma = true; // First argument doesn't need a comma before it
     while (true) {
         const t = p.token_tags[p.index];
-        if (t == .new_line) {
-            p.index += 1;
-            continue;
-        }
         if (t == .comma) {
             p.index += 1;
             has_comma = true;
@@ -554,19 +550,14 @@ fn parseAccessAttr(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Block <- LBRACE NEW_LINE (NEW_LINE | Expr | Label)* RBRACE NEW_LINE
+/// Block <- LBRACE (Expr | Label)* RBRACE
 fn parseBlock(p: *Parser) ParseError!NodeIndex {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     const lbrace = try p.expectToken(.lbrace);
-    _ = try p.expectToken(.new_line);
     while (true) {
         const t = p.token_tags[p.index];
-        if (t == .new_line) {
-            p.index += 1;
-            continue;
-        }
         if (t == .rbrace) {
             break;
         }
@@ -608,7 +599,6 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
         return p.fail(.expected_statement);
     }
     _ = try p.expectToken(.rbrace);
-    _ = try p.expectToken(.new_line);
 
     return p.addNode(.{
         .tag = .block,
@@ -617,11 +607,10 @@ fn parseBlock(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// Label <- IDENTIFIER COLON NEW_LINE
+/// Label <- IDENTIFIER COLON
 fn parseLabel(p: *Parser) ParseError!NodeIndex {
     const ident_name = p.eatToken(.ident) orelse return .none;
     _ = p.eatToken(.colon) orelse return .none;
-    _ = p.eatToken(.new_line) orelse return .none;
 
     return try p.addNode(.{
         .tag = .label,
@@ -653,7 +642,7 @@ fn parseFieldAccess(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// AssignStatement <- FieldAccess EQUAL Expr (COLON IDENTIFIER)? NEW_LINE
+/// AssignStatement <- FieldAccess EQUAL Expr (COLON IDENTIFIER)? SEMICOLON
 fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
     const field_access = try p.parseFieldAccess();
     if (field_access == .none) return .none;
@@ -670,7 +659,7 @@ fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
     else
         .none;
 
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     return try p.addNode(.{
         .tag = .assign_statement,
@@ -685,9 +674,9 @@ fn parseAssignStatement(p: *Parser) ParseError!NodeIndex {
     });
 }
 
-/// CallStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN NEW_LINE
+/// CallStatement <- (IDENTIFIER | BUILTIN_IDENTIFIER) LPAREN ExprList RPAREN SEMICOLON
 ///
-/// ExprList <- (Expr COMMA)* Expr?
+/// ExprList <- Expr? (COMMA Expr)*
 fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
     const expr_start = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(expr_start);
@@ -695,29 +684,36 @@ fn parseCallStatement(p: *Parser) ParseError!NodeIndex {
     const ident_name = p.eatToken(.builtin_ident) orelse p.eatToken(.ident) orelse return .none;
     _ = p.eatToken(.lparen) orelse return .none;
 
+    var has_comma = true; // First argument doesn't need a comma before it
     while (true) {
-        if (p.eatToken(.rparen)) |_| break;
+        const t = p.token_tags[p.index];
+        if (t == .comma) {
+            p.index += 1;
+            has_comma = true;
+            continue;
+        }
+        if (t == .rbrace) {
+            break;
+        }
+
+        if (!has_comma) {
+            // Most likely just missing. Can continue parsing
+            try p.errors.append(p.allocator, .{
+                .tag = .expected_comma_after_arg,
+                .token = @enumFromInt(p.index),
+            });
+        }
+        has_comma = false;
 
         const expr_param = try p.parseExpr();
-        if (expr_param == .none) {
-            return p.fail(.expected_expr);
+        if (expr_param != .none) {
+            try p.scratch.append(p.allocator, @intFromEnum(expr_param));
+            continue;
         }
 
-        try p.scratch.append(p.allocator, @intFromEnum(expr_param));
-
-        switch (p.token_tags[p.index]) {
-            .comma => p.index += 1,
-            .rparen => {
-                p.index += 1;
-                break;
-            },
-            else => {
-                // Likely just a missing comma
-                try p.warn(.expected_comma_after_arg);
-            },
-        }
+        return p.fail(.expected_expr);
     }
-    _ = try p.expectToken(.new_line);
+    _ = try p.expectToken(.semicolon);
 
     return p.addNode(.{
         .tag = .call_statement,
@@ -777,40 +773,54 @@ fn parseExpr(p: *Parser) ParseError!NodeIndex {
 
     return .none;
 }
-/// InitExpr  <- PERIOD LBRACE NEW_LINE (InitField)* RBRACE
-/// InitField <- PERIOD IDENTIFIER EQUAL Expr COMMA NEW_LINE
+/// InitExpr  <- PERIOD LBRACE InitField? (COMMA InitField)* RBRACE
+/// InitField <- PERIOD IDENTIFIER EQUAL Expr
 fn parseInitExpr(p: *Parser) ParseError!NodeIndex {
     const period = p.eatToken(.period) orelse return .none;
     _ = try p.expectToken(.lbrace);
-    _ = try p.expectToken(.new_line);
 
     const fields_start = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(fields_start);
 
+    var has_comma = true; // First argument doesn't need a comma before it
     while (true) {
-        if (p.eatToken(.rbrace)) |_| break;
+        const t = p.token_tags[p.index];
+        if (t == .comma) {
+            p.index += 1;
+            has_comma = true;
+            continue;
+        }
+        if (t == .rbrace) {
+            break;
+        }
+
+        if (!has_comma) {
+            // Most likely just missing. Can continue parsing
+            try p.errors.append(p.allocator, .{
+                .tag = .expected_comma_after_arg,
+                .token = @enumFromInt(p.index),
+            });
+        }
+        has_comma = false;
 
         _ = try p.expectToken(.period);
         const field_ident = try p.expectToken(.ident);
 
         _ = try p.expectToken(.equal);
-        const value_expr = try p.parseExpr();
-        if (value_expr == .none) {
-            return p.fail(.expected_expr);
-        }
-        _ = p.eatToken(.comma) orelse {
-            // Likely just a missing comma
-            try p.warn(.expected_comma_after_arg);
-        };
-        _ = try p.expectToken(.new_line);
 
-        try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
-            .tag = .expr_init_field,
-            .main_token = field_ident,
-            .data = .{ .expr_init_field = .{
-                .value = value_expr,
-            } },
-        })));
+        const value_expr = try p.parseExpr();
+        if (value_expr != .none) {
+            try p.scratch.append(p.allocator, @intFromEnum(try p.addNode(.{
+                .tag = .expr_init_field,
+                .main_token = field_ident,
+                .data = .{ .expr_init_field = .{
+                    .value = value_expr,
+                } },
+            })));
+            continue;
+        }
+
+        return p.fail(.expected_expr);
     }
 
     return p.addNode(.{
@@ -868,12 +878,6 @@ fn writeExtraData(p: *Parser, comptime T: type, value: T) !ExtraIndex {
     }
 
     return @enumFromInt(@as(std.meta.Tag(ExtraIndex), @intCast(extra_idx)));
-}
-
-fn skipNewLines(p: *Parser) void {
-    while (p.token_tags[p.index] == .new_line) {
-        p.index += 1;
-    }
 }
 
 fn nextToken(p: *Parser) TokenIndex {
