@@ -294,6 +294,7 @@ pub fn next(lexer: *Tokenizer) Token {
                 },
                 '\n', '\r' => {
                     state = .start;
+                    token.loc.start = lexer.index + 1;
                 },
                 else => {},
             },

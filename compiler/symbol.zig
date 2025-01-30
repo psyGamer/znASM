@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_module = @import("builtin_module.zig");
 const Ast = @import("Ast.zig");
 const Ir = @import("ir.zig").Ir;
 const Sema = @import("Sema.zig");
@@ -26,8 +27,10 @@ pub const SymbolLocation = struct {
     }
 
     pub fn format(value: SymbolLocation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.writeAll(value.module);
-        try writer.writeAll(separator);
+        if (value.module.len > 0) {
+            try writer.writeAll(value.module);
+            try writer.writeAll(separator);
+        }
         try writer.writeAll(value.name);
     }
 };
@@ -50,6 +53,18 @@ pub const Symbol = union(enum) {
     };
 
     pub const Function = struct {
+        pub const LocalVariable = struct {
+            location: union(builtin_module.VariableLocation) {
+                scratch: void,
+
+                /// Offset from the stack pointer
+                stack: u8,
+            },
+
+            type: TypeExpressionIndex,
+            node: Ast.NodeIndex,
+        };
+
         /// Commonly shared data between symbols
         common: Common,
 
@@ -60,10 +75,14 @@ pub const Symbol = union(enum) {
 
         calling_convention: FunctionAnalyzer.CallingConvention,
 
-        /// Intermediate representation for instructions
-        ir: []const Ir,
+        /// Local function variables. Includes function parameters
+        local_variables: []const LocalVariable,
+
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 },
+
+        /// Intermediate representation for instructions
+        ir: []const Ir,
         /// Higher-level instruction data
         instructions: []InstructionInfo,
         /// Raw assembly data
@@ -188,11 +207,10 @@ pub const Symbol = union(enum) {
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
             .function => |fn_sym| {
-                for (fn_sym.ir) |ir| {
-                    ir.deinit(allocator);
-                }
-                allocator.free(fn_sym.ir);
+                allocator.free(fn_sym.local_variables);
                 allocator.free(fn_sym.labels);
+
+                allocator.free(fn_sym.ir);
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },

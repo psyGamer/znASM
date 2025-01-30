@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_module = @import("../builtin_module.zig");
 const Ast = @import("../Ast.zig");
 const Module = @import("../Module.zig");
 const NodeIndex = Ast.NodeIndex;
@@ -20,14 +21,23 @@ const RegisterType = Ir.RegisterType;
 const Analyzer = @This();
 const Error = Sema.AnalyzeError;
 
-pub const Scope = struct {};
+/// Block-scope containing the state of currently avaiable resources
+pub const Scope = struct {
+    /// Indices to `ana.local_variables`
+    locals: std.StringArrayHashMapUnmanaged(u16) = .empty,
+
+    /// Indices to `label` IR instructions
+    labels: std.StringArrayHashMapUnmanaged(u32) = .empty,
+};
+
+/// Requirements for a function which need to be prepare at the call-site
 pub const CallingConvention = struct {
     status_flags: Ir.ChangeStatusFlags = .{},
 };
 
 sema: *Sema,
 
-symbol: *Symbol.Function,
+symbol_idx: Sema.SymbolIndex,
 module_idx: Sema.ModuleIndex,
 
 /// Interrupt vectors cannot rely on a calling convention
@@ -43,17 +53,19 @@ idx_size: Instruction.SizeMode = .none,
 
 calling_conv: CallingConvention = .{},
 
+local_variables: std.ArrayListUnmanaged(Symbol.Function.LocalVariable) = .empty,
 scope_stack: std.ArrayListUnmanaged(Scope) = .empty,
+
+stack_offset: u8 = 0,
 
 // Used to generate unique labels for loops
 while_loops: u16 = 0,
 
 pub fn deinit(ana: *Analyzer) void {
-    for (ana.ir.items) |ir| {
-        ir.deinit(ana.sema.allocator);
-    }
     ana.ir.deinit(ana.sema.allocator);
 }
+
+// Helper functions
 
 pub inline fn module(ana: *Analyzer) *Module {
     return ana.sema.getModule(ana.module_idx);
@@ -62,7 +74,10 @@ pub inline fn ast(ana: *Analyzer) *Ast {
     return &ana.module().ast;
 }
 
-// Helper functions
+/// Current top-most scope of the function
+pub fn currentScope(ana: *Analyzer) *Scope {
+    return &ana.scope_stack.items[ana.scope_stack.items.len - 1];
+}
 
 pub fn setSizeMode(ana: *Analyzer, node: NodeIndex, target: Instruction.SizeType, mode: Instruction.SizeMode) !void {
     std.debug.assert(target != .none);
@@ -130,10 +145,12 @@ pub fn handleBlock(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         const child_idx: NodeIndex = @enumFromInt(ana.ast().extra_data[extra_idx]);
 
         switch (ana.ast().nodeTag(child_idx)) {
+            .block => try ana.handleBlock(child_idx),
             .label => try ana.handleLabel(child_idx),
             .assign_statement => try ana.handleAssign(child_idx),
             .call_statement => try ana.handleCall(child_idx),
             .while_statement => try ana.handleWhile(child_idx),
+            .local_var_decl => try ana.handleLocalVarDecl(child_idx),
             else => unreachable,
         }
     }
@@ -144,9 +161,12 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     const label = ana.ast().parseIdentifier(label_token);
 
     if (ana.module().symbol_map.get(label)) |existing_symbol_idx| {
-        try ana.sema.errDuplicateSymbol(label_token, ana.module_idx, label, existing_symbol_idx, .label);
+        try ana.sema.emitError(label_token, ana.module_idx, .shadow_label, .{label});
+        try ana.sema.emitNote(ana.ast().nodeToken(existing_symbol_idx.getCommon(ana.sema).node), ana.module_idx, .existing_symbol, .{});
         return error.AnalyzeFailed;
     }
+
+    // Can only jump to labels in correct scope, but keep names unique in function to avoid confusion
     for (ana.ir.items) |ir| {
         if (ir.tag != .label) {
             continue;
@@ -160,40 +180,35 @@ pub fn handleLabel(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     }
 
+    const scope = ana.currentScope();
+    try scope.labels.putNoClobber(ana.sema.allocator, label, @intCast(ana.ir.items.len));
+
     try ana.ir.append(ana.sema.allocator, .{
-        .tag = .{ .label = try ana.sema.allocator.dupe(u8, label) },
+        .tag = .{ .label = label },
         .node = node_idx,
     });
 }
 
 fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
-    const Target = union(enum) {
-        builtin: BuiltinVar,
-        global: struct {
-            symbol: SymbolIndex,
-            type: TypeExpressionIndex,
-            bit_offset: u16,
-        },
-    };
-
     const assign = ana.ast().nodeData(node_idx).assign_statement;
-    const data = ana.ast().readExtraData(Ast.Node.AssignStatementData, assign.extra);
 
     // Resolve assignment target
-    const target: Target = get_target: {
-        var symbol_idx: SymbolIndex = undefined;
+    const target: AssignTarget = get_target: {
+        var symbol_idx: SymbolIndex = .none;
+        var local_idx: u16 = std.math.maxInt(u16);
         var current_type: TypeExpressionIndex = undefined;
         var bit_offset: u16 = 0;
 
         const field_range = ana.ast().nodeData(assign.target).sub_range;
-        for (@intFromEnum(field_range.extra_start)..@intFromEnum(field_range.extra_end)) |extra_idx| {
+        field_iter: for (@intFromEnum(field_range.extra_start)..@intFromEnum(field_range.extra_end)) |extra_idx| {
             const field_token: Ast.TokenIndex = .cast(ana.ast().extra_data[extra_idx]);
+            const field_name = ana.ast().parseIdentifier(field_token);
 
             // Main target symbol
             if (extra_idx == @intFromEnum(field_range.extra_start)) {
                 if (ana.ast().tokenTag(field_token) == .builtin_ident) {
                     // Built-in variable
-                    if (BuiltinVar.get(ana.ast().parseIdentifier(field_token))) |builtin| {
+                    if (BuiltinVar.get(field_name)) |builtin| {
                         // Built-ins don't support field access
                         std.debug.assert(extra_idx + 1 == @intFromEnum(field_range.extra_end));
 
@@ -203,14 +218,21 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                         return error.AnalyzeFailed;
                     }
                 } else {
-                    // User variable
-                    const symbol, symbol_idx = try ana.sema.resolveSymbol(field_token, ana.module_idx);
-                    current_type = switch (symbol.*) {
+                    // Local variable
+                    for (ana.scope_stack.items) |scope| {
+                        local_idx = scope.locals.get(field_name) orelse continue;
+                        current_type = ana.local_variables.items[local_idx].type;
+                        continue :field_iter;
+                    }
+
+                    // Global variable
+                    symbol_idx = try ana.sema.resolveSymbol(field_token, ana.module_idx);
+                    current_type = switch (symbol_idx.get(ana.sema).*) {
                         .constant => |const_sym| const_sym.type,
                         .variable => |var_sym| var_sym.type,
                         .register => |reg_sym| reg_sym.type,
                         else => {
-                            try ana.sema.emitError(field_token, ana.module_idx, .expected_const_var_reg_symbol, .{@tagName(symbol.*)});
+                            try ana.sema.emitError(field_token, ana.module_idx, .expected_const_var_reg_symbol, .{@tagName(symbol_idx.get(ana.sema).*)});
                             return error.AnalyzeFailed;
                         },
                     };
@@ -219,7 +241,6 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             }
 
             // Fields
-            const field_name = ana.ast().parseIdentifier(field_token);
             current_type = switch (ana.sema.getTypeExpression(current_type).*) {
                 .@"struct" => |struct_symbol_idx| b: {
                     const struct_sym = ana.sema.getSymbol(struct_symbol_idx).@"struct";
@@ -254,11 +275,27 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             };
         }
 
-        break :get_target .{ .global = .{
-            .symbol = symbol_idx,
-            .type = current_type,
-            .bit_offset = bit_offset,
-        } };
+        if (symbol_idx == .none) {
+            std.debug.assert(local_idx != std.math.maxInt(u16));
+
+            break :get_target .{ .local = .{
+                .index = local_idx,
+                .type = current_type,
+                .bit_offset = bit_offset,
+                .initialize = false,
+            } };
+        }
+        if (local_idx != std.math.maxInt(u16)) {
+            std.debug.assert(symbol_idx != .none);
+
+            break :get_target .{ .global = .{
+                .symbol = symbol_idx,
+                .type = current_type,
+                .bit_offset = bit_offset,
+            } };
+        }
+
+        unreachable;
     };
     const target_type: TypeExpressionIndex = switch (target) {
         .builtin => |builtin| b: {
@@ -266,44 +303,65 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             break :b @enumFromInt(@as(u32, @intCast(ana.sema.type_expressions.items.len - 1)));
         },
         .global => |global| global.type,
+        .local => |local| local.type,
     };
 
-    const value_expr: ExpressionIndex = try .resolve(ana.sema, target_type, data.value, ana.module_idx);
+    const value_expr: ExpressionIndex = try .resolve(ana.sema, target_type, assign.value, ana.module_idx);
+    try ana.assignValue(target, target_type, value_expr, node_idx);
+}
 
-    const intermediate_register: RegisterType = get_register: {
-        if (data.intermediate_register == .none) {
-            break :get_register .none;
-        }
+const AssignTarget = union(enum) {
+    builtin: BuiltinVar,
+    global: struct {
+        symbol: SymbolIndex,
+        type: TypeExpressionIndex,
+        bit_offset: u16,
+    },
+    local: struct {
+        index: u16,
+        type: TypeExpressionIndex,
+        bit_offset: u16,
+        initialize: bool,
+    },
+};
 
-        const register_name = ana.ast().parseIdentifier(data.intermediate_register);
-        break :get_register std.meta.stringToEnum(RegisterType, register_name) orelse {
-            try ana.sema.emitError(data.intermediate_register, ana.module_idx, .invalid_intermediate_register, .{register_name});
-            return error.AnalyzeFailed;
-        };
-    };
+fn assignValue(ana: *Analyzer, target: AssignTarget, type_expr_idx: TypeExpressionIndex, value_expr_idx: ExpressionIndex, node_idx: NodeIndex) Error!void {
+    const value_expr = ana.sema.getExpression(value_expr_idx);
+    const int_reg = value_expr.intermediate_register;
 
     // Forward to built-in implementation
     if (target == .builtin) {
-        if (!std.mem.containsAtLeast(RegisterType, target.builtin.allowed_registers, 1, &.{intermediate_register})) {
-            if (intermediate_register != .none) {
-                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(ana.sema.getExpression(value_expr).node), data.intermediate_register, ana.module_idx, intermediate_register, target.builtin.allowed_registers, target.builtin.name);
+        if (!std.mem.containsAtLeast(RegisterType, target.builtin.allowed_registers, 1, &.{int_reg})) {
+            if (int_reg != .none) {
+                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(value_expr.node), ana.module_idx, int_reg, target.builtin.allowed_registers, target.builtin.name);
             } else {
                 try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_intermediate_register, .{});
                 return error.AnalyzeFailed;
             }
         }
 
-        try target.builtin.write(ana, node_idx, value_expr, intermediate_register);
+        try target.builtin.write(ana, node_idx, value_expr_idx);
         return;
     }
 
+    if (target == .local) {
+        switch (ana.local_variables.items[target.local.index].location) {
+            .scratch => {},
+            .stack => {
+                if (int_reg != .a8 and int_reg != .a16) {
+                    return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), ana.module_idx, int_reg, &.{ .a8, .a16 }, "stack variable");
+                }
+            },
+        }
+    }
+
     // Prepare intermediate register
-    if (intermediate_register != .none) {
-        try ana.setSizeMode(node_idx, switch (intermediate_register) {
+    if (int_reg != .none) {
+        try ana.setSizeMode(node_idx, switch (int_reg) {
             .a8, .a16 => .mem,
             .x8, .x16, .y8, .y16 => .idx,
             .none => unreachable,
-        }, switch (intermediate_register) {
+        }, switch (int_reg) {
             .a8, .x8, .y8 => .@"8bit",
             .a16, .x16, .y16 => .@"16bit",
             .none => unreachable,
@@ -313,7 +371,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     var operations: std.ArrayListUnmanaged(struct { Ir.StoreOperation, NodeIndex }) = .empty;
     defer operations.deinit(ana.sema.allocator);
 
-    try ana.storeValue(&operations, target_type, value_expr, target.global.bit_offset, intermediate_register);
+    const bit_offset = switch (target) {
+        .global => |global| global.bit_offset,
+        .local => |local| local.bit_offset,
+        else => unreachable,
+    };
+    try ana.storeValue(&operations, type_expr_idx, value_expr_idx, bit_offset, int_reg);
     if (operations.items.len == 0) {
         return; // Nothing to do
     }
@@ -322,7 +385,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
     var stack_fallback = std.heap.stackFallback(64, ana.sema.allocator);
     const stack_fallback_allocator = stack_fallback.get();
 
-    const written_bytes = try stack_fallback_allocator.alloc(packed struct { any: bool, value: bool, variable: bool, cross_boundry: bool }, target_type.byteSize(ana.sema));
+    const written_bytes = try stack_fallback_allocator.alloc(packed struct { any: bool, value: bool, variable: bool, cross_boundry: bool }, type_expr_idx.byteSize(ana.sema));
     defer stack_fallback_allocator.free(written_bytes);
     @memset(written_bytes, .{ .any = false, .value = false, .variable = false, .cross_boundry = false });
 
@@ -340,7 +403,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         switch (op.value) {
             .immediate => |value| {
                 if (!value.eqlZero()) {
-                    if (intermediate_register == .none) {
+                    if (int_reg == .none) {
                         try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_intermediate_register, .{});
                         return error.AnalyzeFailed;
                     }
@@ -351,9 +414,28 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
             },
             .global => {
-                if (intermediate_register == .none) {
+                if (int_reg == .none) {
                     try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_intermediate_register, .{});
                     return error.AnalyzeFailed;
+                }
+
+                for (start_idx..(end_idx + 1)) |i| {
+                    written_bytes[i].variable = true;
+                }
+            },
+            .local => |local| {
+                if (int_reg == .none) {
+                    try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_intermediate_register, .{});
+                    return error.AnalyzeFailed;
+                }
+
+                switch (ana.local_variables.items[local.index].location) {
+                    .scratch => {},
+                    .stack => {
+                        if (int_reg != .a8 and int_reg != .a16) {
+                            return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), ana.module_idx, int_reg, &.{ .a8, .a16 }, "stack variable");
+                        }
+                    },
                 }
 
                 for (start_idx..(end_idx + 1)) |i| {
@@ -378,17 +460,17 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             continue;
         }
 
-        switch (intermediate_register) {
+        switch (int_reg) {
             .x8, .y8, .x16, .y16 => {
                 if (curr.value and curr.variable) {
-                    return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), data.intermediate_register, ana.module_idx, intermediate_register, &.{ .a8, .a16 }, "object-initializer with mixed constants and variables");
+                    return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), ana.module_idx, int_reg, &.{ .a8, .a16 }, "object-initializer with mixed constants and variables");
                 }
             },
             else => {},
         }
 
         // Split boundry-crossing operation
-        const last_byte = if (intermediate_register == .a8 or intermediate_register == .x8 or intermediate_register == .y8 or intermediate_register == .none and ana.mem_size != .@"16bit")
+        const last_byte = if (int_reg == .a8 or int_reg == .x8 or int_reg == .y8 or int_reg == .none and ana.mem_size != .@"16bit")
             i
         else
             i + 1;
@@ -401,9 +483,9 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 {
                     const orig_value = op.value;
 
-                    const register_size: u16 = switch (intermediate_register) {
+                    const register_size: u16 = switch (int_reg) {
                         .none => if (ana.mem_size == .@"16bit") 16 else 8,
-                        else => intermediate_register.bitSize(),
+                        else => int_reg.bitSize(),
                     };
 
                     const available_size = register_size - (op.bit_offset % register_size);
@@ -449,7 +531,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                 } };
                             }
                         },
-                        .global => orig_value,
+                        .global, .local => orig_value,
                     };
 
                     const new_op: Ir.StoreOperation = .{
@@ -478,8 +560,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                                     } };
                                 }
                             },
-                            .global => |info| .{ .global = .{
-                                .symbol = info.symbol,
+                            .global => |global| .{ .global = .{
+                                .symbol = global.symbol,
+                                .bit_offset = available_size,
+                            } },
+                            .local => |local| .{ .local = .{
+                                .index = local.index,
                                 .bit_offset = available_size,
                             } },
                         },
@@ -492,7 +578,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             }
         }
 
-        if (intermediate_register == .a8 or intermediate_register == .x8 or intermediate_register == .y8 or intermediate_register == .none and ana.mem_size != .@"16bit" or i + 1 >= written_bytes.len) {
+        if (int_reg == .a8 or int_reg == .x8 or int_reg == .y8 or int_reg == .none and ana.mem_size != .@"16bit" or i + 1 >= written_bytes.len) {
             for (operations.items) |*entry| {
                 if (@divFloor(entry[0].bit_offset, 8) == i) {
                     entry[0].write_offset = @intCast(i);
@@ -508,13 +594,13 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
 
         if (curr.cross_boundry) {
             // Current write must be complete and not half
-            if (require_mem and intermediate_register != .a16) {
-                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), data.intermediate_register, ana.module_idx, intermediate_register, &.{ .a8, .a16 }, "object-initializer with mixed constants and variables");
+            if (require_mem and int_reg != .a16) {
+                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), ana.module_idx, int_reg, &.{ .a8, .a16 }, "object-initializer with mixed constants and variables");
             }
         }
 
         if (!next.any) {
-            if (intermediate_register == .none) {
+            if (int_reg == .none) {
                 // Lower memory-size to 8-bits
                 try ana.setSizeMode(node_idx, .mem, .@"8bit");
 
@@ -525,12 +611,12 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
                 continue;
             } else {
-                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .intermediate_register_too_large, .{@tagName(intermediate_register)});
+                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .intermediate_register_too_large, .{@tagName(int_reg)});
                 return error.AnalyzeFailed;
             }
         }
 
-        if (require_mem and intermediate_register != .a16) {
+        if (require_mem and int_reg != .a16) {
             // Discard high-byte of current assignment with next write
             if (i + 2 < written_bytes.len and (written_bytes[i + 2].value or written_bytes[i + 2].variable)) {
                 for (operations.items) |*entry| {
@@ -540,7 +626,7 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
                 }
                 continue;
             } else {
-                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), data.intermediate_register, ana.module_idx, intermediate_register, &.{ .a8, .a16, .x8, .y8 }, "byte-aligned field initialization");
+                return ana.sema.failUnsupportedIntermediateRegister(ana.ast().nodeToken(node_idx), ana.module_idx, int_reg, &.{ .a8, .a16, .x8, .y8 }, "byte-aligned field initialization");
             }
         } else {
             for (operations.items) |*entry| {
@@ -555,18 +641,35 @@ fn handleAssign(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     }
 
-    if (intermediate_register == .none and ana.mem_size == .none) {
+    if (int_reg == .none and ana.mem_size == .none) {
         // Default to 8-bits since it's more common
         try ana.setSizeMode(node_idx, .mem, .@"8bit");
     }
 
     try ana.ir.ensureUnusedCapacity(ana.sema.allocator, operations.items.len + 1);
     ana.ir.appendAssumeCapacity(.{
-        .tag = .{ .store = .{
-            .intermediate_register = intermediate_register,
-            .symbol = target.global.symbol,
-            .operations = @intCast(operations.items.len),
-        } },
+        .tag = switch (target) {
+            .global => |global| .{ .store_global = .{
+                .intermediate_register = int_reg,
+                .symbol = global.symbol,
+                .operations = @intCast(operations.items.len),
+            } },
+            .local => |local| b: {
+                if (local.initialize and ana.local_variables.items[local.index].location == .stack) {
+                    break :b .{ .store_push = .{
+                        .intermediate_register = int_reg,
+                        .operations = @intCast(operations.items.len),
+                    } };
+                }
+
+                break :b .{ .store_local = .{
+                    .intermediate_register = int_reg,
+                    .index = local.index,
+                    .operations = @intCast(operations.items.len),
+                } };
+            },
+            else => unreachable,
+        },
         .node = node_idx,
     });
 
@@ -652,9 +755,8 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         }
     } else {
         // Function / macro call
-        const symbol, const symbol_idx = try ana.sema.resolveSymbol(target_ident, ana.module_idx);
-
-        switch (symbol.*) {
+        const symbol_idx = try ana.sema.resolveSymbol(target_ident, ana.module_idx);
+        switch (symbol_idx.get(ana.sema).*) {
             .function => |fn_sym| {
                 // TODO: Clobber register data
                 try ana.ir.append(ana.sema.allocator, .{
@@ -669,7 +771,7 @@ fn handleCall(ana: *Analyzer, node_idx: NodeIndex) Error!void {
             },
             // TODO: Support macros
             else => {
-                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_fn_symbol, .{@tagName(symbol.*)});
+                try ana.sema.emitError(ana.ast().nodeToken(node_idx), ana.module_idx, .expected_fn_symbol, .{@tagName(symbol_idx.get(ana.sema).*)});
                 return error.AnalyzeFailed;
             },
         }
@@ -702,4 +804,55 @@ fn handleWhile(ana: *Analyzer, node_idx: NodeIndex) Error!void {
         // Runtime loop condition
         @panic("TODO");
     }
+}
+
+fn handleLocalVarDecl(ana: *Analyzer, node_idx: NodeIndex) Error!void {
+    const ident_name = ana.ast().nodeToken(node_idx);
+    const name = ana.ast().parseIdentifier(ident_name);
+
+    if (ana.module().symbol_map.get(name)) |existing_symbol_idx| {
+        try ana.sema.emitError(ident_name, ana.module_idx, .shadow_local, .{name});
+        try ana.sema.emitNote(ana.ast().nodeToken(existing_symbol_idx.getCommon(ana.sema).node), ana.module_idx, .existing_symbol, .{});
+        return error.AnalyzeFailed;
+    }
+
+    // Avoid shadowing an already defined variable
+    for (ana.scope_stack.items) |scope| {
+        if (scope.locals.get(name)) |existing_local_idx| {
+            try ana.sema.emitError(ident_name, ana.module_idx, .duplicate_local, .{name});
+            try ana.sema.emitNote(ana.ast().nodeToken(ana.local_variables.items[existing_local_idx].node), ana.module_idx, .existing_local, .{});
+            return error.AnalyzeFailed;
+        }
+    }
+
+    const decl = ana.ast().nodeData(node_idx).local_var_decl;
+    const data = ana.ast().readExtraData(Ast.Node.LocalVarDeclData, decl.extra);
+
+    const target_type: TypeExpressionIndex = try .resolve(ana.sema, data.type, ana.module_idx, ana.symbol_idx);
+
+    const location_node: NodeIndex = ana.ast().nodeData(data.location_attr).attr_two.expr_one;
+    const location_expr: ExpressionIndex = try .resolve(ana.sema, try builtin_module.VariableLocation.resolveTypeExpr(ana.sema), location_node, ana.module_idx);
+    const location = try location_expr.toValue(builtin_module.VariableLocation, ana.sema);
+
+    const local_idx: u16 = @intCast(ana.local_variables.items.len);
+    try ana.local_variables.append(ana.sema.allocator, .{
+        .location = switch (location) {
+            .scratch => .scratch,
+            .stack => b: {
+                defer ana.stack_offset += @intCast(target_type.byteSize(ana.sema));
+                break :b .{ .stack = ana.stack_offset + 1 };
+            },
+        },
+        .type = target_type,
+        .node = node_idx,
+    });
+    try ana.currentScope().locals.put(ana.sema.allocator, name, local_idx);
+
+    const value_expr: ExpressionIndex = try .resolve(ana.sema, target_type, decl.value, ana.module_idx);
+    try ana.assignValue(.{ .local = .{
+        .index = local_idx,
+        .type = target_type,
+        .bit_offset = 0,
+        .initialize = true,
+    } }, target_type, value_expr, decl.value);
 }

@@ -13,3 +13,12 @@ pub enum AccessType(u8) {
     /// Write-Only 8-bit
     w8 = 0,
 }
+
+/// Storage location for local variables
+pub enum VariableLocation(u8) {
+    /// Scratch-memory in the zero page
+    scratch = 0,
+
+    /// Stack-frame of current function
+    stack = 1,    
+}

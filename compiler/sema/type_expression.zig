@@ -72,13 +72,13 @@ pub const TypeExpression = union(enum) {
                     }
                 }
 
-                const symbol, const symbol_idx = try sema.resolveSymbol(ident_name, module_idx);
-                switch (symbol.*) {
+                const symbol_idx = try sema.resolveSymbol(ident_name, module_idx);
+                switch (symbol_idx.get(sema).*) {
                     .@"struct" => return .{ .@"struct" = symbol_idx },
                     .@"packed" => return .{ .@"packed" = symbol_idx },
                     .@"enum" => return .{ .@"enum" = symbol_idx },
                     else => {
-                        try sema.emitError(ident_name, module_idx, .expected_type_symbol, .{@tagName(symbol.*)});
+                        try sema.emitError(ident_name, module_idx, .expected_type_symbol, .{@tagName(symbol_idx.get(sema).*)});
                         return error.AnalyzeFailed;
                     },
                 }
@@ -115,7 +115,8 @@ pub const TypeExpression = union(enum) {
                 try sema.string_pool.append(sema.allocator, symbol_name);
 
                 if (module.symbol_map.get(symbol_name)) |existing_symbol_idx| {
-                    try sema.errDuplicateSymbol(ast.nodeToken(node_idx).next(), module_idx, symbol_name, existing_symbol_idx, .symbol);
+                    try sema.emitError(ast.nodeToken(node_idx).next(), module_idx, .duplicate_symbol, .{symbol_name});
+                    try sema.emitNote(ast.nodeToken(existing_symbol_idx.getCommon(sema).node), module_idx, .existing_symbol, .{});
                     return error.AnalyzeFailed;
                 }
 

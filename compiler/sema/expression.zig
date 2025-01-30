@@ -46,7 +46,10 @@ pub const Expression = struct {
             fields_end: ExpressionIndex,
         },
     },
+    intermediate_register: Ir.RegisterType,
+
     node: NodeIndex,
+    module: ModuleIndex,
 
     pub fn parse(sema: *Sema, target_type_idx: TypeExpressionIndex, node_idx: NodeIndex, module_idx: ModuleIndex) Error!Expression {
         const module = sema.getModule(module_idx);
@@ -55,7 +58,8 @@ pub const Expression = struct {
         switch (ast.nodeTag(node_idx)) {
             .expr_ident => {
                 const source_symbol_ident = ast.nodeToken(node_idx);
-                const source_symbol, const source_symbol_idx = try sema.resolveSymbol(source_symbol_ident, module_idx);
+                const source_symbol_idx = try sema.resolveSymbol(source_symbol_ident, module_idx);
+                const source_symbol = source_symbol_idx.get(sema);
 
                 const source_type = sema.getTypeExpression(switch (source_symbol.*) {
                     .constant => |const_sym| const_sym.type,
@@ -74,10 +78,15 @@ pub const Expression = struct {
                     return error.AnalyzeFailed;
                 }
 
-                return switch (source_symbol.*) {
-                    .constant => |const_sym| .{ .value = .{ .immediate = sema.getExpression(const_sym.value).value.immediate }, .node = node_idx },
-                    .variable, .register => .{ .value = .{ .symbol = source_symbol_idx }, .node = node_idx },
-                    else => unreachable,
+                return .{
+                    .value = switch (source_symbol.*) {
+                        .constant => |const_sym| .{ .immediate = sema.getExpression(const_sym.value).value.immediate },
+                        .variable, .register => .{ .symbol = source_symbol_idx },
+                        else => unreachable,
+                    },
+                    .intermediate_register = try parseIntermediateRegister(sema, module_idx, ast.nodeData(node_idx).expr.intermediate_register),
+                    .node = node_idx,
+                    .module = module_idx,
                 };
             },
             .expr_int_value => {
@@ -106,7 +115,12 @@ pub const Expression = struct {
                     else => unreachable,
                 }
 
-                return .{ .value = .{ .immediate = value }, .node = node_idx };
+                return .{
+                    .value = .{ .immediate = value },
+                    .intermediate_register = try parseIntermediateRegister(sema, module_idx, ast.nodeData(node_idx).expr.intermediate_register),
+                    .node = node_idx,
+                    .module = module_idx,
+                };
             },
             .expr_enum_value => {
                 const value_lit = ast.nodeToken(node_idx);
@@ -118,7 +132,13 @@ pub const Expression = struct {
                         const enum_sym = sema.getSymbol(symbol_idx).@"enum";
                         for (enum_sym.fields) |field| {
                             if (std.mem.eql(u8, field.name, literal_name)) {
-                                return sema.getExpression(field.value).*;
+                                const field_expr = sema.getExpression(field.value);
+                                return .{
+                                    .value = field_expr.value,
+                                    .intermediate_register = try parseIntermediateRegister(sema, module_idx, ast.nodeData(node_idx).expr.intermediate_register),
+                                    .node = node_idx,
+                                    .module = module_idx,
+                                };
                             }
                         }
 
@@ -138,6 +158,8 @@ pub const Expression = struct {
                 }
             },
             .expr_init => {
+                const data = ast.nodeData(node_idx).expr_init;
+
                 const target_type = sema.getTypeExpression(target_type_idx);
                 switch (target_type.*) {
                     inline .@"struct", .@"packed" => |symbol_idx, tag| {
@@ -153,7 +175,7 @@ pub const Expression = struct {
                         try fields.ensureUnusedCapacity(sema.allocator, symbol.fields.len);
 
                         // Apply specified values
-                        const sub_range = ast.nodeData(node_idx).sub_range;
+                        const sub_range = ast.readExtraData(Ast.Node.SubRange, data.extra);
                         for (@intFromEnum(sub_range.extra_start)..@intFromEnum(sub_range.extra_end)) |extra_idx| {
                             const field_idx: NodeIndex = @enumFromInt(ast.extra_data[extra_idx]);
                             const field_token = ast.nodeToken(field_idx);
@@ -249,13 +271,25 @@ pub const Expression = struct {
 
                         try sema.expressions.ensureUnusedCapacity(sema.allocator, fields.count());
                         for (fields.values()) |field| {
-                            sema.expressions.appendAssumeCapacity(.{ .value = .{ .field_initializer = field }, .node = sema.getExpression(field.value).node });
+                            const field_expr = sema.getExpression(field.value);
+
+                            sema.expressions.appendAssumeCapacity(.{
+                                .value = .{ .field_initializer = field },
+                                .intermediate_register = .none,
+                                .node = field_expr.node,
+                                .module = field_expr.module,
+                            });
                         }
 
-                        return .{ .value = .{ .object_initializer = .{
-                            .fields_start = start_idx,
-                            .fields_end = end_idx,
-                        } }, .node = node_idx };
+                        return .{
+                            .value = .{ .object_initializer = .{
+                                .fields_start = start_idx,
+                                .fields_end = end_idx,
+                            } },
+                            .intermediate_register = try parseIntermediateRegister(sema, module_idx, data.intermediate_register),
+                            .node = node_idx,
+                            .module = module_idx,
+                        };
                     },
                     else => {
                         try sema.emitError(ast.nodeToken(node_idx), module_idx, .expected_type, .{ target_type.fmt(sema), "object-initializer" });
@@ -265,5 +299,60 @@ pub const Expression = struct {
             },
             else => unreachable,
         }
+    }
+
+    pub fn toValue(expr: *Expression, comptime T: type, sema: *Sema) Error!T {
+        const module = sema.getModule(expr.module);
+        const ast = &module.ast;
+
+        if (expr.value == .symbol) {
+            try sema.emitError(ast.nodeToken(expr.node), expr.module, .expected_comptime_value, .{});
+            try sema.emitError(ast.nodeToken(expr.value.symbol.getCommon(sema).node), expr.module, .existing_symbol, .{});
+            return error.AnalyzeFailed;
+        }
+
+        switch (@typeInfo(T)) {
+            .int => {
+                if (expr.value != .immediate) {
+                    try sema.emitError(ast.nodeToken(expr.node), expr.module, .expected_comptime_value, .{});
+                    return error.AnalyzeFailed;
+                }
+
+                return expr.value.immediate.to(T) catch {
+                    const info = @typeInfo(T).int;
+                    switch (info.signedness) {
+                        .signed => try sema.emitError(ast.nodeToken(expr.node), expr.module, .value_too_large, .{ expr.value.immediate, "a", "signed", info.bits }),
+                        .unsigned => try sema.emitError(ast.nodeToken(expr.node), expr.module, .value_too_large, .{ expr.value.immediate, "an", "unsigned", info.bits }),
+                    }
+                    return error.AnalyzeFailed;
+                };
+            },
+            .@"enum" => {
+                const tag = try expr.toValue(std.meta.Tag(T), sema);
+                return @enumFromInt(tag);
+            },
+            else => @compileError("Cannot resolve expression into type " ++ @typeName(T)),
+        }
+    }
+
+    fn parseIntermediateRegister(sema: *Sema, module_idx: ModuleIndex, token_idx: Ast.TokenIndex) Error!Ir.RegisterType {
+        if (token_idx == .none) {
+            return .none;
+        }
+
+        const module = sema.getModule(module_idx);
+        const ast = &module.ast;
+
+        const register_name = ast.parseIdentifier(token_idx);
+        const register = std.meta.stringToEnum(Ir.RegisterType, register_name) orelse {
+            try sema.emitError(token_idx, module_idx, .invalid_intermediate_register, .{register_name});
+            return error.AnalyzeFailed;
+        };
+        if (register == .none) {
+            try sema.emitError(token_idx, module_idx, .invalid_intermediate_register, .{register_name});
+            return error.AnalyzeFailed;
+        }
+
+        return register;
     }
 };

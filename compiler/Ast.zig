@@ -67,8 +67,16 @@ pub const Node = struct {
         /// `main_token` is the `int_literal` of bank
         bank_attr,
 
-        /// `main_token` is the `dot_literal` of access type
+        /// `main_token` is the `identifier` of access type
         access_attr,
+
+        /// `data` is `attr_two`
+        /// `main_token` is the `identifier` of the attribute
+        attr_two,
+
+        /// `data` is `sub_range` of expressions
+        /// `main_token` is the `identifier` of the attribute
+        attr_multi,
 
         /// `data` is `sub_range`
         /// `main_token` is the `lbrace`
@@ -85,6 +93,10 @@ pub const Node = struct {
         /// `main_token` is the `keyword_while`
         while_statement,
 
+        /// `data` is `local_var_decl`
+        /// `main_token` is the `identifier` of the name
+        local_var_decl,
+
         /// `main_token` is the `identifier` of the name
         label,
 
@@ -92,17 +104,20 @@ pub const Node = struct {
         /// `main_token` is the first `identifier` of the field chain
         field_access,
 
+        /// `data` is `expr`
         /// `main_token` is the `identifier` of the expression
         expr_ident,
+        /// `data` is `expr`
         /// `main_token` is the `int_literal` value of the expression
         expr_int_value,
-        /// `main_token` is the `dot_literal` value of the expression
+        /// `data` is `expr`
+        /// `main_token` is the `identifier` value of the expression
         expr_enum_value,
-        /// `data` is `sub_range`
+        /// `data` is `expr_init`
         /// `main_token` is the `period` value of the init-expression
         expr_init,
         /// `data` is `expr_init_field`
-        /// `main_token` is the `dot_literal` of the target field
+        /// `main_token` is the `identifier` of the target field
         expr_init_field,
 
         /// `main_token` is the `identifier` of the type
@@ -161,13 +176,28 @@ pub const Node = struct {
             extra: ExtraIndex,
             doc_comments: ExtraIndex,
         },
+        attr_two: struct {
+            expr_one: NodeIndex,
+            expr_two: NodeIndex,
+        },
         assign_statement: struct {
             target: NodeIndex,
-            extra: ExtraIndex,
+            value: NodeIndex,
         },
         while_statement: struct {
             condition: NodeIndex,
             block: NodeIndex,
+        },
+        local_var_decl: struct {
+            value: NodeIndex,
+            extra: ExtraIndex,
+        },
+        expr: struct {
+            intermediate_register: TokenIndex,
+        },
+        expr_init: struct {
+            extra: ExtraIndex,
+            intermediate_register: TokenIndex,
         },
         expr_init_field: struct {
             value: NodeIndex,
@@ -219,9 +249,9 @@ pub const Node = struct {
         type: NodeIndex,
         value: NodeIndex,
     };
-    pub const AssignStatementData = struct {
-        value: NodeIndex,
-        intermediate_register: TokenIndex,
+    pub const LocalVarDeclData = struct {
+        type: NodeIndex,
+        location_attr: NodeIndex,
     };
 };
 
@@ -508,8 +538,11 @@ pub const Error = struct {
         expected_expr,
         expected_comma_after_arg,
         expected_enum_member,
+        expected_fn_block,
         // Extra: expected_tag
         expected_token,
+        // Extra: expected_n_arguments
+        expected_n_arguments,
     };
 
     tag: Tag,
@@ -521,6 +554,10 @@ pub const Error = struct {
     extra: union {
         none: void,
         expected_tag: Token.Tag,
+        expected_n_arguments: struct {
+            expected: u32,
+            actual: u32,
+        },
     } = .{ .none = {} },
 };
 
@@ -559,28 +596,31 @@ pub fn detectErrors(tree: Ast, writer: anytype, tty_config: std.io.tty.Config) !
 }
 
 pub fn renderError(tree: Ast, writer: anytype, tty_config: std.io.tty.Config, err: Error) !void {
-    const highlight = "bold bright_magenta";
-
     switch (err.tag) {
-        .expected_toplevel => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a top-level definition[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_toplevel => try rich.print(writer, tty_config, "Expected [!]a top-level definition[reset], found [!]{s}", .{
             tree.tokenTag(err.token).symbol(),
         }),
-        .expected_statement => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a statement[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_statement => try rich.print(writer, tty_config, "Expected [!]a statement[reset], found [!]{s}", .{
             tree.tokenTag(err.token).symbol(),
         }),
-        .expected_expr => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an expression[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_expr => try rich.print(writer, tty_config, "Expected [!]an expression[reset], found [!]{s}", .{
             tree.tokenTag(err.token).symbol(),
         }),
-        .expected_comma_after_arg => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]a comma[reset], after an argument, found [" ++ highlight ++ "]{s}", .{
+        .expected_comma_after_arg => try rich.print(writer, tty_config, "Expected [!]a comma[reset], after an argument, found [!]{s}", .{
             tree.tokenTag(err.token).symbol(),
         }),
-        .expected_enum_member => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]an enum member[reset], inside [" ++ highlight ++ "]enum block[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_enum_member => try rich.print(writer, tty_config, "Expected [!]an enum member[reset], inside [!]enum block[reset], found [!]{s}", .{
+            tree.tokenTag(err.token).symbol(),
+        }),
+        .expected_fn_block => try rich.print(writer, tty_config, "Expected [!]a function block[reset], found [!]{s}", .{
             tree.tokenTag(err.token).symbol(),
         }),
 
-        .expected_token => try rich.print(writer, tty_config, "Expected [" ++ highlight ++ "]{s}[reset], found [" ++ highlight ++ "]{s}", .{
+        .expected_token => try rich.print(writer, tty_config, "Expected [!]{s}[], found [!]{s}", .{
             err.extra.expected_tag.symbol(),
             tree.tokenTag(err.token).symbol(),
         }),
+
+        .expected_n_arguments => try rich.print(writer, tty_config, "Expected [!]{d} arguments[], found [!]{d}", .{ err.extra.expected_n_arguments.expected, err.extra.expected_n_arguments.actual }),
     }
 }

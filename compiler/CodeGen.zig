@@ -113,12 +113,12 @@ const FunctionBuilder = struct {
     pub const Label = u16;
 
     sema: *Sema,
-
     symbol_idx: Sema.SymbolIndex,
 
     ir_idx: u32 = 0,
 
     instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
+
     labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
     /// Size of the A-Register / Memory instructions
@@ -135,7 +135,7 @@ const FunctionBuilder = struct {
             switch (ir.tag) {
                 .instruction => try b.handleInstruction(ir),
                 .change_status_flags => try b.handleChangeStatusFlags(ir),
-                .store => try b.handleStore(ir),
+                .store_global, .store_local, .store_push => try b.handleStore(ir),
                 .store_operation => unreachable,
                 // .load_value => try b.handleLoadValue(ir),
                 // .load_variable => try b.handleLoadVariable(ir),
@@ -206,11 +206,19 @@ const FunctionBuilder = struct {
     }
 
     fn handleStore(b: *FunctionBuilder, ir: Ir) !void {
-        const store = ir.tag.store;
-        const operations = b.function().ir[(b.ir_idx + 1)..(b.ir_idx + store.operations + 1)];
+        const operation_count = switch (ir.tag) {
+            inline .store_global, .store_local, .store_push => |info| info.operations,
+            else => unreachable,
+        };
+        const int_reg = switch (ir.tag) {
+            inline .store_global, .store_local, .store_push => |info| info.intermediate_register,
+            else => unreachable,
+        };
+
+        const operations = b.function().ir[(b.ir_idx + 1)..(b.ir_idx + operation_count + 1)];
         std.debug.assert(operations.len != 0);
 
-        b.ir_idx += store.operations;
+        b.ir_idx += operation_count;
 
         var start_idx: usize = 0;
         var curr_offset = operations[start_idx].tag.store_operation.write_offset;
@@ -227,8 +235,17 @@ const FunctionBuilder = struct {
             // Boundry of current write
             var immediate_value: u16 = 0;
             var mask_value: u16 = 0;
-            // var shift_offset: u16 = 0;
-            var variables = [_]packed struct { symbol: SymbolIndex, bit_size: u16 }{.{ .symbol = .none, .bit_size = undefined }} ** 16;
+
+            const Variable = packed struct {
+                source_type: enum(u2) { none, global, local },
+                source: packed union {
+                    symbol: SymbolIndex,
+                    index: u16,
+                },
+
+                bit_size: u16,
+            };
+            var variables = [_]Variable{.{ .source_type = .none, .source = undefined, .bit_size = undefined }} ** 16;
 
             // Iterate in reverse, since most-significant bits need to come first
             var iter = std.mem.reverseIterator(operations[start_idx..(op_idx + 1)]);
@@ -236,20 +253,32 @@ const FunctionBuilder = struct {
                 const curr_op = curr_op_ir.tag.store_operation;
                 switch (curr_op.value) {
                     .immediate => |value| {
-                        immediate_value |= (value.to(u16) catch unreachable) << @intCast(curr_op.bit_offset % store.intermediate_register.bitSize());
+                        immediate_value |= (value.to(u16) catch unreachable) << @intCast(curr_op.bit_offset % int_reg.bitSize());
                     },
-                    .global => |info| {
+                    .global => |global| {
                         // TODO: Support packed field loads
-                        std.debug.assert(info.bit_offset % 8 == 0);
+                        std.debug.assert(global.bit_offset % 8 == 0);
 
-                        variables[curr_op.bit_offset % store.intermediate_register.bitSize()] = .{
-                            .symbol = info.symbol,
+                        variables[curr_op.bit_offset % int_reg.bitSize()] = .{
+                            .source_type = .global,
+                            .source = .{ .symbol = global.symbol },
+                            .bit_size = curr_op.bit_size,
+                        };
+                    },
+                    .local => |local| {
+                        // TODO: Support packed field loads
+                        std.debug.assert(local.bit_offset % 8 == 0);
+
+                        variables[curr_op.bit_offset % int_reg.bitSize()] = .{
+                            .source_type = .local,
+                            .source = .{ .index = local.index },
                             .bit_size = curr_op.bit_size,
                         };
                     },
                 }
 
-                mask_value |= ((@as(u16, 1) << @intCast(curr_op.bit_size)) - 1) << @intCast(curr_op.bit_offset % store.intermediate_register.bitSize());
+                // Mark written bits
+                mask_value |= @as(u16, @intCast((@as(u17, 1) << @intCast(curr_op.bit_size)) - 1)) << @intCast(curr_op.bit_offset % int_reg.bitSize());
             }
 
             // Next byte will be overwritten anyway
@@ -258,12 +287,12 @@ const FunctionBuilder = struct {
             }
 
             // Flush current write
-            const full_write = switch (store.intermediate_register) {
+            const full_write = switch (int_reg) {
                 .a8, .x8, .y8 => mask_value & std.math.maxInt(u8) == std.math.maxInt(u8),
                 .a16, .x16, .y16 => mask_value & std.math.maxInt(u16) == std.math.maxInt(u16),
                 .none => true,
             };
-            const imm_value: Instruction.Imm816 = switch (store.intermediate_register) {
+            const imm_value: Instruction.Imm816 = switch (int_reg) {
                 .a8, .x8, .y8 => .{ .imm8 = @intCast(immediate_value) },
                 .a16, .x16, .y16 => .{ .imm16 = @intCast(immediate_value) },
                 else => undefined,
@@ -274,45 +303,60 @@ const FunctionBuilder = struct {
                 // Full register write
                 var shift_offset: u8 = std.math.maxInt(u8);
                 for (variables, 0..) |variable, bit_offset| {
-                    if (variable.symbol == .none) {
+                    if (variable.source_type == .none) {
                         continue;
                     }
 
                     if (shift_offset == std.math.maxInt(u8)) {
-                        try b.emitReloc(ir.node, switch (store.intermediate_register) {
-                            .a8, .a16 => .{ .lda_addr16 = undefined },
-                            .x8, .x16 => .{ .ldx_addr16 = undefined },
-                            .y8, .y16 => .{ .ldy_addr16 = undefined },
-                            else => unreachable,
-                        }, .{
-                            .type = .addr16,
-                            .target_symbol = variable.symbol,
-                            .target_offset = @intCast(@divExact(bit_offset, 8)),
-                        });
+                        switch (variable.source_type) {
+                            .global => try b.emitReloc(ir.node, switch (int_reg) {
+                                .a8, .a16 => .{ .lda_addr16 = undefined },
+                                .x8, .x16 => .{ .ldx_addr16 = undefined },
+                                .y8, .y16 => .{ .ldy_addr16 = undefined },
+                                else => unreachable,
+                            }, .{
+                                .type = .addr16,
+                                .target_symbol = variable.source.symbol,
+                                .target_offset = 0,
+                            }),
+                            .local => switch (b.function().local_variables[variable.source.index].location) {
+                                .scratch => @panic("TODO"),
+                                .stack => |offset| try b.emit(ir.node, .{ .lda_sr = offset }),
+                            },
+                            .none => unreachable,
+                        }
                     } else {
-                        std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+                        std.debug.assert(int_reg == .a8 or int_reg == .a16);
 
                         for (0..(shift_offset - bit_offset)) |_| {
                             try b.emit(ir.node, .asl_accum);
                         }
-                        try b.emitReloc(ir.node, .{ .ora_addr16 = undefined }, .{
-                            .type = .addr16,
-                            .target_symbol = store.symbol,
-                            .target_offset = curr_offset,
-                        });
+
+                        switch (variable.source_type) {
+                            .global => try b.emitReloc(ir.node, .{ .ora_addr16 = undefined }, .{
+                                .type = .addr16,
+                                .target_symbol = variable.source.symbol,
+                                .target_offset = 0,
+                            }),
+                            .local => switch (b.function().local_variables[variable.source.index].location) {
+                                .scratch => @panic("TODO"),
+                                .stack => |offset| try b.emit(ir.node, .{ .ora_sr = offset }),
+                            },
+                            .none => unreachable,
+                        }
                     }
 
                     shift_offset = @intCast(bit_offset);
                 }
                 if (shift_offset == std.math.maxInt(u8)) {
-                    try b.emit(op_ir.node, switch (store.intermediate_register) {
+                    try b.emit(op_ir.node, switch (int_reg) {
                         .a8, .a16 => .{ .lda_imm = imm_value },
                         .x8, .x16 => .{ .ldx_imm = imm_value },
                         .y8, .y16 => .{ .ldy_imm = imm_value },
                         else => unreachable,
                     });
                 } else {
-                    std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+                    std.debug.assert(int_reg == .a8 or int_reg == .a16);
 
                     for (0..shift_offset) |_| {
                         try b.emit(op_ir.node, .asl_accum);
@@ -320,23 +364,33 @@ const FunctionBuilder = struct {
                     try b.emit(op_ir.node, .{ .ora_imm = imm_value });
                 }
 
-                const instr: Instruction = if (store.intermediate_register == .none or (immediate_value == 0 and shift_offset == 0))
-                    .{ .stz_addr16 = undefined }
-                else switch (store.intermediate_register) {
-                    .a8, .a16 => .{ .sta_addr16 = undefined },
-                    .x8, .x16 => .{ .stx_addr16 = undefined },
-                    .y8, .y16 => .{ .sty_addr16 = undefined },
-                    else => unreachable,
-                };
+                switch (ir.tag) {
+                    .store_global => |global| {
+                        const instr: Instruction = if (int_reg == .none or (immediate_value == 0 and shift_offset == 0))
+                            .{ .stz_addr16 = undefined }
+                        else switch (int_reg) {
+                            .a8, .a16 => .{ .sta_addr16 = undefined },
+                            .x8, .x16 => .{ .stx_addr16 = undefined },
+                            .y8, .y16 => .{ .sty_addr16 = undefined },
+                            else => unreachable,
+                        };
 
-                try b.emitReloc(op_ir.node, instr, .{
-                    .type = .addr16,
-                    .target_symbol = store.symbol,
-                    .target_offset = curr_offset,
-                });
+                        try b.emitReloc(op_ir.node, instr, .{
+                            .type = .addr16,
+                            .target_symbol = global.symbol,
+                            .target_offset = curr_offset,
+                        });
+                    },
+                    .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                        .scratch => @panic("TODO"),
+                        .stack => |offset| try b.emit(ir.node, .{ .sta_sr = offset }),
+                    },
+                    .store_push => try b.emit(ir.node, .pha),
+                    else => unreachable,
+                }
             } else {
                 // Partial register write
-                std.debug.assert(store.intermediate_register == .a8 or store.intermediate_register == .a16);
+                std.debug.assert(int_reg == .a8 or int_reg == .a16);
 
                 var min_left_shifts: u8 = std.math.maxInt(u8);
                 var min_left_offset: u8 = undefined;
@@ -347,7 +401,7 @@ const FunctionBuilder = struct {
                 var shift_offset: u8 = 0;
                 var has_variables = false;
 
-                const rotate_size: u8 = switch (store.intermediate_register) {
+                const rotate_size: u8 = switch (int_reg) {
                     // +1 since the carry bit is included when rotating
                     .a8 => 8 + 1,
                     .a16 => 16 + 1,
@@ -370,7 +424,7 @@ const FunctionBuilder = struct {
 
                         if (has_variables) {} else {}
 
-                        variables[shift_offset].symbol = .none; // Mark variable as used
+                        variables[shift_offset].source_type = .none; // Mark variable as used
                         has_variables = true;
 
                         // Repeat for next variable
@@ -378,7 +432,7 @@ const FunctionBuilder = struct {
                         continue;
                     }
 
-                    if (variables[bit_offset].symbol == .none) {
+                    if (variables[bit_offset].source_type == .none) {
                         continue;
                     }
 
@@ -399,22 +453,48 @@ const FunctionBuilder = struct {
                 if (has_variables) {
                     @panic("TODO");
                 } else {
-                    try b.emitReloc(op_ir.node, .{ .lda_addr16 = undefined }, .{
-                        .type = .addr16,
-                        .target_symbol = store.symbol,
-                        .target_offset = curr_offset,
-                    });
-                    try b.emit(op_ir.node, .{ .and_imm = switch (store.intermediate_register) {
-                        .a8 => .{ .imm8 = @truncate(~mask_value) },
-                        .a16 => .{ .imm16 = @truncate(~mask_value) },
-                        else => undefined,
-                    } });
-                    try b.emit(op_ir.node, .{ .ora_imm = imm_value });
-                    try b.emitReloc(op_ir.node, .{ .sta_addr16 = undefined }, .{
-                        .type = .addr16,
-                        .target_symbol = store.symbol,
-                        .target_offset = curr_offset,
-                    });
+                    switch (ir.tag) {
+                        .store_global => |global| try b.emitReloc(op_ir.node, .{ .lda_addr16 = undefined }, .{
+                            .type = .addr16,
+                            .target_symbol = global.symbol,
+                            .target_offset = curr_offset,
+                        }),
+                        .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                            .scratch => @panic("TODO"),
+                            .stack => |offset| try b.emit(ir.node, .{ .lda_sr = offset }),
+                        },
+                        // Value doesn't exist yet
+                        .store_push => {},
+                        else => unreachable,
+                    }
+
+                    switch (ir.tag) {
+                        .store_global, .store_local => {
+                            try b.emit(op_ir.node, .{ .and_imm = switch (int_reg) {
+                                .a8 => .{ .imm8 = @truncate(~mask_value) },
+                                .a16 => .{ .imm16 = @truncate(~mask_value) },
+                                else => undefined,
+                            } });
+                            try b.emit(op_ir.node, .{ .ora_imm = imm_value });
+                        },
+                        // Value doesn't exist yet
+                        .store_push => try b.emit(op_ir.node, .{ .lda_imm = imm_value }),
+                        else => unreachable,
+                    }
+
+                    switch (ir.tag) {
+                        .store_global => |global| try b.emitReloc(op_ir.node, .{ .sta_addr16 = undefined }, .{
+                            .type = .addr16,
+                            .target_symbol = global.symbol,
+                            .target_offset = curr_offset,
+                        }),
+                        .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                            .scratch => @panic("TODO"),
+                            .stack => |offset| try b.emit(ir.node, .{ .sta_sr = offset }),
+                        },
+                        .store_push => try b.emit(op_ir.node, .pha),
+                        else => unreachable,
+                    }
                 }
             }
         }

@@ -10,7 +10,7 @@ const TypeExpression = @import("type_expression.zig").TypeExpression;
 const ExpressionIndex = Sema.ExpressionIndex;
 const BuiltinVar = @This();
 
-const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionIndex, RegisterType) Sema.AnalyzeError!void;
+const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionIndex) Sema.AnalyzeError!void;
 
 name: []const u8,
 type: TypeExpression,
@@ -41,17 +41,17 @@ pub const all = [_]BuiltinVar{
     },
 };
 
-fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: ExpressionIndex, intermediate_register: RegisterType) Sema.AnalyzeError!void {
+fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: ExpressionIndex) Sema.AnalyzeError!void {
     const expr = ana.sema.getExpression(expr_idx).*;
 
     switch (expr.value) {
         .immediate, .symbol => {
             try ana.ir.ensureUnusedCapacity(ana.sema.allocator, 3);
-            try ana.setSizeMode(node_idx, switch (intermediate_register) {
+            try ana.setSizeMode(node_idx, switch (expr.intermediate_register) {
                 .a16 => .mem,
                 .x8, .x16 => .idx,
                 else => unreachable,
-            }, switch (intermediate_register) {
+            }, switch (expr.intermediate_register) {
                 .x8 => .@"8bit",
                 .a16, .x16 => .@"16bit",
                 else => unreachable,
@@ -61,7 +61,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expres
                 .immediate => |value| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_value = .{
-                            .register = intermediate_register,
+                            .register = expr.intermediate_register,
                             .value = .{ .imm16 = value.to(u16) catch unreachable },
                         } },
                         .node = node_idx,
@@ -70,7 +70,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expres
                 .symbol => |symbol_idx| {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .load_variable = .{
-                            .register = intermediate_register,
+                            .register = expr.intermediate_register,
                             .symbol = symbol_idx,
                         } },
                         .node = node_idx,
@@ -79,7 +79,7 @@ fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expres
                 else => unreachable,
             }
 
-            switch (intermediate_register) {
+            switch (expr.intermediate_register) {
                 .a16 => {
                     ana.ir.appendAssumeCapacity(.{
                         .tag = .{ .instruction = .{ .instr = .tcs, .reloc = null } },

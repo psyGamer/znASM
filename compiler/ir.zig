@@ -50,6 +50,10 @@ pub const Ir = struct {
                 symbol: SymbolIndex,
                 bit_offset: u16,
             },
+            local: struct {
+                index: u16,
+                bit_offset: u16,
+            },
         },
 
         bit_offset: u16,
@@ -66,13 +70,25 @@ pub const Ir = struct {
         },
         change_status_flags: ChangeStatusFlags,
 
-        /// Stores the value of the following `store_operation`s using the intermediate-register into the target
-        store: struct {
+        /// Stores the value of the following `store_operation`s into the target global symbol
+        store_global: struct {
             intermediate_register: RegisterType,
             symbol: SymbolIndex,
             operations: u16,
         },
-        /// Immediatly followed `store.operations`-times after a `store` instruction
+        /// Stores the value of the following `store_operation`s into the target local variable
+        store_local: struct {
+            intermediate_register: RegisterType,
+            index: u16,
+            operations: u16,
+        },
+        /// Pushes the value of the following `store_operation`s onto the stack
+        store_push: struct {
+            intermediate_register: RegisterType,
+            operations: u16,
+        },
+
+        /// Immediatly followed `store.operations`-times after a `store_*` instruction
         store_operation: StoreOperation,
 
         /// Loads the immedate value into the register
@@ -145,11 +161,4 @@ pub const Ir = struct {
 
     tag: Tag,
     node: NodeIndex,
-
-    pub fn deinit(ir: Ir, allocator: std.mem.Allocator) void {
-        switch (ir.tag) {
-            .label => |name| allocator.free(name),
-            else => {},
-        }
-    }
 };

@@ -72,6 +72,10 @@ pub const Instruction = union(Opcode) {
     lda_addr16: Addr16,
     /// Load Accumulator from Memory (Long)
     lda_addr24: u24,
+    /// Store Accumulator to Memory (Stack Relative)
+    lda_sr: u8,
+    /// Store Accumulator to Memory (Stack Relative Indirect, Y Indexed)
+    lda_ind_sr_idx_y: u8,
 
     /// Load Index Register X from Memory (Immediate)
     ldx_imm: Imm816,
@@ -102,6 +106,10 @@ pub const Instruction = union(Opcode) {
     sta_addr16: Addr16,
     /// Store Accumulator to Memory (Long)
     sta_addr24: u24,
+    /// Store Accumulator to Memory (Stack Relative)
+    sta_sr: u8,
+    /// Store Accumulator to Memory (Stack Relative Indirect, Y Indexed)
+    sta_ind_sr_idx_y: u8,
 
     /// Store Index Register X to Memory (Direct Page)
     stx_addr8: u8,
@@ -144,30 +152,54 @@ pub const Instruction = union(Opcode) {
     and_addr16: Addr16,
     /// AND Accumulator with Memory (Long)
     and_addr24: u24,
+    /// AND Accumulator with Memory (Stack Relative)
+    and_sr: u8,
+    /// AND Accumulator with Memory (Stack Relative Indirect, Y Indexed)
+    and_ind_sr_idx_y: u8,
+
     /// OR Accumulator with Memory (Immediate)
     ora_imm: Imm816,
     /// OR Accumulator with Memory (Absolute)
     ora_addr16: Addr16,
     /// OR Accumulator with Memory (Long)
     ora_addr24: u24,
+    /// OR Accumulator with Memory (Stack Relative)
+    ora_sr: u8,
+    /// OR Accumulator with Memory (Stack Relative Indirect, Y Indexed)
+    ora_ind_sr_idx_y: u8,
+
     /// XOR Accumulator with Memory (Immediate)
     eor_imm: Imm816,
     /// XOR Accumulator with Memory (Absolute)
     eor_addr16: Addr16,
     /// XOR Accumulator with Memory (Long)
     eor_addr24: u24,
-    /// Add with Carry (Immediate)
+    /// XOR Accumulator with Memory (Stack Relative)
+    eor_sr: u8,
+    /// XOR Accumulator with Memory (Stack Relative Indirect, Y Indexed)
+    eor_ind_sr_idx_y: u8,
+
+    /// Add with Carry to Accumulator (Immediate)
     adc_imm: Imm816,
-    /// Add with Carry (Absolute)
+    /// Add with Carry to Accumulator (Absolute)
     adc_addr16: Addr16,
-    /// Add with Carry (Long)
+    /// Add with Carry to Accumulator (Long)
     adc_addr24: u24,
+    /// Add with Carry to Accumulator (Stack Relative)
+    adc_sr: u8,
+    /// Add with Carry to Accumulator (Stack Relative Indirect, Y Indexed)
+    adc_ind_sr_idx_y: u8,
+
     /// Subtract with Borrow from Accumulator (Immediate)
     sbc_imm: Imm816,
     /// Subtract with Borrow from Accumulator (Absolute)
     sbc_addr16: Addr16,
     /// Subtract with Borrow from Accumulator (Long)
     sbc_addr24: u24,
+    /// Subtract with Borrow from Accumulator (Stack Relative)
+    sbc_sr: u8,
+    /// Subtract with Borrow from Accumulator (Stack Relative Indirect, Y Indexed)
+    sbc_ind_sr_idx_y: u8,
 
     /// Arithmetic Shift Left (Accumulator)
     asl_accum: void,
@@ -352,6 +384,8 @@ pub const Opcode = enum(u8) {
     lda_dp = 0xA5,
     lda_addr16 = 0xAD,
     lda_addr24 = 0xAF,
+    lda_sr = 0xA3,
+    lda_ind_sr_idx_y = 0xB3,
 
     ldx_imm = 0xA2,
     ldx_dp = 0xA6,
@@ -369,6 +403,8 @@ pub const Opcode = enum(u8) {
     sta_addr8 = 0x85,
     sta_addr16 = 0x8D,
     sta_addr24 = 0x8F,
+    sta_sr = 0x83,
+    sta_ind_sr_idx_y = 0x93,
     // sta_dpind_addr16 = 0x92,
     // sta_dpind_addr24 = 0x87,
     // sta_addr8_idx_x = 0x95,
@@ -404,18 +440,32 @@ pub const Opcode = enum(u8) {
     and_imm = 0x29,
     and_addr16 = 0x2D,
     and_addr24 = 0x2F,
+    and_sr = 0x23,
+    and_ind_sr_idx_y = 0x33,
+
     ora_imm = 0x09,
     ora_addr16 = 0x0D,
     ora_addr24 = 0x0F,
+    ora_sr = 0x03,
+    ora_ind_sr_idx_y = 0x13,
+
     eor_imm = 0x49,
     eor_addr16 = 0x4D,
     eor_addr24 = 0x4F,
+    eor_sr = 0x43,
+    eor_ind_sr_idx_y = 0x53,
+
     adc_imm = 0x69,
     adc_addr16 = 0x6D,
     adc_addr24 = 0x6F,
+    adc_sr = 0x63,
+    adc_ind_sr_idx_y = 0x73,
+
     sbc_imm = 0xE9,
     sbc_addr16 = 0xED,
     sbc_addr24 = 0xEF,
+    sbc_sr = 0xE3,
+    sbc_ind_sr_idx_y = 0xF3,
 
     asl_accum = 0x0A,
     asl_addr16 = 0x0E,
