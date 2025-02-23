@@ -3,6 +3,8 @@ const rich = @import("util/rich.zig");
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 
 pub const Node = struct {
+    pub const Index = NodeIndex;
+
     /// Documents the valid data for each tag. If something is undocumented, the data is undefined to use
     pub const Tag = enum {
         /// `data` is `sub_range`

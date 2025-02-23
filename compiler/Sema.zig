@@ -12,7 +12,7 @@ const Module = @import("Module.zig");
 const Instruction = @import("instruction.zig").Instruction;
 const Opcode = @import("instruction.zig").Opcode;
 const Relocation = @import("CodeGen.zig").Relocation;
-const Ir = @import("ir.zig").Ir;
+const Ir = @import("codegen/AssemblyIr.zig");
 const Symbol = @import("symbol.zig").Symbol;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
@@ -21,7 +21,24 @@ const Expression = @import("sema/expression.zig").Expression;
 const TypeExpression = @import("sema/type_expression.zig").TypeExpression;
 const Sema = @This();
 
-pub const ModuleIndex = TypedIndex(u32, std.math.maxInt(u32));
+pub const ModuleIndex = enum(u32) {
+    _,
+
+    /// Helper function to cast a generic number to a `ModuleIndex`
+    pub inline fn cast(x: anytype) ModuleIndex {
+        return switch (@typeInfo(@TypeOf(x))) {
+            .null => .none,
+            .int, .comptime_int => @enumFromInt(@as(u32, @intCast(x))),
+            .optional => if (x) |value| @enumFromInt(@as(u32, @intCast(value))) else .none,
+            else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a ModuleIndex"),
+        };
+    }
+
+    /// Fetches the underlying value
+    pub fn get(index: ModuleIndex, sema: *Sema) *Module {
+        return &sema.modules[@intFromEnum(index)];
+    }
+};
 pub const SymbolIndex = enum(u32) {
     none = std.math.maxInt(u32),
     _,
@@ -92,6 +109,11 @@ pub const TypeExpressionIndex = enum(u32) {
     none = std.math.maxInt(u32),
     _,
 
+    /// Fetches the underlying value
+    pub fn get(index: TypeExpressionIndex, sema: *Sema) *TypeExpression {
+        return &sema.type_expressions.items[@intFromEnum(index)];
+    }
+
     /// Parses the type-expr ession and resolves an index to it
     pub fn resolve(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex, parent: SymbolIndex) AnalyzeError!TypeExpressionIndex {
         try sema.type_expressions.append(sema.allocator, try .parse(sema, node_idx, module_idx, parent));
@@ -116,12 +138,12 @@ pub const TypeExpressionIndex = enum(u32) {
 const InterruptVectors = struct {
     const Location = struct {
         pub const none: Location = .{
-            .module = .none,
+            .module = undefined,
             .symbol = .none,
         };
 
         pub inline fn unpack(loc: Location) ?Location {
-            if (loc.module == .none or loc.symbol == .none) {
+            if (loc.symbol == .none) {
                 return null;
             }
             return loc;
@@ -311,12 +333,13 @@ fn gatherFunctionSymbol(sema: *Sema, symbol_name: []const u8, node_idx: NodeInde
             .bank = real_bank,
 
             // To be determined during analyzation
-            .calling_convention = .{},
+            // .calling_convention = .{},
 
-            .local_variables = &.{},
+            // .local_variables = &.{},
             .labels = &.{},
 
-            .ir = &.{},
+            .semantic_ir = &.{},
+            .assembly_ir = &.{},
             .instructions = &.{},
             .assembly_data = &.{},
         },
@@ -529,43 +552,29 @@ pub fn analyzeSymbol(sema: *Sema, symbol_idx: SymbolIndex, module_idx: ModuleInd
     };
 }
 
-fn analyzeFunction(sema: *Sema, symbol_idx: SymbolIndex, module_idx: ModuleIndex) AnalyzeError!void {
+fn analyzeFunction(sema: *Sema, symbol: SymbolIndex, module: ModuleIndex) AnalyzeError!void {
     // Mark as done early, to prevent recursion counting as a dependency loop
-    symbol_idx.getFn(sema).common.analyze_status = .done;
-
-    const is_interrupt_vector = check_vectors: {
-        inline for (std.meta.fields(InterruptVectors)) |field| {
-            if (@field(sema.interrupt_vectors, field.name).unpack()) |vector_loc| {
-                if (vector_loc.symbol == symbol_idx) {
-                    break :check_vectors true;
-                }
-            }
-        }
-        break :check_vectors false;
-    };
+    symbol.getFn(sema).common.analyze_status = .done;
 
     var analyzer: FunctionAnalyzer = .{
         .sema = sema,
-        .symbol_idx = symbol_idx,
-        .module_idx = module_idx,
-        .is_interrupt_vector = is_interrupt_vector,
+        .symbol = symbol,
+        .module = module,
     };
     errdefer analyzer.deinit();
 
-    // Interrupt vectors cannot rely on a calling convention
+    try analyzer.process();
 
-    try analyzer.handleFnDef(symbol_idx.getCommon(sema).node);
-
-    const ast = &sema.getModule(module_idx).ast;
-    std.log.debug("IR for {}", .{ast.parseSymbolLocation(ast.nodeToken(symbol_idx.getCommon(sema).node).next())});
+    const ast = &sema.getModule(module).ast;
+    std.log.debug("SIR for {}", .{ast.parseSymbolLocation(ast.nodeToken(symbol.getCommon(sema).node).next())});
     for (analyzer.ir.items) |ir| {
         std.log.debug(" - {}", .{ir});
     }
 
-    const fn_sym = symbol_idx.getFn(sema);
-    fn_sym.calling_convention = analyzer.calling_conv;
-    fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
-    fn_sym.ir = try analyzer.ir.toOwnedSlice(sema.allocator);
+    const fn_sym = symbol.getFn(sema);
+    // fn_sym.calling_convention = analyzer.calling_conv;
+    // fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
+    fn_sym.semantic_ir = try analyzer.ir.toOwnedSlice(sema.allocator);
 }
 fn analyzeConstant(sema: *Sema, symbol_idx: SymbolIndex, module_idx: ModuleIndex) AnalyzeError!void {
     const module = sema.getModule(module_idx);
@@ -857,8 +866,10 @@ pub const ErrorTag = enum {
     duplicate_label,
     duplicate_field,
 
-    shadow_local,
-    shadow_label,
+    local_shadow_global,
+    local_shadow_label,
+    label_shadow_global,
+    label_shadow_local,
 
     existing_symbol,
     existing_vector,
@@ -906,8 +917,10 @@ pub const ErrorTag = enum {
             .duplicate_label => "Duplicate label [!]'{s}'",
             .duplicate_field => "Duplicate field [!]'{s}'[], in object-initializer for type [!]{}",
 
-            .shadow_local => "Local variable [!]'{s}'[] shadows existing symbol",
-            .shadow_label => "Label [!]'{s}'[] shadows existing symbol",
+            .local_shadow_global => "Local variable [!]'{s}'[] shadows existing symbol",
+            .local_shadow_label => "Local variable [!]'{s}'[] shadows existing label",
+            .label_shadow_global => "Label [!]'{s}'[] shadows existing symbol",
+            .label_shadow_local => "Label [!]'{s}'[] shadows existing local variable",
 
             .existing_symbol => "Symbol already defined here",
             .existing_vector => "Interrupt vector already defined here",

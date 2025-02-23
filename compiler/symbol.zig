@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin_module = @import("builtin_module.zig");
 const Ast = @import("Ast.zig");
-const Ir = @import("ir.zig").Ir;
+const SemanticIr = @import("sema/SemanticIr.zig");
+const AssemblyIr = @import("codegen/AssemblyIr.zig");
 const Sema = @import("Sema.zig");
 const FunctionAnalyzer = @import("sema/FunctionAnalyzer.zig");
 const SymbolIndex = Sema.SymbolIndex;
@@ -36,6 +37,8 @@ pub const SymbolLocation = struct {
 };
 
 pub const Symbol = union(enum) {
+    pub const Index = SymbolIndex;
+
     pub const Common = struct {
         /// Containing node for this symbol
         node: Ast.NodeIndex,
@@ -73,16 +76,19 @@ pub const Symbol = union(enum) {
         /// Offset into the target bank
         bank_offset: u16 = undefined,
 
-        calling_convention: FunctionAnalyzer.CallingConvention,
+        // calling_convention: FunctionAnalyzer.CallingConvention,
 
         /// Local function variables. Includes function parameters
-        local_variables: []const LocalVariable,
+        // local_variables: []const LocalVariable,
 
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 },
 
-        /// Intermediate representation for instructions
-        ir: []const Ir,
+        /// High-level semantic IR
+        semantic_ir: []const SemanticIr,
+        /// Low-level assembly IR
+        assembly_ir: []const AssemblyIr,
+
         /// Higher-level instruction data
         instructions: []InstructionInfo,
         /// Raw assembly data
@@ -207,10 +213,11 @@ pub const Symbol = union(enum) {
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
             .function => |fn_sym| {
-                allocator.free(fn_sym.local_variables);
+                // allocator.free(fn_sym.local_variables);
                 allocator.free(fn_sym.labels);
 
-                allocator.free(fn_sym.ir);
+                allocator.free(fn_sym.semantic_ir);
+                allocator.free(fn_sym.assembly_ir);
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },

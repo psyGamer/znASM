@@ -14,7 +14,7 @@ const Sema = @import("Sema.zig");
 const Opcode = @import("instruction.zig").Opcode;
 const Instruction = @import("instruction.zig").Instruction;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
-const Ir = @import("ir.zig").Ir;
+const Ir = @import("codegen/AssemblyIr.zig");
 const Rom = @import("Rom.zig");
 const MappingMode = @import("Rom.zig").Header.Mode.Map;
 

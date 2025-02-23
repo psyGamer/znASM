@@ -151,7 +151,8 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     defer sema.deinit();
 
     // Generate code
-    try CodeGen.process(&sema);
+    var codegen: CodeGen = .{ .sema = &sema };
+    try codegen.process();
 
     // Link assembly together
     var linker = try Linker.process(&sema) orelse return 1;

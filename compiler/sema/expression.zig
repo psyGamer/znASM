@@ -7,7 +7,7 @@ const BuiltinVar = @import("BuiltinVar.zig");
 const Relocation = @import("../CodeGen.zig").Relocation;
 const Instruction = @import("../instruction.zig").Instruction;
 const Opcode = @import("../instruction.zig").Opcode;
-const Ir = @import("../ir.zig").Ir;
+const Ir = @import("../codegen/AssemblyIr.zig");
 const Module = @import("../Module.zig");
 const Sema = @import("../Sema.zig");
 const SymbolIndex = @import("../Sema.zig").SymbolIndex;
@@ -22,6 +22,8 @@ const TypeExpressionIndex = Sema.TypeExpressionIndex;
 
 /// A parsed value, used for assignments and function calls
 pub const Expression = struct {
+    pub const Index = ExpressionIndex;
+
     pub const Field = struct {
         type: TypeExpressionIndex,
         value: ExpressionIndex,

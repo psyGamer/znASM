@@ -9,6 +9,8 @@ const Symbol = @import("../symbol.zig").Symbol;
 
 /// A tree of type-expressions, representing a certain concrete type
 pub const TypeExpression = union(enum) {
+    pub const Index = Sema.TypeExpressionIndex;
+
     /// Indicate the absence of an value
     void: void,
 
