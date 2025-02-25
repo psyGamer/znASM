@@ -29,7 +29,7 @@ pub inline fn getAst(ana: Analyzer) *Ast {
     return &ana.module.get(ana.sema).ast;
 }
 
-inline fn emit(ana: *Analyzer, tag: SemanticIr.Tag, node: Node.Index) !void {
+pub inline fn emit(ana: *Analyzer, tag: SemanticIr.Tag, node: Node.Index) !void {
     try ana.ir.append(ana.sema.allocator, .{ .tag = tag, .node = node });
 }
 
@@ -264,7 +264,7 @@ fn handleLocalVarDecl(ana: *Analyzer, node: Node.Index) Error!void {
     const data = ast.readExtraData(Ast.Node.LocalVarDeclData, decl.extra);
 
     const location_node: Node.Index = ast.nodeData(data.location_attr).attr_two.expr_one;
-    const location_expr: Expression.Index = try .resolve(ana.sema, try builtin_module.VariableLocation.resolveTypeExpr(ana.sema), location_node, ana.module);
+    const location_expr: Expression.Index = try .resolve(ana.sema, try builtin_module.VariableLocation.resolveType(ana.sema), location_node, ana.module);
     const location = try location_expr.toValue(builtin_module.VariableLocation, ana.sema);
 
     const var_type: TypeExpression.Index = try .resolve(ana.sema, data.type, ana.module, ana.symbol);
@@ -292,13 +292,8 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
 
     // Built-in variable
     if (ast.tokenTag(root_ident) == .builtin_ident) {
-        if (try BuiltinVar.get(root_name, ana.sema)) |builtin| {
-            const value_expr: Expression.Index = try .resolve(ana.sema, builtin.type_idx, assign.value, ana.module);
-
-            try ana.emit(.{ .assign_builtin = .{
-                .builtin = builtin.tag,
-                .value = value_expr,
-            } }, node);
+        if (try BuiltinVar.getByName(root_name, ana.sema)) |builtin| {
+            try builtin.write(ana, assign.value, try .resolve(ana.sema, try builtin.getType(ana.sema), assign.value, ana.module));
             return;
         }
 

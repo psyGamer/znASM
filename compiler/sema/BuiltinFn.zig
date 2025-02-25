@@ -38,7 +38,7 @@ handler_fn: *const HandlerFn,
 
 /// Retrieves the built-in function with the specified name
 pub fn get(name: []const u8) ?BuiltinFn {
-    for (all.values) |*builtin| {
+    for (all.values) |builtin| {
         if (std.mem.eql(u8, name, builtin.name)) {
             return builtin;
         }

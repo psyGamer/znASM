@@ -42,6 +42,8 @@ pub fn process(gen: *Generator) Error!void {
 
             .assign_global => try gen.handleAssignGlobal(sir),
 
+            .cpu_mode => try gen.handleCpuMode(sir),
+
             .@"return" => try gen.emit(.@"return", sir.node),
             inline else => |_, t| @panic("TODO: " ++ @tagName(t)),
         }
@@ -139,5 +141,12 @@ fn generateStoreOperations(gen: *Generator, target_type: TypeExpression.Index, e
                 },
             }
         },
+    }
+}
+
+fn handleCpuMode(gen: *Generator, sir: SemanticIr) Error!void {
+    switch (sir.tag.cpu_mode) {
+        .native => try gen.emit(.{ .set_emulation_mode = false }, sir.node),
+        .emulation => try gen.emit(.{ .set_emulation_mode = true }, sir.node),
     }
 }

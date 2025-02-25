@@ -1,6 +1,7 @@
 //! Provides built-in variables to map to hardware registers
-
 const std = @import("std");
+const builtin_module = @import("../builtin_module.zig");
+
 const NodeIndex = @import("../Ast.zig").NodeIndex;
 const Sema = @import("../Sema.zig");
 const RegisterType = Sema.RegisterType;
@@ -13,13 +14,12 @@ const BuiltinVar = @This();
 const HandleWriteFn = fn (*Analyzer, NodeIndex, Expression.Index) Sema.AnalyzeError!void;
 
 pub const Tag = enum {
+    cpu_mode,
     stack_pointer,
 };
 
 tag: Tag,
 name: []const u8,
-type: TypeExpression,
-type_idx: TypeExpression.Index = .none, // Will only be evaluated once used
 
 /// List of allowed intermediate registers
 allowed_registers: []const RegisterType,
@@ -28,16 +28,11 @@ allowed_registers: []const RegisterType,
 write: *const HandleWriteFn,
 
 /// Retrieves the built-in variable with the specified name
-pub fn get(name: []const u8, sema: *Sema) !?BuiltinVar {
-    for (&all.values) |*builtin| {
+pub fn getByName(name: []const u8, sema: *Sema) !?BuiltinVar {
+    _ = sema; // autofix
+    for (&all.values) |builtin| {
         if (std.mem.eql(u8, name, builtin.name)) {
-            // Resolve type
-            if (builtin.type_idx == .none) {
-                builtin.type_idx = @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len)));
-                try sema.type_expressions.append(sema.allocator, builtin.type);
-            }
-
-            return builtin.*;
+            return builtin;
         }
     }
 
@@ -45,22 +40,37 @@ pub fn get(name: []const u8, sema: *Sema) !?BuiltinVar {
 }
 
 /// Retrieves the built-in variable for the specific tag
-pub fn getTag(tag: Tag) BuiltinVar {
+pub fn getByTag(tag: Tag) BuiltinVar {
     const builtin = all.get(tag);
     std.debug.assert(builtin.type_idx != .none);
     return builtin;
 }
 
+pub fn getType(builtin: BuiltinVar, sema: *Sema) !TypeExpression.Index {
+    return switch (builtin.tag) {
+        .cpu_mode => try builtin_module.CpuMode.resolveType(sema),
+        .stack_pointer => try sema.addTypeExpression(.{ .integer = .{ .signedness = .unsigned, .bits = 16 } }),
+    };
+}
+
 var all = std.EnumArray(Tag, BuiltinVar).init(.{
+    .cpu_mode = .{
+        .tag = .cpu_mode,
+        .name = "@cpu_mode",
+        .allowed_registers = &.{.none},
+        .write = handleCpuMode,
+    },
     .stack_pointer = .{
         .tag = .stack_pointer,
         .name = "@stack_pointer",
-        .type = .{ .integer = .{ .signedness = .unsigned, .bits = 16 } },
         .allowed_registers = &.{ .a16, .x8, .x16 },
         .write = handleStackPointerWrite,
     },
 });
 
+fn handleCpuMode(ana: *Analyzer, node: NodeIndex, value_expr: Expression.Index) Sema.AnalyzeError!void {
+    try ana.emit(.{ .cpu_mode = try value_expr.toValue(builtin_module.CpuMode, ana.sema) }, node);
+}
 fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expression.Index) Sema.AnalyzeError!void {
     _ = ana; // autofix
     _ = node_idx; // autofix

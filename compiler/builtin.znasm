@@ -22,3 +22,12 @@ pub enum VariableLocation(u8) {
     /// Stack-frame of current function
     stack = 1,    
 }
+
+/// CPU 6502 emulation mode
+pub enum CpuMode(u8) {
+    /// Allow usage of 65C816 features and disable 6502 emulation
+    native = 0,
+
+    /// Disallow usage of 65c816 feature and enable 6502 emulation
+    emulation = 1,
+}

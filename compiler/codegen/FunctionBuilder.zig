@@ -88,6 +88,14 @@ pub fn build(b: *Builder) !void {
             // .branch => try b.handleBranch(ir),
             // .label => try b.handleLabel(ir),
             .@"return" => try b.emit(air.node, .rts), // TODO: Support long calling convention
+            .set_emulation_mode => |flag| {
+                if (flag) {
+                    try b.emit(air.node, .sec);
+                } else {
+                    try b.emit(air.node, .clc);
+                }
+                try b.emit(air.node, .xce);
+            },
             inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
         }
     }

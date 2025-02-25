@@ -56,6 +56,9 @@ pub const Tag = union(enum) {
         value: Expression.Index,
     },
 
+    /// Sets the current CPU mode
+    cpu_mode: builtin_module.CpuMode,
+
     /// Calls the target function
     call_function: struct {
         symbol: Symbol.Index,

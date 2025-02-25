@@ -106,12 +106,12 @@ pub const InstructionInfo = struct {
                     try writer.writeInt(OperandType, operand, .little);
                     return;
                 }
-                if (operand_info == .@"struct" and operand_info.@"struct".layout == .@"packed") {
+                if (operand_info == .@"struct" and operand_info.@"struct".layout == .@"packed" and operand_info.@"struct".backing_integer != null) {
                     try writer.writeInt(operand_info.@"struct".backing_integer.?, @bitCast(operand), .little);
                     return;
                 }
 
-                @compileError("Unsuuported instruction operand type: " ++ @typeName(OperandType));
+                @compileError("Unsupported instruction operand type: " ++ @typeName(OperandType));
             },
         }
     }

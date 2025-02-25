@@ -739,6 +739,13 @@ pub fn parseEnum(sema: *Sema, comptime T: type, token: Ast.TokenIndex, module: M
     };
 }
 
+/// Stores the type-expression and provides an index for it
+pub fn addTypeExpression(sema: *Sema, type_expr: TypeExpression) !TypeExpression.Index {
+    const index: TypeExpression.Index = @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len)));
+    try sema.type_expressions.append(sema.allocator, type_expr);
+    return index;
+}
+
 // Error handling
 
 pub const Error = ErrorSystem(.{

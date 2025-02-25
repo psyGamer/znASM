@@ -132,6 +132,9 @@ pub const Tag = union(enum) {
         target_offset: u16 = 0,
     },
 
+    /// Sets the CPU emulation flag
+    set_emulation_mode: bool,
+
     /// Return from the current subroutine
     @"return": void,
 
