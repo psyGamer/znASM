@@ -152,7 +152,10 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
     // Generate code
     var codegen: CodeGen = .{ .sema = &sema };
-    try codegen.process();
+    codegen.process() catch |err| switch (err) {
+        error.GenerateFailed => return 1,
+        else => |e| return e,
+    };
 
     // Link assembly together
     var linker = try Linker.process(&sema) orelse return 1;

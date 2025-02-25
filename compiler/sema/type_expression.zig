@@ -1,15 +1,42 @@
 const std = @import("std");
 
-const NodeIndex = @import("../Ast.zig").NodeIndex;
+const Module = @import("../Module.zig");
+const Node = @import("../Ast.zig").Node;
 const Sema = @import("../Sema.zig");
-const SymbolIndex = Sema.SymbolIndex;
-const ModuleIndex = Sema.ModuleIndex;
+const Symbol = Sema.Symbol;
 const Error = Sema.AnalyzeError;
-const Symbol = @import("../symbol.zig").Symbol;
 
 /// A tree of type-expressions, representing a certain concrete type
 pub const TypeExpression = union(enum) {
-    pub const Index = Sema.TypeExpressionIndex;
+    pub const Index = enum(u32) {
+        none = std.math.maxInt(u32),
+        _,
+
+        /// Fetches the underlying value
+        pub fn get(index: TypeExpression.Index, sema: *Sema) *TypeExpression {
+            return &sema.type_expressions.items[@intFromEnum(index)];
+        }
+
+        /// Parses the type-expr ession and resolves an index to it
+        pub fn resolve(sema: *Sema, node: Node.Index, module: Module.Index, parent: Symbol.Index) Error!TypeExpression.Index {
+            try sema.type_expressions.append(sema.allocator, try .parse(sema, node, module, parent));
+            return @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len - 1)));
+        }
+
+        /// Computes the exact byte-size required for this type
+        pub fn byteSize(index: TypeExpression.Index, sema: *const Sema) u16 {
+            return sema.type_expressions.items[@intFromEnum(index)].byteSize(sema);
+        }
+        /// Computes the exact bit-size required for this type
+        pub fn bitSize(index: TypeExpression.Index, sema: *const Sema) u16 {
+            return sema.type_expressions.items[@intFromEnum(index)].bitSize(sema);
+        }
+
+        /// Creates a formatter for this type-expression
+        pub fn fmt(index: TypeExpression.Index, sema: *const Sema) @typeInfo(@TypeOf(TypeExpression.fmt)).@"fn".return_type.? {
+            return sema.type_expressions.items[@intFromEnum(index)].fmt(sema);
+        }
+    };
 
     /// Indicate the absence of an value
     void: void,
@@ -24,26 +51,25 @@ pub const TypeExpression = union(enum) {
     comptime_integer: void,
 
     /// Byte-aligned structure of associated fields
-    @"struct": SymbolIndex,
+    @"struct": Symbol.Index,
 
     /// Bit-packed structured of associated fields
-    @"packed": SymbolIndex,
+    @"packed": Symbol.Index,
 
     /// Enumeration of interger-backed options
-    @"enum": SymbolIndex,
+    @"enum": Symbol.Index,
 
     /// Primitive types excluding integers, since they are dynamic
     const primitives: std.StaticStringMap(TypeExpression) = .initComptime(.{
         .{ "comptime_int", .comptime_integer },
     });
 
-    pub fn parse(sema: *Sema, node_idx: NodeIndex, module_idx: ModuleIndex, parent: SymbolIndex) Sema.AnalyzeError!TypeExpression {
-        const module = sema.getModule(module_idx);
-        const ast = &module.ast;
+    pub fn parse(sema: *Sema, node: Node.Index, module: Module.Index, parent: Symbol.Index) Sema.AnalyzeError!TypeExpression {
+        const ast = &module.get(sema).ast;
 
-        switch (ast.nodeTag(node_idx)) {
+        switch (ast.nodeTag(node)) {
             .type_ident => {
-                const ident_name = ast.nodeToken(node_idx);
+                const ident_name = ast.nodeToken(node);
                 const type_name = ast.parseIdentifier(ident_name);
 
                 // Primitive types
@@ -63,7 +89,7 @@ pub const TypeExpression = union(enum) {
 
                     if (is_int) {
                         const bits = std.fmt.parseInt(u16, type_name[1..], 10) catch {
-                            try sema.emitError(ident_name, module_idx, .int_bitwidth_too_large, .{ type_name, std.math.maxInt(u16) });
+                            try sema.emitError(ident_name, module, .int_bitwidth_too_large, .{ type_name, std.math.maxInt(u16) });
                             return error.AnalyzeFailed;
                         };
 
@@ -74,13 +100,13 @@ pub const TypeExpression = union(enum) {
                     }
                 }
 
-                const symbol_idx = try sema.resolveSymbol(ident_name, module_idx);
-                switch (symbol_idx.get(sema).*) {
-                    .@"struct" => return .{ .@"struct" = symbol_idx },
-                    .@"packed" => return .{ .@"packed" = symbol_idx },
-                    .@"enum" => return .{ .@"enum" = symbol_idx },
+                const symbol = try sema.resolveSymbol(ident_name, module);
+                switch (symbol.get(sema).*) {
+                    .@"struct" => return .{ .@"struct" = symbol },
+                    .@"packed" => return .{ .@"packed" = symbol },
+                    .@"enum" => return .{ .@"enum" = symbol },
                     else => {
-                        try sema.emitError(ident_name, module_idx, .expected_type_symbol, .{@tagName(symbol_idx.get(sema).*)});
+                        try sema.emitError(ident_name, module, .expected_type_symbol, .{@tagName(symbol.get(sema).*)});
                         return error.AnalyzeFailed;
                     },
                 }
@@ -93,16 +119,14 @@ pub const TypeExpression = union(enum) {
                     else => unreachable,
                 } = undefined;
                 container_symbol.common = .{
-                    .node = node_idx,
+                    .node = node,
                     .is_pub = false,
                 };
                 // Remaining values to be determined during analyzation
 
                 const parent_name = if (parent != .none) b: {
-                    const symbol = sema.getSymbol(parent);
-                    const common = symbol.commonConst();
-
-                    const parent_module = sema.getModule(common.module_index);
+                    const common = parent.getCommon(sema);
+                    const parent_module = common.module_index.get(sema);
                     break :b parent_module.symbol_map.keys()[@intFromEnum(common.module_symbol_index)];
                 } else "";
                 const container_name = switch (tag) {
@@ -112,28 +136,28 @@ pub const TypeExpression = union(enum) {
                     else => unreachable,
                 };
 
-                const symbol_idx: SymbolIndex = .cast(sema.symbols.items.len);
-                const symbol_name = try std.fmt.allocPrint(sema.allocator, "{s}__" ++ container_name ++ "_{d}", .{ parent_name, @intFromEnum(symbol_idx) });
+                const symbol: Symbol.Index = .cast(sema.symbols.items.len);
+                const symbol_name = try std.fmt.allocPrint(sema.allocator, "{s}__" ++ container_name ++ "_{d}", .{ parent_name, @intFromEnum(symbol) });
                 try sema.string_pool.append(sema.allocator, symbol_name);
 
-                if (module.symbol_map.get(symbol_name)) |existing_symbol_idx| {
-                    try sema.emitError(ast.nodeToken(node_idx).next(), module_idx, .duplicate_symbol, .{symbol_name});
-                    try sema.emitNote(ast.nodeToken(existing_symbol_idx.getCommon(sema).node), module_idx, .existing_symbol, .{});
+                if (module.get(sema).symbol_map.get(symbol_name)) |existing_symbol| {
+                    try sema.emitError(ast.nodeToken(node).next(), module, .duplicate_symbol, .{symbol_name});
+                    try sema.emitNote(ast.nodeToken(existing_symbol.getCommon(sema).node), module, .existing_symbol, .{});
                     return error.AnalyzeFailed;
                 }
 
-                try sema.createSymbol(module_idx, symbol_name, switch (tag) {
+                try sema.createSymbol(module, symbol_name, switch (tag) {
                     .struct_def => .{ .@"struct" = container_symbol },
                     .packed_def => .{ .@"packed" = container_symbol },
                     .enum_def => .{ .@"enum" = container_symbol },
                     else => unreachable,
                 });
-                try sema.analyzeSymbol(symbol_idx, module_idx, ast.nodeToken(node_idx));
+                try sema.analyzeSymbol(symbol, module, ast.nodeToken(node));
 
                 return switch (tag) {
-                    .struct_def => .{ .@"struct" = symbol_idx },
-                    .packed_def => .{ .@"packed" = symbol_idx },
-                    .enum_def => .{ .@"enum" = symbol_idx },
+                    .struct_def => .{ .@"struct" = symbol },
+                    .packed_def => .{ .@"packed" = symbol },
+                    .enum_def => .{ .@"enum" = symbol },
                     else => unreachable,
                 };
             },
@@ -163,8 +187,8 @@ pub const TypeExpression = union(enum) {
             },
 
             // Need to represent the exact same symbol
-            .@"struct", .@"packed", .@"enum" => |symbol_idx| switch (other.*) {
-                .@"struct", .@"packed", .@"enum" => |other_symbol_idx| symbol_idx == other_symbol_idx,
+            .@"struct", .@"packed", .@"enum" => |symbol| switch (other.*) {
+                .@"struct", .@"packed", .@"enum" => |other_symbol| symbol == other_symbol,
                 else => false,
             },
         };
@@ -180,22 +204,22 @@ pub const TypeExpression = union(enum) {
             .void => return 0,
             .comptime_integer => return 0,
             .integer => |info| return info.bits,
-            .@"struct" => |symbol_idx| {
+            .@"struct" => |symbol| {
                 var byte_size: u16 = 0;
 
-                const struct_sym = sema.symbols.items[@intFromEnum(symbol_idx)].@"struct";
+                const struct_sym: *const Symbol.Struct = symbol.getStruct(@constCast(sema));
                 for (struct_sym.fields) |field| {
                     byte_size += field.type.byteSize(sema);
                 }
 
                 return byte_size * 8;
             },
-            .@"packed" => |symbol_idx| {
-                const packed_sym = sema.symbols.items[@intFromEnum(symbol_idx)].@"packed";
+            .@"packed" => |symbol| {
+                const packed_sym: *const Symbol.Packed = symbol.getPacked(@constCast(sema));
                 return packed_sym.backing_type.bitSize(sema);
             },
-            .@"enum" => |symbol_idx| {
-                const enum_sym = sema.symbols.items[@intFromEnum(symbol_idx)].@"enum";
+            .@"enum" => |symbol| {
+                const enum_sym: *const Symbol.Enum = symbol.getEnum(@constCast(sema));
                 return enum_sym.backing_type.bitSize(sema);
             },
         }
@@ -212,18 +236,18 @@ pub const TypeExpression = union(enum) {
                 .signed => try writer.print("i{d}", .{info.bits}),
                 .unsigned => try writer.print("u{d}", .{info.bits}),
             },
-            .@"struct" => |symbol_idx| {
-                const symbol_loc = data.sema.getSymbolLocation(symbol_idx);
+            .@"struct" => |symbol| {
+                const symbol_loc = data.sema.getSymbolLocation(symbol);
                 try writer.print("struct {}", .{symbol_loc});
             },
-            .@"packed" => |symbol_idx| {
-                const symbol_loc = data.sema.getSymbolLocation(symbol_idx);
-                const packed_sym = data.sema.symbols.items[@intFromEnum(symbol_idx)].@"packed";
+            .@"packed" => |symbol| {
+                const symbol_loc = data.sema.getSymbolLocation(symbol);
+                const packed_sym: *const Symbol.Packed = symbol.getPacked(@constCast(data.sema));
                 try writer.print("packed({}) {}", .{ packed_sym.backing_type.fmt(data.sema), symbol_loc });
             },
-            .@"enum" => |symbol_idx| {
-                const symbol_loc = data.sema.getSymbolLocation(symbol_idx);
-                const enum_sym = data.sema.symbols.items[@intFromEnum(symbol_idx)].@"enum";
+            .@"enum" => |symbol| {
+                const symbol_loc = data.sema.getSymbolLocation(symbol);
+                const enum_sym: *const Symbol.Enum = symbol.getEnum(@constCast(data.sema));
                 try writer.print("enum({}) {}", .{ enum_sym.backing_type.fmt(data.sema), symbol_loc });
             },
         }

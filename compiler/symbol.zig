@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin_module = @import("builtin_module.zig");
+
+const Module = @import("Module.zig");
 const Ast = @import("Ast.zig");
+const Sema = @import("Sema.zig");
+const Expression = Sema.Expression;
+const TypeExpression = Sema.TypeExpression;
 const SemanticIr = @import("sema/SemanticIr.zig");
 const AssemblyIr = @import("codegen/AssemblyIr.zig");
-const Sema = @import("Sema.zig");
-const FunctionAnalyzer = @import("sema/FunctionAnalyzer.zig");
-const SymbolIndex = Sema.SymbolIndex;
-const ExpressionIndex = Sema.ExpressionIndex;
-const TypeExpressionIndex = Sema.TypeExpressionIndex;
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
 pub const SymbolLocation = struct {
@@ -37,7 +37,51 @@ pub const SymbolLocation = struct {
 };
 
 pub const Symbol = union(enum) {
-    pub const Index = SymbolIndex;
+    pub const Index = enum(u32) {
+        none = std.math.maxInt(u32),
+        _,
+
+        /// Helper function to cast a generic number to a `Index`
+        pub inline fn cast(x: anytype) Index {
+            return switch (@typeInfo(@TypeOf(x))) {
+                .null => .none,
+                .int, .comptime_int => @enumFromInt(@as(u32, @intCast(x))),
+                .optional => if (x) |value| @enumFromInt(@as(u32, @intCast(value))) else .none,
+                else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a Index"),
+            };
+        }
+
+        /// Fetches the underlying value
+        pub fn get(index: Index, sema: *Sema) *Symbol {
+            return &sema.symbols.items[@intFromEnum(index)];
+        }
+
+        pub fn getCommon(index: Index, sema: *Sema) *Symbol.Common {
+            return sema.symbols.items[@intFromEnum(index)].common();
+        }
+
+        pub fn getFn(index: Index, sema: *Sema) *Symbol.Function {
+            return &sema.symbols.items[@intFromEnum(index)].function;
+        }
+        pub fn getConst(index: Index, sema: *Sema) *Symbol.Constant {
+            return &sema.symbols.items[@intFromEnum(index)].constant;
+        }
+        pub fn getVar(index: Index, sema: *Sema) *Symbol.Variable {
+            return &sema.symbols.items[@intFromEnum(index)].variable;
+        }
+        pub fn getReg(index: Index, sema: *Sema) *Symbol.Register {
+            return &sema.symbols.items[@intFromEnum(index)].register;
+        }
+        pub fn getStruct(index: Index, sema: *Sema) *Symbol.Struct {
+            return &sema.symbols.items[@intFromEnum(index)].@"struct";
+        }
+        pub fn getPacked(index: Index, sema: *Sema) *Symbol.Packed {
+            return &sema.symbols.items[@intFromEnum(index)].@"packed";
+        }
+        pub fn getEnum(index: Index, sema: *Sema) *Symbol.Enum {
+            return &sema.symbols.items[@intFromEnum(index)].@"enum";
+        }
+    };
 
     pub const Common = struct {
         /// Containing node for this symbol
@@ -46,10 +90,10 @@ pub const Symbol = union(enum) {
         is_pub: bool,
 
         /// Module which contains this symbol
-        module_index: Sema.ModuleIndex = undefined,
+        module_index: Module.Index = undefined,
         /// Index of this symbol into the modules's symbol-map
         /// Useful for retrieving the name of this symbol
-        module_symbol_index: Sema.SymbolIndex = undefined,
+        module_symbol_index: Symbol.Index = undefined,
 
         /// Current status for analyzation
         analyze_status: enum { pending, active, done } = .pending,
@@ -64,7 +108,7 @@ pub const Symbol = union(enum) {
                 stack: u8,
             },
 
-            type: TypeExpressionIndex,
+            type: TypeExpression.Index,
             node: Ast.NodeIndex,
         };
 
@@ -104,9 +148,9 @@ pub const Symbol = union(enum) {
         bank_offset: u16 = undefined,
 
         /// Type of this constant
-        type: TypeExpressionIndex,
+        type: TypeExpression.Index,
         /// Value of this constant
-        value: ExpressionIndex,
+        value: Expression.Index,
     };
     pub const Variable = struct {
         /// Commonly shared data between symbols
@@ -121,7 +165,7 @@ pub const Symbol = union(enum) {
         wram_offset: u17 = undefined,
 
         /// Type of this variable
-        type: TypeExpressionIndex,
+        type: TypeExpression.Index,
     };
     pub const Register = struct {
         pub const AccessType = enum {
@@ -138,14 +182,14 @@ pub const Symbol = union(enum) {
         /// Bank-independant address of this register
         address: u16,
         /// Type of this register
-        type: TypeExpressionIndex,
+        type: TypeExpression.Index,
     };
 
     pub const Struct = struct {
         pub const Field = struct {
             name: []const u8,
-            type: TypeExpressionIndex,
-            default_value: ExpressionIndex,
+            type: TypeExpression.Index,
+            default_value: Expression.Index,
         };
 
         /// Commonly shared data between symbols
@@ -157,15 +201,15 @@ pub const Symbol = union(enum) {
     pub const Packed = struct {
         pub const Field = struct {
             name: []const u8,
-            type: TypeExpressionIndex,
-            default_value: ExpressionIndex,
+            type: TypeExpression.Index,
+            default_value: Expression.Index,
         };
 
         /// Commonly shared data between symbols
         common: Common,
 
         /// Backing type of this enum
-        backing_type: TypeExpressionIndex,
+        backing_type: TypeExpression.Index,
 
         /// Fields of this packed
         fields: []const Field,
@@ -173,14 +217,14 @@ pub const Symbol = union(enum) {
     pub const Enum = struct {
         pub const Field = struct {
             name: []const u8,
-            value: ExpressionIndex,
+            value: Expression.Index,
         };
 
         /// Commonly shared data between symbols
         common: Common,
 
         /// Backing type of this enum
-        backing_type: TypeExpressionIndex,
+        backing_type: TypeExpression.Index,
 
         /// Fields representable by this enum
         fields: []const Field,

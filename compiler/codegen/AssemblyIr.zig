@@ -2,35 +2,13 @@
 const std = @import("std");
 
 const Instruction = @import("../instruction.zig").Instruction;
-const SymbolIndex = @import("../Sema.zig").SymbolIndex;
+const Sema = @import("../Sema.zig");
+const Symbol = Sema.Symbol;
+const RegisterType = Sema.RegisterType;
 const Relocation = @import("../CodeGen.zig").Relocation;
 const BranchRelocation = @import("../CodeGen.zig").BranchRelocation;
 const NodeIndex = @import("../Ast.zig").NodeIndex;
 
-pub const RegisterType = enum {
-    none,
-    a8,
-    a16,
-    x8,
-    x16,
-    y8,
-    y16,
-
-    pub fn byteSize(reg: RegisterType) u16 {
-        return switch (reg) {
-            .none => unreachable,
-            .a8, .x8, .y8 => 1,
-            .a16, .x16, .y16 => 2,
-        };
-    }
-    pub fn bitSize(reg: RegisterType) u16 {
-        return switch (reg) {
-            .none => unreachable,
-            .a8, .x8, .y8 => 8,
-            .a16, .x16, .y16 => 16,
-        };
-    }
-};
 pub const ChangeStatusFlags = struct {
     carry: ?bool = null,
     zero: ?bool = null,
@@ -46,14 +24,14 @@ pub const ChangeStatusFlags = struct {
 pub const StoreOperation = struct {
     value: union(enum) {
         immediate: std.math.big.int.Const,
-        global: struct {
-            symbol: SymbolIndex,
+        symbol: struct {
+            symbol: Symbol.Index,
             bit_offset: u16,
         },
-        local: struct {
-            index: u16,
-            bit_offset: u16,
-        },
+        // local: struct {
+        //     index: u16,
+        //     bit_offset: u16,
+        // },
     },
 
     bit_offset: u16,
@@ -70,23 +48,23 @@ pub const Tag = union(enum) {
     },
     change_status_flags: ChangeStatusFlags,
 
-    /// Stores the value of the following `store_operation`s into the target global symbol
-    store_global: struct {
+    /// Stores the value of the following `store_operation`s into the target symbol
+    store_symbol: struct {
+        symbol: Symbol.Index,
         intermediate_register: RegisterType,
-        symbol: SymbolIndex,
         operations: u16,
     },
     /// Stores the value of the following `store_operation`s into the target local variable
-    store_local: struct {
-        intermediate_register: RegisterType,
-        index: u16,
-        operations: u16,
-    },
+    // store_local: struct {
+    //     intermediate_register: RegisterType,
+    //     index: u16,
+    //     operations: u16,
+    // },
     /// Pushes the value of the following `store_operation`s onto the stack
-    store_push: struct {
-        intermediate_register: RegisterType,
-        operations: u16,
-    },
+    // store_push: struct {
+    //     intermediate_register: RegisterType,
+    //     operations: u16,
+    // },
 
     /// Immediatly followed `store.operations`-times after a `store_*` instruction
     store_operation: StoreOperation,
@@ -99,19 +77,19 @@ pub const Tag = union(enum) {
     /// Loads the variable at the offset into the register
     load_variable: struct {
         register: RegisterType,
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
     },
 
     /// Stores the value of the register into the variable
     store_variable: struct {
         register: RegisterType,
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
     },
     /// Stores zero into the variable
     zero_variable: struct {
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
     },
 
@@ -119,7 +97,7 @@ pub const Tag = union(enum) {
     and_value: Instruction.Imm816,
     /// ANDs the accumulator with the variable
     and_variable: struct {
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
     },
 
@@ -127,7 +105,7 @@ pub const Tag = union(enum) {
     or_value: Instruction.Imm816,
     /// ORs the accumulator with the variable
     or_variable: struct {
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
     },
 
@@ -143,19 +121,21 @@ pub const Tag = union(enum) {
 
     /// Sets all bits in the target to 0 where the mask is 1
     clear_bits: struct {
-        symbol: SymbolIndex,
+        symbol: Symbol.Index,
         offset: u16 = 0,
         mask: Instruction.Imm816,
     },
 
     /// Invokes the target method as a subroutine
     call: struct {
-        target: SymbolIndex,
+        target: Symbol.Index,
         target_offset: u16 = 0,
     },
 
-    branch: BranchRelocation,
+    /// Return from the current subroutine
+    @"return": void,
 
+    branch: BranchRelocation,
     label: []const u8,
 };
 

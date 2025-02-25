@@ -872,6 +872,7 @@ fn parseInitExpr(p: *Parser, allow_register: bool) ParseError!NodeIndex {
 
         return p.fail(.expected_expr);
     }
+    _ = try p.expectToken(.rbrace);
 
     const ident_register = if (allow_register and p.eatToken(.colon) != null)
         try p.expectToken(.ident)
@@ -890,6 +891,9 @@ fn parseInitExpr(p: *Parser, allow_register: bool) ParseError!NodeIndex {
 
 /// TypeExpr <- AnonPackedDef | AnonEnumDef | IDENTIFIER
 fn parseTypeExpr(p: *Parser) ParseError!NodeIndex {
+    if (p.token_tags[p.index] == .keyword_struct) {
+        return p.parseStructDef(.empty, .anonymous);
+    }
     if (p.token_tags[p.index] == .keyword_packed) {
         return p.parsePackedDef(.empty, .anonymous);
     }

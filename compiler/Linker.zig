@@ -8,7 +8,6 @@ const Node = Ast.Node;
 const NodeIndex = Ast.NodeIndex;
 const Module = @import("Module.zig");
 const Symbol = @import("symbol.zig").Symbol;
-const SymbolIndex = @import("Sema.zig").SymbolIndex;
 const SymbolLocation = @import("symbol.zig").SymbolLocation;
 const Sema = @import("Sema.zig");
 const Opcode = @import("instruction.zig").Opcode;
@@ -103,10 +102,8 @@ pub fn deinit(link: *Linker) void {
 }
 
 /// Returns the memory-mapped location of a symbol
-pub fn symbolLocation(link: Linker, symbol_idx: SymbolIndex) u24 {
-    const symbol = link.sema.getSymbol(symbol_idx).*;
-
-    return switch (symbol) {
+pub fn symbolLocation(link: Linker, symbol: Symbol.Index) u24 {
+    return switch (symbol.get(link.sema).*) {
         .function => |func_sym| memory_map.bankOffsetToAddr(link.mapping_mode, func_sym.bank, func_sym.bank_offset),
         .constant => |const_sym| memory_map.bankOffsetToAddr(link.mapping_mode, const_sym.bank, const_sym.bank_offset),
         .variable => |var_sym| memory_map.wramOffsetToAddr(var_sym.wram_offset),
@@ -221,6 +218,12 @@ pub fn resolveRelocations(link: *Linker) !void {
                     const rel_offset: i8 = @intCast(offset);
                     const operand: *[1]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..1];
                     operand.* = @bitCast(rel_offset);
+                },
+                .rel8_dp => {
+                    const dp_offset: u8 = @intCast(@as(u16, @truncate(target_addr)) - info.direct_page);
+
+                    const operand: *[1]u8 = bank.items[(func.bank_offset + info.offset + 1)..][0..1];
+                    operand.* = @bitCast(dp_offset);
                 },
                 .addr16 => {
                     if (!memory_map.isAddressAccessibleInBank(link.mapping_mode, target_addr, func.bank)) {
@@ -354,15 +357,14 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
         var src_fbs = std.io.fixedBufferStream(module.source);
         const src_reader = src_fbs.reader();
 
-        for (module.symbol_map.keys(), module.symbol_map.values()) |symbol_name, symbol_idx| {
-            const symbol = link.sema.getSymbol(symbol_idx).*;
+        for (module.symbol_map.keys(), module.symbol_map.values()) |symbol_name, symbol| {
             const is_vector = symbol_name[0] == '@';
 
             // Skip unreferenced symbols
-            if (symbol.commonConst().analyze_status == .pending) {
+            if (symbol.getCommon(link.sema).analyze_status == .pending) {
                 continue;
             }
-            std.debug.assert(symbol.commonConst().analyze_status == .done);
+            std.debug.assert(symbol.getCommon(link.sema).analyze_status == .done);
 
             // Usually format module@symbol, except for vectors which would have a double @
             const debug_sym_name = if (is_vector)
@@ -371,7 +373,7 @@ pub fn writeMlbSymbols(link: Linker, writer: std.fs.File.Writer) !void {
                 try std.fmt.allocPrint(link.allocator, "{s}@{s}", .{ module.name, symbol_name });
             defer if (!is_vector) link.allocator.free(debug_sym_name);
 
-            switch (symbol) {
+            switch (symbol.get(link.sema).*) {
                 .function => |func_sym| {
                     src_fbs.pos = module.ast.tokenLoc(module.ast.nodeToken(func_sym.common.node)).start;
 

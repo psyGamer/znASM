@@ -3,14 +3,14 @@
 const std = @import("std");
 const NodeIndex = @import("../Ast.zig").NodeIndex;
 const Sema = @import("../Sema.zig");
-const RegisterType = @import("../codegen/AssemblyIr.zig").RegisterType;
+const RegisterType = Sema.RegisterType;
+const Expression = Sema.Expression;
+const TypeExpression = Sema.TypeExpression;
+
 const Analyzer = @import("FunctionAnalyzer.zig");
-const TypeExpressionIndex = Sema.TypeExpressionIndex;
-const TypeExpression = @import("type_expression.zig").TypeExpression;
-const ExpressionIndex = Sema.ExpressionIndex;
 const BuiltinVar = @This();
 
-const HandleWriteFn = fn (*Analyzer, NodeIndex, ExpressionIndex) Sema.AnalyzeError!void;
+const HandleWriteFn = fn (*Analyzer, NodeIndex, Expression.Index) Sema.AnalyzeError!void;
 
 pub const Tag = enum {
     stack_pointer,
@@ -61,7 +61,7 @@ var all = std.EnumArray(Tag, BuiltinVar).init(.{
     },
 });
 
-fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: ExpressionIndex) Sema.AnalyzeError!void {
+fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expression.Index) Sema.AnalyzeError!void {
     _ = ana; // autofix
     _ = node_idx; // autofix
     _ = expr_idx; // autofix

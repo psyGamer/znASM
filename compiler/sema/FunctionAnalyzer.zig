@@ -2,23 +2,24 @@
 const std = @import("std");
 const builtin_module = @import("../builtin_module.zig");
 
-const Ast = @import("../Ast.zig");
 const Module = @import("../Module.zig");
+const Ast = @import("../Ast.zig");
+const Node = Ast.Node;
 const Sema = @import("../Sema.zig");
-const NodeIndex = Ast.NodeIndex;
-const Expression = @import("expression.zig").Expression;
-const TypeExpression = @import("type_expression.zig").TypeExpression;
+const Error = Sema.AnalyzeError;
+const Symbol = Sema.Symbol;
+const Expression = Sema.Expression;
+const TypeExpression = Sema.TypeExpression;
 const BuiltinVar = @import("BuiltinVar.zig");
 const BuiltinFn = @import("BuiltinFn.zig");
 
 const SemanticIr = @import("SemanticIr.zig");
 const Analyzer = @This();
-const Error = Sema.AnalyzeError;
 
 sema: *Sema,
 
-symbol: Sema.SymbolIndex,
-module: Sema.ModuleIndex,
+symbol: Symbol.Index,
+module: Module.Index,
 
 ir: std.ArrayListUnmanaged(SemanticIr) = .empty,
 
@@ -28,7 +29,7 @@ pub inline fn getAst(ana: Analyzer) *Ast {
     return &ana.module.get(ana.sema).ast;
 }
 
-inline fn emit(ana: *Analyzer, tag: SemanticIr.Tag, node: NodeIndex) !void {
+inline fn emit(ana: *Analyzer, tag: SemanticIr.Tag, node: Node.Index) !void {
     try ana.ir.append(ana.sema.allocator, .{ .tag = tag, .node = node });
 }
 
@@ -36,7 +37,7 @@ pub fn deinit(ana: *Analyzer) void {
     ana.ir.deinit(ana.sema.allocator);
 }
 
-pub fn process(ana: *Analyzer) Sema.AnalyzeError!void {
+pub fn process(ana: *Analyzer) Error!void {
     const node = ana.symbol.getCommon(ana.sema).node;
     const fn_def = ana.getAst().nodeData(node).fn_def;
 
@@ -70,7 +71,7 @@ fn findLocalVariable(ana: *const Analyzer, name: []const u8) ?SemanticIr.Index {
 }
 
 /// Parses field accessors of a target and emits appropriate `field_reference` instructions
-fn parseFieldTarget(ana: *Analyzer, fields: []const Ast.CommonIndex, root_type: TypeExpression.Index, node: NodeIndex) Error!void {
+fn parseFieldTarget(ana: *Analyzer, fields: []const Ast.CommonIndex, root_type: TypeExpression.Index, node: Node.Index) Error!void {
     const ast = ana.getAst();
 
     var current_type: TypeExpression.Index = root_type;
@@ -81,8 +82,8 @@ fn parseFieldTarget(ana: *Analyzer, fields: []const Ast.CommonIndex, root_type: 
 
         var bit_offset: u16 = 0;
         current_type = switch (current_type.get(ana.sema).*) {
-            .@"struct" => |struct_sym_idx| b: {
-                const struct_sym = ana.sema.getSymbol(struct_sym_idx).@"struct";
+            .@"struct" => |symbol| b: {
+                const struct_sym = symbol.getStruct(ana.sema);
                 for (struct_sym.fields) |field| {
                     if (std.mem.eql(u8, field.name, field_name)) {
                         break :b field.type;
@@ -94,8 +95,8 @@ fn parseFieldTarget(ana: *Analyzer, fields: []const Ast.CommonIndex, root_type: 
                 try ana.sema.emitError(field_ident, ana.module, .unknown_field, .{ field_name, current_type.fmt(ana.sema) });
                 return error.AnalyzeFailed;
             },
-            .@"packed" => |packed_symbol_idx| b: {
-                const packed_sym = ana.sema.getSymbol(packed_symbol_idx).@"packed";
+            .@"packed" => |symbol| b: {
+                const packed_sym = symbol.getPacked(ana.sema);
                 for (packed_sym.fields) |field| {
                     if (std.mem.eql(u8, field.name, field_name)) {
                         break :b field.type;
@@ -155,12 +156,12 @@ const ScopeIterator = struct {
 
 // AST node handling
 
-pub fn handleBlock(ana: *Analyzer, node: NodeIndex) Error!void {
+pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
     try ana.emit(.begin_scope, node);
 
     const range = ana.getAst().nodeData(node).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra| {
-        const child: NodeIndex = @enumFromInt(ana.getAst().extra_data[extra]);
+        const child: Node.Index = @enumFromInt(ana.getAst().extra_data[extra]);
 
         switch (ana.getAst().nodeTag(child)) {
             .block => try ana.handleBlock(child),
@@ -176,7 +177,7 @@ pub fn handleBlock(ana: *Analyzer, node: NodeIndex) Error!void {
     try ana.emit(.end_scope, node);
 }
 
-fn handleLabel(ana: *Analyzer, node: NodeIndex) Error!void {
+fn handleLabel(ana: *Analyzer, node: Node.Index) Error!void {
     const ast = ana.getAst();
     const name_ident = ast.nodeToken(node);
     const name = ast.parseIdentifier(name_ident);
@@ -210,7 +211,7 @@ fn handleLabel(ana: *Analyzer, node: NodeIndex) Error!void {
     try ana.emit(.declare_label, node);
 }
 
-fn handleLocalVarDecl(ana: *Analyzer, node: NodeIndex) Error!void {
+fn handleLocalVarDecl(ana: *Analyzer, node: Node.Index) Error!void {
     const ast = ana.getAst();
     const name_ident = ast.nodeToken(node);
     const name = ast.parseIdentifier(name_ident);
@@ -262,7 +263,7 @@ fn handleLocalVarDecl(ana: *Analyzer, node: NodeIndex) Error!void {
     const decl = ast.nodeData(node).local_var_decl;
     const data = ast.readExtraData(Ast.Node.LocalVarDeclData, decl.extra);
 
-    const location_node: NodeIndex = ast.nodeData(data.location_attr).attr_two.expr_one;
+    const location_node: Node.Index = ast.nodeData(data.location_attr).attr_two.expr_one;
     const location_expr: Expression.Index = try .resolve(ana.sema, try builtin_module.VariableLocation.resolveTypeExpr(ana.sema), location_node, ana.module);
     const location = try location_expr.toValue(builtin_module.VariableLocation, ana.sema);
 
@@ -277,7 +278,7 @@ fn handleLocalVarDecl(ana: *Analyzer, node: NodeIndex) Error!void {
     } }, node);
 }
 
-fn handleAssignStatement(ana: *Analyzer, node: NodeIndex) Error!void {
+fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     const ast = ana.getAst();
     const assign = ast.nodeData(node).assign_statement;
 
@@ -311,9 +312,12 @@ fn handleAssignStatement(ana: *Analyzer, node: NodeIndex) Error!void {
 
         const assign_idx = ana.ir.items.len;
         try ana.emit(.{ .assign_local = undefined }, node);
-        try ana.parseFieldTarget(fields, root_type, node);
+        try ana.parseFieldTarget(fields[1..], root_type, node);
 
-        const target_type = ana.ir.getLast().tag.field_reference.type;
+        const target_type = if (fields.len > 1)
+            ana.ir.getLast().tag.field_reference.type
+        else
+            root_type;
         const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
 
         ana.ir.items[assign_idx].tag.assign_local = .{
@@ -338,9 +342,12 @@ fn handleAssignStatement(ana: *Analyzer, node: NodeIndex) Error!void {
 
     const assign_idx = ana.ir.items.len;
     try ana.emit(.{ .assign_global = undefined }, node);
-    try ana.parseFieldTarget(fields, root_type, node);
+    try ana.parseFieldTarget(fields[1..], root_type, node);
 
-    const target_type = ana.ir.getLast().tag.field_reference.type;
+    const target_type = if (fields.len > 1)
+        ana.ir.getLast().tag.field_reference.type
+    else
+        root_type;
     const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
 
     ana.ir.items[assign_idx].tag.assign_global = .{
@@ -350,7 +357,7 @@ fn handleAssignStatement(ana: *Analyzer, node: NodeIndex) Error!void {
     };
 }
 
-fn handleCallStatement(ana: *Analyzer, node: NodeIndex) Error!void {
+fn handleCallStatement(ana: *Analyzer, node: Node.Index) Error!void {
     const ast = ana.getAst();
     const target_ident = ast.nodeToken(node);
     const target_name = ast.parseIdentifier(target_ident);
@@ -377,7 +384,7 @@ fn handleCallStatement(ana: *Analyzer, node: NodeIndex) Error!void {
     }
 }
 
-fn handleWhileStatement(ana: *Analyzer, node: NodeIndex) Error!void {
+fn handleWhileStatement(ana: *Analyzer, node: Node.Index) Error!void {
     // TODO:
     try ana.emit(.@"return", node);
 }

@@ -1,10 +1,12 @@
 //! Builds assembly instructions from low-level Assembly IR of a function
 const std = @import("std");
+const memory_map = @import("../memory_map.zig");
 
 const Node = @import("../Ast.zig").Node;
 const Sema = @import("../Sema.zig");
 const Symbol = @import("../symbol.zig").Symbol;
 const CodeGen = @import("../CodeGen.zig");
+const InstructionInfo = CodeGen.InstructionInfo;
 const Relocation = CodeGen.Relocation;
 const BranchRelocation = CodeGen.BranchRelocation;
 const AssemblyIr = @import("AssemblyIr.zig");
@@ -16,12 +18,39 @@ const Builder = @This();
 /// Index to a target instruction
 pub const Label = u16;
 
-sema: *Sema,
+/// Indicates how CPU status flags need to be updated, if at all
+pub const ChangeStatusFlags = struct {
+    carry: ?bool = null,
+    zero: ?bool = null,
+    irq_disable: ?bool = null,
+    decimal: ?bool = null,
+    idx_8bit: ?bool = null,
+    mem_8bit: ?bool = null,
+    overflow: ?bool = null,
+    negative: ?bool = null,
+};
+
+codegen: *CodeGen,
 symbol: Symbol.Index,
 
-ir_idx: u32 = 0,
+air_index: u32 = 0,
 
-instructions: std.ArrayListUnmanaged(CodeGen.InstructionInfo) = .empty,
+/// Assembly instructions for this function
+instructions: std.ArrayListUnmanaged(InstructionInfo) = .empty,
+
+/// CPU status flags which need to be set with the calling convention
+calling_status: ChangeStatusFlags = .{},
+/// Currently known state of the status flags
+current_status: ChangeStatusFlags = .{},
+
+/// Calling Convention cannot be changed anymore, due to this function being an interrupt vector / recursive
+callconv_frozen: bool = false,
+
+/// The direct page may temporarily be changed from the default $0000
+/// Must be restored before returning
+current_direct_page: u16 = 0x0000,
+
+// BAD:
 
 labels: std.StringArrayHashMapUnmanaged(Label) = .empty,
 
@@ -31,16 +60,17 @@ mem_size: Instruction.SizeMode,
 idx_size: Instruction.SizeMode,
 
 pub fn build(b: *Builder) !void {
-    try b.emit(.none, .clc);
-    try b.emit(.none, .xce);
+    // try b.emit(.none, .clc);
+    // try b.emit(.none, .xce);
 
-    while (b.ir_idx < b.function().assembly_ir.len) : (b.ir_idx += 1) {
-        const ir = b.function().assembly_ir[b.ir_idx];
-        switch (ir.tag) {
-            .instruction => try b.handleInstruction(ir),
+    const func = b.getFunction();
+    while (b.air_index < func.assembly_ir.len) : (b.air_index += 1) {
+        const air = func.assembly_ir[b.air_index];
+        switch (air.tag) {
+            .instruction => try b.handleInstruction(air),
             // .change_status_flags => try b.handleChangeStatusFlags(ir),
-            // .store_global, .store_local, .store_push => try b.handleStore(ir),
-            // .store_operation => unreachable,
+            .store_symbol => try b.handleStore(air),
+            .store_operation => {},
             // .load_value => try b.handleLoadValue(ir),
             // .load_variable => try b.handleLoadVariable(ir),
             // .store_variable => try b.handleStoreVariable(ir),
@@ -54,26 +84,169 @@ pub fn build(b: *Builder) !void {
             // .rotate_accum_left => try b.handleRotateAccumLeft(ir),
             // .rotate_accum_right => try b.handleRotateAccumRight(ir),
             // .clear_bits => try b.handleClearBits(ir),
-            inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
             // .call => try b.handleCall(ir),
             // .branch => try b.handleBranch(ir),
             // .label => try b.handleLabel(ir),
+            .@"return" => try b.emit(air.node, .rts), // TODO: Support long calling convention
+            inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
         }
     }
 }
 
-inline fn function(b: *Builder) *Symbol.Function {
-    return &b.sema.getSymbol(b.symbol).function;
+/// Generates the raw assembly bytes for all instructions
+pub fn genereateAssemblyData(b: *Builder) ![]u8 {
+    var data: std.ArrayListUnmanaged(u8) = .{};
+    // TODO: Figure out good instruction/assembly bytes ratio
+    try data.ensureTotalCapacity(b.allocator(), b.instructions.items.len * 2);
+
+    const data_writer = data.writer(b.allocator());
+
+    for (b.instructions.items) |*info| {
+        info.offset = @intCast(data.items.len);
+        try info.writeAssembly(data_writer);
+    }
+
+    return data.toOwnedSlice(b.allocator());
 }
+
+// Helper functions
+
+inline fn sema(b: *Builder) *Sema {
+    return b.codegen.sema;
+}
+inline fn allocator(b: *Builder) std.mem.Allocator {
+    return b.sema().allocator;
+}
+inline fn getFunction(b: *Builder) *Symbol.Function {
+    return b.symbol.getFn(b.sema());
+}
+
+fn emit(b: *Builder, node: Node.Index, instr: Instruction) !void {
+    try b.instructions.append(b.allocator(), .{
+        .instr = instr,
+
+        .mem_size = if (b.current_status.mem_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .idx_size = if (b.current_status.idx_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .direct_page = b.current_direct_page,
+
+        .source = node,
+    });
+}
+fn emitReloc(b: *Builder, node: Node.Index, instr: Instruction, reloc: Relocation) !void {
+    try b.instructions.append(b.allocator(), .{
+        .instr = instr,
+        .reloc = reloc,
+
+        .mem_size = if (b.current_status.mem_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .idx_size = if (b.current_status.idx_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .direct_page = b.current_direct_page,
+
+        .source = node,
+    });
+}
+
+const MemoryAccessibility = enum { direct_page, absolute, long, stack };
+fn determineMemoryAccesibilty(b: *Builder, symbol: Symbol.Index) MemoryAccessibility {
+    const mapping_mode = b.sema().mapping_mode;
+    const curr_bank = b.getFunction().bank;
+
+    switch (symbol.get(b.sema()).*) {
+        .variable => |var_sym| {
+            const min_addr24 = memory_map.wramOffsetToAddr(var_sym.wram_offset_min);
+            const max_addr24 = memory_map.wramOffsetToAddr(var_sym.wram_offset_max);
+            const min_addr16: u16 = @truncate(min_addr24);
+            const max_addr16: u16 = @truncate(max_addr24);
+
+            if (memory_map.isAddressAccessibleInBank(mapping_mode, min_addr24, curr_bank) and
+                memory_map.isAddressAccessibleInBank(mapping_mode, max_addr24, curr_bank))
+            {
+                if (min_addr16 >= b.current_direct_page and min_addr16 <= b.current_direct_page + std.math.maxInt(u8) and
+                    max_addr16 >= b.current_direct_page and max_addr16 <= b.current_direct_page + std.math.maxInt(u8))
+                {
+                    return .direct_page;
+                } else {
+                    return .absolute;
+                }
+            } else {
+                return .long;
+            }
+        },
+        .register => |reg_sym| {
+            if (memory_map.isAddressAccessibleInBank(mapping_mode, reg_sym.address, curr_bank)) {
+                if (reg_sym.address >= b.current_direct_page and reg_sym.address <= b.current_direct_page + std.math.maxInt(u8)) {
+                    return .direct_page;
+                } else {
+                    return .absolute;
+                }
+            } else {
+                return .long;
+            }
+        },
+        else => unreachable,
+    }
+}
+
+/// Ensures the current CPU status flags are in a specific state
+fn ensureStatusFlags(b: *Builder, node: Node.Index, target_status: ChangeStatusFlags) !void {
+    var set: Instruction.StatusRegister = .{};
+    var clear: Instruction.StatusRegister = .{};
+
+    inline for (std.meta.fields(Instruction.StatusRegister)) |field| {
+        if (@field(target_status, field.name)) |value| {
+            // Forward to calling convetion
+            if (!b.callconv_frozen and @field(b.calling_status, field.name) == null) {
+                @field(b.calling_status, field.name) = @field(target_status, field.name);
+            } else if (value) {
+                @field(set, field.name) = true;
+            } else {
+                @field(clear, field.name) = true;
+            }
+
+            @field(b.current_status, field.name) = value;
+        }
+    }
+
+    if (set.idx_8bit) {
+        // TODO: Clobber 16-bit X/Y
+    }
+
+    if (set != @as(Instruction.StatusRegister, .{})) {
+        try b.emit(node, .{ .sep = set });
+    }
+    if (clear != @as(Instruction.StatusRegister, .{})) {
+        try b.emit(node, .{ .rep = clear });
+    }
+}
+
+// Assembly IR processing
 
 fn handleInstruction(b: *Builder, ir: AssemblyIr) !void {
     const instruction = ir.tag.instruction;
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = instruction.instr,
         .reloc = instruction.reloc,
 
-        .mem_size = b.mem_size,
-        .idx_size = b.idx_size,
+        .mem_size = if (b.current_status.mem_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .idx_size = if (b.current_status.idx_8bit) |flag|
+            if (flag) .@"8bit" else .@"16bit"
+        else
+            .none,
+        .direct_page = b.current_direct_page,
 
         .source = ir.node,
     });
@@ -109,7 +282,283 @@ fn handleChangeStatusFlags(b: *Builder, ir: AssemblyIr) !void {
     }
 }
 
-fn handleStore(b: *Builder, ir: AssemblyIr) !void {
+fn handleStore(b: *Builder, air: AssemblyIr) !void {
+    const operation_count = switch (air.tag) {
+        inline .store_symbol => |info| info.operations,
+        else => unreachable,
+    };
+    const int_reg = switch (air.tag) {
+        inline .store_symbol => |info| info.intermediate_register,
+        else => unreachable,
+    };
+
+    const operations = b.getFunction().assembly_ir[(b.air_index + 1)..(b.air_index + operation_count + 1)];
+
+    // Identify source operation of each assigned bit
+    const OperationIndex = u16;
+
+    var stack_fallback = std.heap.stackFallback(512, b.allocator());
+    const stack_fallback_allocator = stack_fallback.get();
+
+    const target_type = switch (air.tag) {
+        .store_symbol => |info| switch (info.symbol.get(b.sema()).*) {
+            .constant => |const_sym| const_sym.type,
+            .variable => |var_sym| var_sym.type,
+            .register => |reg_sym| reg_sym.type,
+            else => unreachable,
+        },
+        else => unreachable,
+    };
+
+    // Must be enough space
+    if (target_type.byteSize(b.sema()) < int_reg.byteSize()) {
+        try b.codegen.emitError(air.node, b.symbol, .intermediate_register_too_large, .{@tagName(int_reg)});
+        try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .x8, .y8 });
+        return; // Non-fatal
+    }
+
+    var source_bits = try stack_fallback_allocator.alloc(OperationIndex, target_type.bitSize(b.sema()));
+    defer stack_fallback_allocator.free(source_bits);
+
+    @memset(source_bits, std.math.maxInt(OperationIndex));
+    for (operations, 0..) |op_instr, op_idx| {
+        const op = op_instr.tag.store_operation;
+        @memset(source_bits[op.bit_offset..(op.bit_offset + op.bit_size)], @intCast(op_idx));
+    }
+
+    const target_access = switch (air.tag) {
+        .store_symbol => |info| b.determineMemoryAccesibilty(info.symbol),
+        else => unreachable,
+    };
+
+    switch (int_reg) {
+        .none => {
+
+            // Only allowed if everything is zero
+            @panic("TODO");
+            // return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16, .x8, .x16, .y8, .y16 }, "non-zero assignment");
+        },
+        .a8 => @panic("TODO"),
+        .a16 => @panic("TODO"),
+
+        .x8, .y8 => @panic("TODO"),
+        .x16, .y16 => {
+            if (target_access == .long) {
+                try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_write, .{});
+                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
+                return; // Non-fatal
+            }
+
+            // Variables have to be byte-aligned
+            for (operations) |op_instr| {
+                const op = op_instr.tag.store_operation;
+                if (op.value == .symbol and op.bit_offset % 8 != 0) {
+                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16 }, "non-byte-aligned assignment target with variable");
+                }
+                if (op.value == .symbol and op.value.symbol.bit_offset % 8 != 0) {
+                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16 }, "non-byte-aligned assignment source with variable");
+                }
+            }
+            // Last two bytes may not be mixed
+            const last_idx = source_bits[(source_bits.len - 16)];
+            const second_last_idx = source_bits[source_bits.len - 8];
+            if (last_idx != second_last_idx and (operations[last_idx].tag.store_operation.value != .immediate or operations[second_last_idx].tag.store_operation.value != .immediate)) {
+                return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16, .x8, .y8 }, "mixed assignment sources in last two bytes");
+            }
+
+            try b.ensureStatusFlags(air.node, .{ .idx_8bit = false });
+
+            var write_offset: u16 = 0;
+            while (write_offset <= source_bits.len - 16) {
+                const first_idx = source_bits[write_offset];
+                const second_idx = source_bits[write_offset + 8];
+                const first_op = operations[first_idx].tag.store_operation;
+                const second_op = operations[second_idx].tag.store_operation;
+
+                if (first_idx == second_idx) {
+                    // Operations are the same -> full 16-bit write
+                    const read_offset = write_offset - first_op.bit_offset;
+                    switch (first_op.value) {
+                        .immediate => |value| {
+                            // Extract relevant bytes from full value
+                            const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+                            const second_byte: u8 = @truncate(value.limbs[@divFloor(read_offset + 8, @bitSizeOf(std.math.big.Limb))] >> @intCast((read_offset + 8) % @bitSizeOf(std.math.big.Limb)));
+                            const word: u16 = first_byte | @as(u16, second_byte) << 8;
+
+                            try b.emit(air.node, switch (int_reg) {
+                                .x16 => .{ .ldx_imm = .{ .imm16 = word } },
+                                .y16 => .{ .ldy_imm = .{ .imm16 = word } },
+                                else => unreachable,
+                            });
+                        },
+                        .symbol => |source| {
+                            const source_access = b.determineMemoryAccesibilty(source.symbol);
+                            if (source_access == .long) {
+                                try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
+                                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
+                                return; // Non-fatal
+                            }
+
+                            try b.emitReloc(air.node, switch (source_access) {
+                                .direct_page => switch (int_reg) {
+                                    .x16 => .{ .ldx_dp = undefined },
+                                    .y16 => .{ .ldy_dp = undefined },
+                                    else => unreachable,
+                                },
+                                .absolute => switch (int_reg) {
+                                    .x16 => .{ .ldx_addr16 = undefined },
+                                    .y16 => .{ .ldy_addr16 = undefined },
+                                    else => unreachable,
+                                },
+                                .long, .stack => unreachable,
+                            }, .{
+                                .type = switch (source_access) {
+                                    .direct_page => .rel8_dp,
+                                    .absolute => .addr16,
+                                    .long, .stack => unreachable,
+                                },
+                                .target_symbol = source.symbol,
+                                .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                            });
+                        },
+                    }
+
+                    try b.emitReloc(air.node, switch (target_access) {
+                        .direct_page => switch (int_reg) {
+                            .x16 => .{ .stx_dp = undefined },
+                            .y16 => .{ .sty_dp = undefined },
+                            else => unreachable,
+                        },
+                        .absolute => switch (int_reg) {
+                            .x16 => .{ .stx_addr16 = undefined },
+                            .y16 => .{ .sty_addr16 = undefined },
+                            else => unreachable,
+                        },
+                        .long, .stack => unreachable,
+                    }, .{
+                        .type = switch (target_access) {
+                            .direct_page => .rel8_dp,
+                            .absolute => .addr16,
+                            .long, .stack => unreachable,
+                        },
+                        .target_symbol = air.tag.store_symbol.symbol,
+                        .target_offset = @divExact(write_offset, 8),
+                    });
+                    write_offset += 16;
+                } else if (first_op.value == .immediate and second_op.value == .immediate) {
+                    // Operations can be combined -> full 16-bit write
+                    const first_read_offset = write_offset - first_op.bit_offset;
+                    const second_read_offset = write_offset + 8 - second_op.bit_offset;
+
+                    // Extract relevant bytes from full value
+                    const first_byte: u8 = @truncate(first_op.value.immediate.limbs[@divFloor(first_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(first_read_offset % @bitSizeOf(std.math.big.Limb)));
+                    const second_byte: u8 = @truncate(second_op.value.immediate.limbs[@divFloor(second_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(second_read_offset % @bitSizeOf(std.math.big.Limb)));
+                    const word: u16 = first_byte | @as(u16, second_byte) << 8;
+
+                    try b.emit(air.node, switch (int_reg) {
+                        .x16 => .{ .ldx_imm = .{ .imm16 = word } },
+                        .y16 => .{ .ldy_imm = .{ .imm16 = word } },
+                        else => unreachable,
+                    });
+
+                    try b.emitReloc(air.node, switch (target_access) {
+                        .direct_page => switch (int_reg) {
+                            .x16 => .{ .stx_dp = undefined },
+                            .y16 => .{ .sty_dp = undefined },
+                            else => unreachable,
+                        },
+                        .absolute => switch (int_reg) {
+                            .x16 => .{ .stx_addr16 = undefined },
+                            .y16 => .{ .sty_addr16 = undefined },
+                            else => unreachable,
+                        },
+                        .long, .stack => unreachable,
+                    }, .{
+                        .type = switch (target_access) {
+                            .direct_page => .rel8_dp,
+                            .absolute => .addr16,
+                            .long, .stack => unreachable,
+                        },
+                        .target_symbol = air.tag.store_symbol.symbol,
+                        .target_offset = @divExact(write_offset, 8),
+                    });
+                    write_offset += 16;
+                } else {
+                    // Operations cannot be compiled -> half 8-bit write
+                    // 2nd byte is undefined and will be overwritten with next operation
+                    const read_offset = write_offset - first_op.bit_offset;
+                    switch (first_op.value) {
+                        .immediate => |value| {
+                            // Extract relevant byte from full value
+                            const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+
+                            try b.emit(air.node, switch (int_reg) {
+                                .x16 => .{ .ldx_imm = .{ .imm16 = first_byte } },
+                                .y16 => .{ .ldy_imm = .{ .imm16 = first_byte } },
+                                else => unreachable,
+                            });
+                        },
+                        .symbol => |source| {
+                            const source_access = b.determineMemoryAccesibilty(source.symbol);
+                            if (source_access == .long) {
+                                try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
+                                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
+                                return; // Non-fatal
+                            }
+
+                            try b.emitReloc(air.node, switch (source_access) {
+                                .direct_page => switch (int_reg) {
+                                    .x16 => .{ .ldx_dp = undefined },
+                                    .y16 => .{ .ldy_dp = undefined },
+                                    else => unreachable,
+                                },
+                                .absolute => switch (int_reg) {
+                                    .x16 => .{ .ldx_addr16 = undefined },
+                                    .y16 => .{ .ldy_addr16 = undefined },
+                                    else => unreachable,
+                                },
+                                .long, .stack => unreachable,
+                            }, .{
+                                .type = switch (source_access) {
+                                    .direct_page => .rel8_dp,
+                                    .absolute => .addr16,
+                                    .long, .stack => unreachable,
+                                },
+                                .target_symbol = source.symbol,
+                                .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                            });
+                        },
+                    }
+
+                    try b.emitReloc(air.node, switch (target_access) {
+                        .direct_page => switch (int_reg) {
+                            .x16 => .{ .stx_dp = undefined },
+                            .y16 => .{ .sty_dp = undefined },
+                            else => unreachable,
+                        },
+                        .absolute => switch (int_reg) {
+                            .x16 => .{ .stx_addr16 = undefined },
+                            .y16 => .{ .sty_addr16 = undefined },
+                            else => unreachable,
+                        },
+                        .long, .stack => unreachable,
+                    }, .{
+                        .type = switch (target_access) {
+                            .direct_page => .rel8_dp,
+                            .absolute => .addr16,
+                            .long, .stack => unreachable,
+                        },
+                        .target_symbol = air.tag.store_symbol.symbol,
+                        .target_offset = @divExact(write_offset, 8),
+                    });
+                    write_offset += 8;
+                }
+            }
+        },
+    }
+}
+
+fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
     const operation_count = switch (ir.tag) {
         inline .store_global, .store_local, .store_push => |info| info.operations,
         else => unreachable,
@@ -119,10 +568,10 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
         else => unreachable,
     };
 
-    const operations = b.function().semantic_ir[(b.ir_idx + 1)..(b.ir_idx + operation_count + 1)];
+    const operations = b.getFunction().semantic_ir[(b.air_index + 1)..(b.air_index + operation_count + 1)];
     std.debug.assert(operations.len != 0);
 
-    b.ir_idx += operation_count;
+    b.air_index += operation_count;
 
     var start_idx: usize = 0;
     var curr_offset = operations[start_idx].tag.store_operation.write_offset;
@@ -223,7 +672,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
                             .target_symbol = variable.source.symbol,
                             .target_offset = 0,
                         }),
-                        .local => switch (b.function().local_variables[variable.source.index].location) {
+                        .local => switch (b.getFunction().local_variables[variable.source.index].location) {
                             .scratch => @panic("TODO"),
                             .stack => |offset| try b.emit(ir.node, .{ .lda_sr = offset }),
                         },
@@ -242,7 +691,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
                             .target_symbol = variable.source.symbol,
                             .target_offset = 0,
                         }),
-                        .local => switch (b.function().local_variables[variable.source.index].location) {
+                        .local => switch (b.getFunction().local_variables[variable.source.index].location) {
                             .scratch => @panic("TODO"),
                             .stack => |offset| try b.emit(ir.node, .{ .ora_sr = offset }),
                         },
@@ -285,7 +734,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
                         .target_offset = curr_offset,
                     });
                 },
-                .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                .store_local => |local| switch (b.getFunction().local_variables[local.index].location) {
                     .scratch => @panic("TODO"),
                     .stack => |offset| try b.emit(ir.node, .{ .sta_sr = offset }),
                 },
@@ -363,7 +812,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
                         .target_symbol = global.symbol,
                         .target_offset = curr_offset,
                     }),
-                    .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                    .store_local => |local| switch (b.getFunction().local_variables[local.index].location) {
                         .scratch => @panic("TODO"),
                         .stack => |offset| try b.emit(ir.node, .{ .lda_sr = offset }),
                     },
@@ -392,7 +841,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
                         .target_symbol = global.symbol,
                         .target_offset = curr_offset,
                     }),
-                    .store_local => |local| switch (b.function().local_variables[local.index].location) {
+                    .store_local => |local| switch (b.getFunction().local_variables[local.index].location) {
                         .scratch => @panic("TODO"),
                         .stack => |offset| try b.emit(ir.node, .{ .sta_sr = offset }),
                     },
@@ -409,7 +858,7 @@ fn handleStore(b: *Builder, ir: AssemblyIr) !void {
 fn handleLoadValue(b: *Builder, ir: AssemblyIr) !void {
     const load = ir.tag.load_value;
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = switch (load.register) {
             .a8, .a16 => .{ .lda_imm = load.value },
             .x8, .x16 => .{ .ldx_imm = load.value },
@@ -428,7 +877,7 @@ fn handleLoadVariable(b: *Builder, ir: AssemblyIr) !void {
     const target_symbol = b.sema.getSymbol(load.symbol).*;
 
     const instr: Instruction, const reloc: ?Relocation = switch (load.register) {
-        .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .lda_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = load.symbol,
@@ -441,7 +890,7 @@ fn handleLoadVariable(b: *Builder, ir: AssemblyIr) !void {
                 .target_offset = load.offset,
             } },
 
-        .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .ldx_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = load.symbol,
@@ -450,7 +899,7 @@ fn handleLoadVariable(b: *Builder, ir: AssemblyIr) !void {
         else
             unreachable,
 
-        .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .ldx_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = load.symbol,
@@ -462,7 +911,7 @@ fn handleLoadVariable(b: *Builder, ir: AssemblyIr) !void {
         .none => unreachable,
     };
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = instr,
         .reloc = reloc,
 
@@ -477,7 +926,7 @@ fn handleStoreVariable(b: *Builder, ir: AssemblyIr) !void {
     const target_symbol = b.sema.getSymbol(store.symbol).*;
 
     const instr: Instruction, const reloc: Relocation = switch (store.register) {
-        .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .a8, .a16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .sta_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = store.symbol,
@@ -490,7 +939,7 @@ fn handleStoreVariable(b: *Builder, ir: AssemblyIr) !void {
                 .target_offset = store.offset,
             } },
 
-        .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .x8, .x16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .stx_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = store.symbol,
@@ -499,7 +948,7 @@ fn handleStoreVariable(b: *Builder, ir: AssemblyIr) !void {
         else
             unreachable,
 
-        .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+        .y8, .y16 => if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
             .{ .{ .sty_addr16 = undefined }, .{
                 .type = .addr16,
                 .target_symbol = store.symbol,
@@ -509,7 +958,7 @@ fn handleStoreVariable(b: *Builder, ir: AssemblyIr) !void {
             unreachable,
     };
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = instr,
         .reloc = reloc,
 
@@ -523,9 +972,9 @@ fn handleZeroVariable(b: *Builder, ir: AssemblyIr) !void {
     const store = ir.tag.zero_variable;
 
     // STZ does not support long addresses
-    std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.getSymbol(store.symbol).*, b.function().bank));
+    std.debug.assert(b.sema.isSymbolAccessibleInBank(b.sema.getSymbol(store.symbol).*, b.getFunction().bank));
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .stz_addr16 = undefined },
         .reloc = .{
             .type = .addr16,
@@ -542,7 +991,7 @@ fn handleZeroVariable(b: *Builder, ir: AssemblyIr) !void {
 fn handleOrValue(b: *Builder, ir: AssemblyIr) !void {
     const value = ir.tag.or_value;
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .ora_imm = value },
 
         .mem_size = b.mem_size,
@@ -555,7 +1004,7 @@ fn handleOrVariable(b: *Builder, ir: AssemblyIr) !void {
     const variable = ir.tag.or_variable;
     const target_symbol = b.sema.getSymbol(variable.symbol).*;
 
-    const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+    const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
         .{ .{ .ora_addr16 = undefined }, .{
             .type = .addr16,
             .target_symbol = variable.symbol,
@@ -568,7 +1017,7 @@ fn handleOrVariable(b: *Builder, ir: AssemblyIr) !void {
             .target_offset = variable.offset,
         } };
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = instr,
         .reloc = reloc,
 
@@ -581,7 +1030,7 @@ fn handleOrVariable(b: *Builder, ir: AssemblyIr) !void {
 fn handleAndValue(b: *Builder, ir: AssemblyIr) !void {
     const value = ir.tag.and_value;
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .and_imm = value },
 
         .mem_size = b.mem_size,
@@ -594,7 +1043,7 @@ fn handleAndVariable(b: *Builder, ir: AssemblyIr) !void {
     const variable = ir.tag.and_variable;
     const target_symbol = b.sema.getSymbol(variable.symbol).*;
 
-    const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.function().bank))
+    const instr: Instruction, const reloc: Relocation = if (b.sema.isSymbolAccessibleInBank(target_symbol, b.getFunction().bank))
         .{ .{ .and_addr16 = undefined }, .{
             .type = .addr16,
             .target_symbol = variable.symbol,
@@ -607,7 +1056,7 @@ fn handleAndVariable(b: *Builder, ir: AssemblyIr) !void {
             .target_offset = variable.offset,
         } };
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = instr,
         .reloc = reloc,
 
@@ -621,7 +1070,7 @@ fn handleShiftAccumLeft(b: *Builder, ir: AssemblyIr) !void {
     const shift = ir.tag.shift_accum_left;
 
     for (0..shift) |_| {
-        try b.instructions.append(b.sema.allocator, .{
+        try b.instructions.append(b.allocator(), .{
             .instr = .asl_accum,
 
             .mem_size = b.mem_size,
@@ -635,7 +1084,7 @@ fn handleShiftAccumRight(b: *Builder, ir: AssemblyIr) !void {
     const shift = ir.tag.shift_accum_right;
 
     for (0..shift) |_| {
-        try b.instructions.append(b.sema.allocator, .{
+        try b.instructions.append(b.allocator(), .{
             .instr = .lsr_accum,
 
             .mem_size = b.mem_size,
@@ -649,7 +1098,7 @@ fn handleRotateAccumLeft(b: *Builder, ir: AssemblyIr) !void {
     const rotate = ir.tag.rotate_accum_left;
 
     for (0..rotate) |_| {
-        try b.instructions.append(b.sema.allocator, .{
+        try b.instructions.append(b.allocator(), .{
             .instr = .rol_accum,
 
             .mem_size = b.mem_size,
@@ -663,7 +1112,7 @@ fn handleRotateAccumRight(b: *Builder, ir: AssemblyIr) !void {
     const rotate = ir.tag.rotate_accum_right;
 
     for (0..rotate) |_| {
-        try b.instructions.append(b.sema.allocator, .{
+        try b.instructions.append(b.allocator(), .{
             .instr = .ror_accum,
 
             .mem_size = b.mem_size,
@@ -676,7 +1125,7 @@ fn handleRotateAccumRight(b: *Builder, ir: AssemblyIr) !void {
 fn handleClearBits(b: *Builder, ir: AssemblyIr) !void {
     const clear_bits = ir.tag.clear_bits;
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .lda_imm = clear_bits.mask },
 
         .mem_size = b.mem_size,
@@ -684,7 +1133,7 @@ fn handleClearBits(b: *Builder, ir: AssemblyIr) !void {
 
         .source = ir.node,
     });
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .trb_addr16 = undefined },
         .reloc = .{
             .type = .addr16,
@@ -699,16 +1148,16 @@ fn handleClearBits(b: *Builder, ir: AssemblyIr) !void {
     });
 }
 fn handleLabel(b: *Builder, ir: AssemblyIr) !void {
-    try b.labels.put(b.sema.allocator, ir.tag.label, @intCast(b.instructions.items.len));
+    try b.labels.put(b.allocator(), ir.tag.label, @intCast(b.instructions.items.len));
 }
 fn handleCall(b: *Builder, ir: AssemblyIr) !void {
     const call = ir.tag.call;
     const target_symbol = b.sema.getSymbol(call.target);
 
     // TODO: Support long jumps
-    std.debug.assert(target_symbol.function.bank == b.function().bank);
+    std.debug.assert(target_symbol.function.bank == b.getFunction().bank);
 
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = .{ .jsr = undefined },
         .reloc = .{
             .type = .addr16,
@@ -723,7 +1172,7 @@ fn handleCall(b: *Builder, ir: AssemblyIr) !void {
     });
 }
 fn handleBranch(b: *Builder, ir: AssemblyIr) !void {
-    try b.instructions.append(b.sema.allocator, .{
+    try b.instructions.append(b.allocator(), .{
         .instr = undefined,
         .branch_reloc = ir.tag.branch,
 
@@ -732,54 +1181,6 @@ fn handleBranch(b: *Builder, ir: AssemblyIr) !void {
 
         .source = ir.node,
     });
-}
-
-fn emit(b: *Builder, node: Node.Index, instr: Instruction) !void {
-    try b.instructions.append(b.sema.allocator, .{
-        .instr = instr,
-
-        .mem_size = b.mem_size,
-        .idx_size = b.idx_size,
-
-        .source = node,
-    });
-}
-fn emitReloc(b: *Builder, node: Node.Index, instr: Instruction, reloc: Relocation) !void {
-    try b.instructions.append(b.sema.allocator, .{
-        .instr = instr,
-        .reloc = reloc,
-
-        .mem_size = b.mem_size,
-        .idx_size = b.idx_size,
-
-        .source = node,
-    });
-}
-
-/// Generates the raw assembly bytes for all instructions
-pub fn genereateAssemblyData(b: *Builder) ![]u8 {
-    var data: std.ArrayListUnmanaged(u8) = .{};
-    // TODO: Figure out good instruction/assembly ratio
-    try data.ensureTotalCapacity(b.sema.allocator, b.instructions.items.len * 2);
-
-    const data_writer = data.writer(b.sema.allocator);
-
-    for (b.instructions.items) |*info| {
-        const size_type = info.instr.sizeType();
-        const size_mode = switch (size_type) {
-            .none => .none,
-            .mem => info.mem_size,
-            .idx => info.idx_size,
-        };
-        if (size_type != .none) {
-            std.debug.assert(size_mode != .none);
-        }
-
-        info.offset = @intCast(data.items.len);
-        try info.instr.writeData(data_writer, size_mode);
-    }
-
-    return data.toOwnedSlice(b.sema.allocator);
 }
 
 /// By default labels point to a symbol in the current module, instead of the current one with an offset
@@ -792,7 +1193,7 @@ pub fn fixLabelRelocs(b: *Builder) !void {
             if (std.mem.eql(u8, label, reloc.target_sym.name)) {
                 reloc.target_symbol = b.symbol_location;
                 reloc.target_offset = if (instr_index == b.instructions.items.len)
-                    @intCast(b.function().assembly_data.len)
+                    @intCast(b.getFunction().assembly_data.len)
                 else
                     b.instructions.items[instr_index].offset;
             }
@@ -804,12 +1205,12 @@ pub fn fixLabelRelocs(b: *Builder) !void {
 pub fn resolveBranchRelocs(b: *Builder) !void {
     // Relative offsets to the target instruction to determine short- / long-form
     var reloc_offsets: std.AutoArrayHashMapUnmanaged(usize, i32) = .{};
-    defer reloc_offsets.deinit(b.sema.allocator);
+    defer reloc_offsets.deinit(b.allocator());
 
     for (b.instructions.items, 0..) |info, i| {
         if (info.branch_reloc != null) {
             // Default to long-form, lower to short-form later
-            try reloc_offsets.put(b.sema.allocator, i, std.math.maxInt(i32));
+            try reloc_offsets.put(b.allocator(), i, std.math.maxInt(i32));
         }
     }
 
@@ -867,7 +1268,7 @@ pub fn resolveBranchRelocs(b: *Builder) !void {
                         relative_offset.* += long_sizes.get(other_reloc.type);
                     }
                 } else {
-                    const size_type = info.instr.sizeType();
+                    const size_type = info.instr.immediateSizeType();
                     const size_mode = switch (size_type) {
                         .none => .none,
                         .mem => info.mem_size,
@@ -892,7 +1293,7 @@ pub fn resolveBranchRelocs(b: *Builder) !void {
 
     // Calculate target offsets (for jumps)
     var target_offsets: std.AutoArrayHashMapUnmanaged(usize, u16) = .{};
-    defer target_offsets.deinit(b.sema.allocator);
+    defer target_offsets.deinit(b.allocator());
 
     for (reloc_offsets.keys()) |source_idx| {
         const reloc = b.instructions.items[source_idx].branch_reloc.?;
@@ -909,7 +1310,7 @@ pub fn resolveBranchRelocs(b: *Builder) !void {
                     offset += long_sizes.get(other_reloc.type);
                 }
             } else {
-                const size_type = info.instr.sizeType();
+                const size_type = info.instr.immediateSizeType();
                 const size_mode = switch (size_type) {
                     .none => .none,
                     .mem => info.mem_size,
@@ -923,7 +1324,7 @@ pub fn resolveBranchRelocs(b: *Builder) !void {
             }
         }
 
-        try target_offsets.put(b.sema.allocator, source_idx, @intCast(offset));
+        try target_offsets.put(b.allocator(), source_idx, @intCast(offset));
     }
 
     // Insert instructions (reversed to avoid shifting following indices)
@@ -996,7 +1397,7 @@ pub fn resolveBranchRelocs(b: *Builder) !void {
                     .target_offset = target_offset,
                 };
             } else {
-                try b.instructions.insert(b.sema.allocator, source_idx + 1, .{
+                try b.instructions.insert(b.allocator(), source_idx + 1, .{
                     .instr = .{ .jmp = undefined },
                     .reloc = jmp_reloc,
 

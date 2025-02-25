@@ -1,12 +1,8 @@
 const std = @import("std");
 
 pub const Instruction = union(Opcode) {
-    /// Some instructions support either 8bit or 16bit immediate values,
-    /// depending on the current register mode
+    /// Immediate 8/16-bit value, based on the current register size
     pub const Imm816 = packed union { imm8: u8, imm16: u16 };
-
-    /// 16-bit Absolute address
-    pub const Addr16 = enum(u16) { _ };
 
     /// State of the Status Flags Register
     pub const StatusRegister = packed struct(u8) {
@@ -69,7 +65,7 @@ pub const Instruction = union(Opcode) {
     /// Load Accumulator from Memory (Direct Page)
     lda_dp: u8,
     /// Load Accumulator from Memory (Absolute)
-    lda_addr16: Addr16,
+    lda_addr16: u16,
     /// Load Accumulator from Memory (Long)
     lda_addr24: u24,
     /// Store Accumulator to Memory (Stack Relative)
@@ -82,28 +78,28 @@ pub const Instruction = union(Opcode) {
     /// Load Index Register X from Memory (Direct Page)
     ldx_dp: u8,
     /// Load Index Register X from Memory (Absolute)
-    ldx_addr16: Addr16,
+    ldx_addr16: u16,
 
     /// Load Index Register Y from Memory (Immediate)
     ldy_imm: Imm816,
     /// Load Index Register Y from Memory (Direct Page)
     ldy_dp: u8,
     /// Load Index Register Y from Memory (Absolute)
-    ldy_addr16: Addr16,
+    ldy_addr16: u16,
 
     /// Store Zero to Memory (Direct Page)
     stz_dp: u8,
     /// Store Zero to Memory (Absolute)
-    stz_addr16: Addr16,
+    stz_addr16: u16,
     /// Store Zero to Memory (Direct Page, X Indexed)
     stz_dp_idx_x: u8,
     /// Store Zero to Memory (Absolute, X Indexed)
-    stz_addr16_idx_x: Addr16,
+    stz_addr16_idx_x: u16,
 
     /// Store Accumulator to Memory (Direct Page)
-    sta_addr8: u8,
+    sta_dp: u8,
     /// Store Accumulator to Memory (Absolute)
-    sta_addr16: Addr16,
+    sta_addr16: u16,
     /// Store Accumulator to Memory (Long)
     sta_addr24: u24,
     /// Store Accumulator to Memory (Stack Relative)
@@ -112,44 +108,44 @@ pub const Instruction = union(Opcode) {
     sta_ind_sr_idx_y: u8,
 
     /// Store Index Register X to Memory (Direct Page)
-    stx_addr8: u8,
+    stx_dp: u8,
     /// Store Index Register X to Memory (Absolute)
-    stx_addr16: Addr16,
+    stx_addr16: u16,
     /// Store Index Register X to Memory (Direct Page, Y Indexed)
-    stx_addr8_idx_y: u8,
+    stx_dp_idx_y: u8,
 
     /// Store Index Register Y to Memory (Direct Page)
-    sty_addr8: u8,
+    sty_dp: u8,
     /// Store Index Register Y to Memory (Absolute)
-    sty_addr16: Addr16,
+    sty_addr16: u16,
     /// Store Index Register Y to Memory (Direct Page, X Indexed)
-    sty_addr8_idx_x: u8,
+    sty_dp_idx_x: u8,
 
-    /// Compare Accumulator with Memory
-    cmp: Imm816,
-    /// Compare Index Register X with Memory
-    cpx: Imm816,
-    /// Compare Index Register Y with Memory
-    cpy: Imm816,
+    /// Compare Accumulator with Memory (Immediate)
+    cmp_imm: Imm816,
+    /// Compare Index Register X with Memory (Immediate)
+    cpx_imm: Imm816,
+    /// Compare Index Register Y with Memory (Immediate)
+    cpy_imm: Imm816,
 
     /// Test Memory Bits against Accumulator (Immediate)
     bit_imm: Imm816,
     /// Test Memory Bits against Accumulator (Absolute)
-    bit_addr16: Addr16,
+    bit_addr16: u16,
 
     /// Test and Reset Memory Bits Against Accumulator (Absolute)
-    trb_addr16: Addr16,
+    trb_addr16: u16,
     /// Test and Reset Memory Bits Against Accumulator (Direct Page)
     trb_dp: u8,
     /// Test and Set Memory Bits Against Accumulator (Absolute)
-    tsb_addr16: Addr16,
+    tsb_addr16: u16,
     /// Test and Set Memory Bits Against Accumulator (Direct Page)
     tsb_dp: u8,
 
     /// AND Accumulator with Memory (Immediate)
     and_imm: Imm816,
     /// AND Accumulator with Memory (Absolute)
-    and_addr16: Addr16,
+    and_addr16: u16,
     /// AND Accumulator with Memory (Long)
     and_addr24: u24,
     /// AND Accumulator with Memory (Stack Relative)
@@ -160,7 +156,7 @@ pub const Instruction = union(Opcode) {
     /// OR Accumulator with Memory (Immediate)
     ora_imm: Imm816,
     /// OR Accumulator with Memory (Absolute)
-    ora_addr16: Addr16,
+    ora_addr16: u16,
     /// OR Accumulator with Memory (Long)
     ora_addr24: u24,
     /// OR Accumulator with Memory (Stack Relative)
@@ -171,7 +167,7 @@ pub const Instruction = union(Opcode) {
     /// XOR Accumulator with Memory (Immediate)
     eor_imm: Imm816,
     /// XOR Accumulator with Memory (Absolute)
-    eor_addr16: Addr16,
+    eor_addr16: u16,
     /// XOR Accumulator with Memory (Long)
     eor_addr24: u24,
     /// XOR Accumulator with Memory (Stack Relative)
@@ -182,7 +178,7 @@ pub const Instruction = union(Opcode) {
     /// Add with Carry to Accumulator (Immediate)
     adc_imm: Imm816,
     /// Add with Carry to Accumulator (Absolute)
-    adc_addr16: Addr16,
+    adc_addr16: u16,
     /// Add with Carry to Accumulator (Long)
     adc_addr24: u24,
     /// Add with Carry to Accumulator (Stack Relative)
@@ -193,7 +189,7 @@ pub const Instruction = union(Opcode) {
     /// Subtract with Borrow from Accumulator (Immediate)
     sbc_imm: Imm816,
     /// Subtract with Borrow from Accumulator (Absolute)
-    sbc_addr16: Addr16,
+    sbc_addr16: u16,
     /// Subtract with Borrow from Accumulator (Long)
     sbc_addr24: u24,
     /// Subtract with Borrow from Accumulator (Stack Relative)
@@ -204,19 +200,19 @@ pub const Instruction = union(Opcode) {
     /// Arithmetic Shift Left (Accumulator)
     asl_accum: void,
     /// Arithmetic Shift Left (Absolute)
-    asl_addr16: Addr16,
+    asl_addr16: u16,
     /// Logical Shift Right (Accumulator)
     lsr_accum: void,
     /// Logical Shift Right (Absolute)
-    lsr_addr16: Addr16,
+    lsr_addr16: u16,
     /// Rotate Left (Accumulator)
     rol_accum: void,
     /// Rotate Left (Absolute)
-    rol_addr16: Addr16,
+    rol_addr16: u16,
     /// Rotate Right (Accumulator)
     ror_accum: void,
     /// Rotate Right (Absolute)
-    ror_addr16: Addr16,
+    ror_addr16: u16,
 
     /// Set Carry Flag
     sec: void,
@@ -330,13 +326,9 @@ pub const Instruction = union(Opcode) {
                         const value = @field(instr, field.name).imm16;
                         try writer.writeInt(u16, value, .little);
                     }
-                } else if (field.type == Addr16) {
-                    std.debug.assert(size_mode != .none);
-
+                } else if (field.type == u16) {
                     try writer.writeInt(u16, @intFromEnum(@field(instr, field.name)), .little);
                 } else {
-                    std.debug.assert(size_mode == .none);
-
                     const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
                     try writer.writeAll(&operand_data);
                 }
@@ -353,9 +345,9 @@ pub const Instruction = union(Opcode) {
         return @as(Opcode, instr).size(size_mode);
     }
 
-    /// Checks which size-type is used for this instruction
-    pub fn sizeType(instr: Instruction) SizeType {
-        return @as(Opcode, instr).sizeType();
+    /// Checks which status flag is used for this immediate instruction
+    pub fn immediateSizeType(instr: Instruction) SizeType {
+        return @as(Opcode, instr).immediateSizeType();
     }
 };
 
@@ -400,7 +392,7 @@ pub const Opcode = enum(u8) {
     stz_dp_idx_x = 0x74,
     stz_addr16_idx_x = 0x9E,
 
-    sta_addr8 = 0x85,
+    sta_dp = 0x85,
     sta_addr16 = 0x8D,
     sta_addr24 = 0x8F,
     sta_sr = 0x83,
@@ -417,17 +409,17 @@ pub const Opcode = enum(u8) {
     // sta_stack = 0x83,
     // sta_stackind_idx_y = 0x93,
 
-    stx_addr8 = 0x86,
+    stx_dp = 0x86,
     stx_addr16 = 0x8E,
-    stx_addr8_idx_y = 0x96,
+    stx_dp_idx_y = 0x96,
 
-    sty_addr8 = 0x84,
+    sty_dp = 0x84,
     sty_addr16 = 0x8C,
-    sty_addr8_idx_x = 0x94,
+    sty_dp_idx_x = 0x94,
 
-    cmp = 0xC9,
-    cpx = 0xE0,
-    cpy = 0xC0,
+    cmp_imm = 0xC9,
+    cpx_imm = 0xE0,
+    cpy_imm = 0xC0,
 
     bit_imm = 0x89,
     bit_addr16 = 0x2C,
@@ -545,66 +537,23 @@ pub const Opcode = enum(u8) {
         unreachable;
     }
 
-    /// Checks which size-type is used for this opcode
-    pub fn sizeType(instr: Opcode) Instruction.SizeType {
+    /// Checks which status flag is used for this immediate instruction
+    pub fn immediateSizeType(instr: Opcode) Instruction.SizeType {
         return switch (instr) {
             .and_imm,
-            .and_addr16,
-            .and_addr24,
             .ora_imm,
-            .ora_addr16,
-            .ora_addr24,
             .eor_imm,
-            .eor_addr16,
-            .eor_addr24,
             .adc_imm,
-            .adc_addr16,
-            .adc_addr24,
             .sbc_imm,
-            .sbc_addr16,
-            .sbc_addr24,
-            .asl_accum,
-            .asl_addr16,
-            .lsr_accum,
-            .lsr_addr16,
-            .rol_accum,
-            .rol_addr16,
-            .ror_accum,
-            .ror_addr16,
             .lda_imm,
-            .lda_dp,
-            .lda_addr16,
-            .lda_addr24,
-            .sta_addr8,
-            .sta_addr16,
-            .sta_addr24,
-            .stz_addr16,
-            .stz_addr16_idx_x,
-            .stz_dp,
-            .stz_dp_idx_x,
-            .cmp,
+            .cmp_imm,
             .bit_imm,
-            .bit_addr16,
-            .trb_dp,
-            .trb_addr16,
-            .tsb_dp,
-            .tsb_addr16,
             => .mem,
 
             .ldx_imm,
-            .ldx_dp,
-            .ldx_addr16,
             .ldy_imm,
-            .ldy_dp,
-            .ldy_addr16,
-            .stx_addr8,
-            .stx_addr16,
-            .stx_addr8_idx_y,
-            .sty_addr8,
-            .sty_addr16,
-            .sty_addr8_idx_x,
-            .cpx,
-            .cpy,
+            .cpx_imm,
+            .cpy_imm,
             => .idx,
 
             else => .none,
