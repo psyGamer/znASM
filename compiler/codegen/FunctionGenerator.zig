@@ -7,7 +7,6 @@ const Node = Ast.Node;
 const Module = @import("../Module.zig");
 const Sema = @import("../Sema.zig");
 const Symbol = Sema.Symbol;
-const RegisterType = Sema.RegisterType;
 const Expression = Sema.Expression;
 const TypeExpression = Sema.TypeExpression;
 const CodeGen = @import("../CodeGen.zig");

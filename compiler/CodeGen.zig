@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_module = @import("builtin_module.zig");
 const memory_map = @import("memory_map.zig");
 
 const Module = @import("Module.zig");
@@ -227,7 +228,7 @@ pub fn buildFunction(codegen: *CodeGen, symbol: Symbol.Index) !void {
 // Error Handling
 
 const Error = ErrorSystem(.{
-    .intermediate_register_too_large = "Intermediate register [!]{s}[] cannot write [!]single byte[] values",
+    // .intermediate_register_too_large = "Intermediate register [!]{s}[] cannot write [!]single byte[] values",
     .idx_reg_long_read = "[!]X/Y Index Registers[] cannot read memory from other banks, because [!]long memory accesses aren't supported[]",
     .idx_reg_long_write = "[!]X/Y Index Registers[] cannot write memory to other banks, because [!]long memory accesses aren't supported[]",
 });
@@ -249,7 +250,7 @@ pub fn emitNote(codegen: *CodeGen, node: Node.Index, symbol: Symbol.Index, compt
     try note_ctx.end();
 }
 
-pub fn failUnsupportedIntermediateRegister(codegen: *CodeGen, node: Node.Index, symbol: Symbol.Index, used_register: Sema.RegisterType, allowed_registers: []const Sema.RegisterType, usage: []const u8) !void {
+pub fn failUnsupportedIntermediateRegister(codegen: *CodeGen, node: Node.Index, symbol: Symbol.Index, used_register: builtin_module.CpuRegister, allowed_registers: []const builtin_module.CpuRegister, usage: []const u8) !void {
     const err_ctx = try codegen.beginError(node, symbol, .err);
     try err_ctx.print("Unsupported intermediate register [!]{s}[], for use with [!]{s}", .{ @tagName(used_register), usage });
     try err_ctx.end();
@@ -259,7 +260,7 @@ pub fn failUnsupportedIntermediateRegister(codegen: *CodeGen, node: Node.Index, 
     return error.GenerateFailed;
 }
 
-pub fn emitSupportedIntermediateRegisters(codegen: *CodeGen, node: Node.Index, symbol: Symbol.Index, allowed_registers: []const Sema.RegisterType) !void {
+pub fn emitSupportedIntermediateRegisters(codegen: *CodeGen, node: Node.Index, symbol: Symbol.Index, allowed_registers: []const builtin_module.CpuRegister) !void {
     const note_ctx = try codegen.beginError(node, symbol, .note);
     try note_ctx.print("Supported intermediate registers are: ", .{});
     for (allowed_registers, 0..) |register, i| {

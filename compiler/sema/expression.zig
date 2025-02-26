@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_module = @import("../builtin_module.zig");
 
 const Module = @import("../Module.zig");
 const Ast = @import("../Ast.zig");
@@ -6,7 +7,6 @@ const NodeIndex = Ast.NodeIndex;
 const Sema = @import("../Sema.zig");
 const Symbol = Sema.Symbol;
 const SymbolLocation = Sema.SymbolLocation;
-const RegisterType = Sema.RegisterType;
 const TypeExpression = Sema.TypeExpression;
 const BuiltinFn = @import("BuiltinFn.zig");
 const BuiltinVar = @import("BuiltinVar.zig");
@@ -60,7 +60,7 @@ pub const Expression = struct {
             fields_end: Index,
         },
     },
-    intermediate_register: RegisterType,
+    intermediate_register: builtin_module.CpuRegister,
 
     node: NodeIndex,
     module: Module.Index,
@@ -284,7 +284,7 @@ pub const Expression = struct {
         }
     }
 
-    fn parseIntermediateRegister(sema: *Sema, module: Module.Index, token: Ast.TokenIndex) Error!RegisterType {
+    fn parseIntermediateRegister(sema: *Sema, module: Module.Index, token: Ast.TokenIndex) Error!builtin_module.CpuRegister {
         if (token == .none) {
             return .none;
         }
@@ -292,7 +292,7 @@ pub const Expression = struct {
         const ast = &module.get(sema).ast;
 
         const register_name = ast.parseIdentifier(token);
-        const register = std.meta.stringToEnum(RegisterType, register_name) orelse {
+        const register = std.meta.stringToEnum(builtin_module.CpuRegister, register_name) orelse {
             try sema.emitError(token, module, .invalid_intermediate_register, .{register_name});
             return error.AnalyzeFailed;
         };

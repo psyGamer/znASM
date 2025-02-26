@@ -213,9 +213,11 @@ fn ensureStatusFlags(b: *Builder, node: Node.Index, target_status: ChangeStatusF
 
     inline for (std.meta.fields(Instruction.StatusRegister)) |field| {
         if (@field(target_status, field.name)) |value| {
-            // Forward to calling convetion
             if (!b.callconv_frozen and @field(b.calling_status, field.name) == null) {
+                // Forward to calling convetion
                 @field(b.calling_status, field.name) = @field(target_status, field.name);
+            } else if (@field(b.current_status, field.name) == value) {
+                // Already target value
             } else if (value) {
                 @field(set, field.name) = true;
             } else {
@@ -236,6 +238,16 @@ fn ensureStatusFlags(b: *Builder, node: Node.Index, target_status: ChangeStatusF
     if (clear != @as(Instruction.StatusRegister, .{})) {
         try b.emit(node, .{ .rep = clear });
     }
+}
+
+fn saveState(b: *Builder) Builder {
+    return b.*;
+}
+fn restoreState(b: *Builder, state: Builder) void {
+    const curr_instructions = b.instructions;
+    b.* = state;
+    b.instructions = curr_instructions;
+    b.instructions.shrinkRetainingCapacity(state.instructions.items.len);
 }
 
 // Assembly IR processing
@@ -318,13 +330,6 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
         else => unreachable,
     };
 
-    // Must be enough space
-    if (target_type.byteSize(b.sema()) < int_reg.byteSize()) {
-        try b.codegen.emitError(air.node, b.symbol, .intermediate_register_too_large, .{@tagName(int_reg)});
-        try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .x8, .y8 });
-        return; // Non-fatal
-    }
-
     var source_bits = try stack_fallback_allocator.alloc(OperationIndex, target_type.bitSize(b.sema()));
     defer stack_fallback_allocator.free(source_bits);
 
@@ -346,14 +351,14 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
             @panic("TODO");
             // return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16, .x8, .x16, .y8, .y16 }, "non-zero assignment");
         },
-        .a8 => @panic("TODO"),
-        .a16 => @panic("TODO"),
 
-        .x8, .y8 => @panic("TODO"),
-        .x16, .y16 => {
+        .a => @panic("TODO"),
+
+        .x, .y => {
+            // Target needs to be accessible
             if (target_access == .long) {
                 try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_write, .{});
-                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
+                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
                 return; // Non-fatal
             }
 
@@ -361,207 +366,623 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
             for (operations) |op_instr| {
                 const op = op_instr.tag.store_operation;
                 if (op.value == .symbol and op.bit_offset % 8 != 0) {
-                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16 }, "non-byte-aligned assignment target with variable");
+                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{.a}, "non-byte-aligned assignment target with variable");
                 }
                 if (op.value == .symbol and op.value.symbol.bit_offset % 8 != 0) {
-                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16 }, "non-byte-aligned assignment source with variable");
+                    return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{.a}, "non-byte-aligned assignment source with variable");
                 }
             }
-            // Last two bytes may not be mixed
-            const last_idx = source_bits[(source_bits.len - 16)];
-            const second_last_idx = source_bits[source_bits.len - 8];
-            if (last_idx != second_last_idx and (operations[last_idx].tag.store_operation.value != .immediate or operations[second_last_idx].tag.store_operation.value != .immediate)) {
-                return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16, .x8, .y8 }, "mixed assignment sources in last two bytes");
-            }
 
-            try b.ensureStatusFlags(air.node, .{ .idx_8bit = false });
+            // Determine fastest instructions for none/mem8/mem16 | idx8/idx16 matix
+            const mem_bit_sizes: [3]Instruction.SizeMode = .{ .none, .@"8bit", .@"16bit" };
+            const idx_bit_sizes: [2]Instruction.SizeMode = .{ .@"8bit", .@"16bit" };
 
-            var write_offset: u16 = 0;
-            while (write_offset <= source_bits.len - 16) {
-                const first_idx = source_bits[write_offset];
-                const second_idx = source_bits[write_offset + 8];
-                const first_op = operations[first_idx].tag.store_operation;
-                const second_op = operations[second_idx].tag.store_operation;
+            const MatrixResult = struct {
+                pub const failure: @This() = .{ .bytes = undefined, .cycles = undefined, .uses_stz = undefined, .state = undefined, .instructions = &.{} };
 
-                if (first_idx == second_idx) {
-                    // Operations are the same -> full 16-bit write
-                    const read_offset = write_offset - first_op.bit_offset;
-                    switch (first_op.value) {
-                        .immediate => |value| {
+                bytes: u16,
+                cycles: u16,
+                uses_stz: bool,
+
+                state: Builder,
+                instructions: []const InstructionInfo,
+            };
+            var matrix_results: [mem_bit_sizes.len * idx_bit_sizes.len]MatrixResult = undefined;
+
+            for (mem_bit_sizes, 0..) |mem_size, mem_i| {
+                for (idx_bit_sizes, 0..) |idx_size, idx_i| {
+                    const result_idx = mem_i + idx_i * mem_bit_sizes.len;
+
+                    // Last two bytes may not be mixed in 16-bit mode, unless a STZ is applicable
+                    if (idx_size == .@"16bit") {
+                        const is_invalid = check: {
+                            const last_idx = source_bits[(source_bits.len - 8)];
+                            const last_op = operations[last_idx].tag.store_operation;
+
+                            if (last_op.value == .immediate) {
+                                const last_read_offset = source_bits.len - 8 - last_op.bit_offset;
+                                const last_byte: u8 = @truncate(last_op.value.immediate.limbs[@divFloor(last_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(last_read_offset % @bitSizeOf(std.math.big.Limb)));
+                                if (last_byte == 0 and mem_size == .@"8bit") {
+                                    break :check false; // Can use STZ
+                                }
+                            }
+
+                            if (source_bits.len < 16) {
+                                break :check true; // Register too big
+                            }
+
+                            const second_last_idx = source_bits[source_bits.len - 16];
+                            const second_last_op = operations[second_last_idx].tag.store_operation;
+
+                            if (last_idx == second_last_idx) {
+                                break :check false; // Not mixed
+                            }
+                            if (last_op.value == .immediate and second_last_op.value == .immediate) {
+                                break :check false; // Can be combined
+                            }
+
+                            break :check true; // Not possible
+                        };
+
+                        if (is_invalid) {
+                            matrix_results[result_idx] = .failure;
+                            continue;
+                        }
+                    }
+
+                    const state = b.saveState();
+                    defer b.restoreState(state);
+
+                    try b.ensureStatusFlags(air.node, .{
+                        .mem_8bit = switch (mem_size) {
+                            .none => null,
+                            .@"8bit" => true,
+                            .@"16bit" => false,
+                        },
+                        .idx_8bit = switch (idx_size) {
+                            .none => null,
+                            .@"8bit" => true,
+                            .@"16bit" => false,
+                        },
+                    });
+
+                    const register_bits: u8 = switch (idx_size) {
+                        .@"8bit" => 8,
+                        .@"16bit" => 16,
+                        else => unreachable,
+                    };
+
+                    var write_offset: u16 = 0;
+                    while (write_offset <= source_bits.len - register_bits) {
+                        if (idx_size == .@"8bit") {
+                            // Always perform full 8-bit write
+                            const op = operations[source_bits[write_offset]].tag.store_operation;
+                            const read_offset = write_offset - op.bit_offset;
+
+                            // Special case: Use 16-bit STZ if available
+                            if (mem_size == .@"16bit" and source_bits.len >= 16 and write_offset <= source_bits.len - 16) {
+                                const second_op = operations[source_bits[write_offset + 8]].tag.store_operation;
+                                const second_read_offset = write_offset + 8 - second_op.bit_offset;
+
+                                if (op.value == .immediate and second_op.value == .immediate) {
+
+                                    // Extract relevant bytes from full value
+                                    const first_byte: u8 = @truncate(op.value.immediate.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+                                    const second_byte: u8 = @truncate(second_op.value.immediate.limbs[@divFloor(second_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(second_read_offset % @bitSizeOf(std.math.big.Limb)));
+
+                                    if (first_byte == 0 and second_byte == 0) {
+                                        try b.emitReloc(air.node, switch (target_access) {
+                                            .direct_page => .{ .stz_dp = undefined },
+                                            .absolute => .{ .stz_addr16 = undefined },
+                                            .long, .stack => unreachable,
+                                        }, .{
+                                            .type = switch (target_access) {
+                                                .direct_page => .rel8_dp,
+                                                .absolute => .addr16,
+                                                .long, .stack => unreachable,
+                                            },
+                                            .target_symbol = air.tag.store_symbol.symbol,
+                                            .target_offset = @divExact(write_offset, 8),
+                                        });
+
+                                        write_offset += 16;
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            switch (op.value) {
+                                .immediate => |value| {
+                                    // Extract relevant byte from full value
+                                    const byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+
+                                    if (byte == 0 and mem_size != .none) {
+                                        // Optimize for zero-values
+                                        try b.emitReloc(air.node, switch (target_access) {
+                                            .direct_page => .{ .stz_dp = undefined },
+                                            .absolute => .{ .stz_addr16 = undefined },
+                                            .long, .stack => unreachable,
+                                        }, .{
+                                            .type = switch (target_access) {
+                                                .direct_page => .rel8_dp,
+                                                .absolute => .addr16,
+                                                .long, .stack => unreachable,
+                                            },
+                                            .target_symbol = air.tag.store_symbol.symbol,
+                                            .target_offset = @divExact(write_offset, 8),
+                                        });
+
+                                        write_offset += 8;
+                                        continue;
+                                    }
+
+                                    try b.emit(air.node, switch (int_reg) {
+                                        .x => .{ .ldx_imm = .{ .imm8 = byte } },
+                                        .y => .{ .ldy_imm = .{ .imm8 = byte } },
+                                        else => unreachable,
+                                    });
+                                },
+                                .symbol => |source| {
+                                    const source_access = b.determineMemoryAccesibilty(source.symbol);
+                                    if (source_access == .long) {
+                                        try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
+                                        try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
+                                        return; // Non-fatal
+                                    }
+
+                                    try b.emitReloc(air.node, switch (source_access) {
+                                        .direct_page => switch (int_reg) {
+                                            .x => .{ .ldx_dp = undefined },
+                                            .y => .{ .ldy_dp = undefined },
+                                            else => unreachable,
+                                        },
+                                        .absolute => switch (int_reg) {
+                                            .x => .{ .ldx_addr16 = undefined },
+                                            .y => .{ .ldy_addr16 = undefined },
+                                            else => unreachable,
+                                        },
+                                        .long, .stack => unreachable,
+                                    }, .{
+                                        .type = switch (source_access) {
+                                            .direct_page => .rel8_dp,
+                                            .absolute => .addr16,
+                                            .long, .stack => unreachable,
+                                        },
+                                        .target_symbol = source.symbol,
+                                        .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                                    });
+                                },
+                            }
+
+                            try b.emitReloc(air.node, switch (target_access) {
+                                .direct_page => switch (int_reg) {
+                                    .x => .{ .stx_dp = undefined },
+                                    .y => .{ .sty_dp = undefined },
+                                    else => unreachable,
+                                },
+                                .absolute => switch (int_reg) {
+                                    .x => .{ .stx_addr16 = undefined },
+                                    .y => .{ .sty_addr16 = undefined },
+                                    else => unreachable,
+                                },
+                                .long, .stack => unreachable,
+                            }, .{
+                                .type = switch (target_access) {
+                                    .direct_page => .rel8_dp,
+                                    .absolute => .addr16,
+                                    .long, .stack => unreachable,
+                                },
+                                .target_symbol = air.tag.store_symbol.symbol,
+                                .target_offset = @divExact(write_offset, 8),
+                            });
+
+                            write_offset += 8;
+                            continue;
+                        }
+
+                        // 16-bit writes
+                        const first_idx = source_bits[write_offset];
+                        const second_idx = source_bits[write_offset + 8];
+                        const first_op = operations[first_idx].tag.store_operation;
+                        const second_op = operations[second_idx].tag.store_operation;
+
+                        if (first_idx == second_idx) {
+                            // Operations are the same -> full 16-bit write
+                            const read_offset = write_offset - first_op.bit_offset;
+                            switch (first_op.value) {
+                                .immediate => |value| {
+                                    // Extract relevant bytes from full value
+                                    const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+                                    const second_byte: u8 = @truncate(value.limbs[@divFloor(read_offset + 8, @bitSizeOf(std.math.big.Limb))] >> @intCast((read_offset + 8) % @bitSizeOf(std.math.big.Limb)));
+                                    const word: u16 = first_byte | @as(u16, second_byte) << 8;
+
+                                    if (word == 0 and mem_size != .none) {
+                                        // Optimize for zero-values
+                                        // Perform 2 writes in 8-bit mode and 1 write in 16-bit mode
+                                        for (0..(1 + @intFromBool(mem_size == .@"8bit"))) |offset| {
+                                            try b.emitReloc(air.node, switch (target_access) {
+                                                .direct_page => .{ .stz_dp = undefined },
+                                                .absolute => .{ .stz_addr16 = undefined },
+                                                .long, .stack => unreachable,
+                                            }, .{
+                                                .type = switch (target_access) {
+                                                    .direct_page => .rel8_dp,
+                                                    .absolute => .addr16,
+                                                    .long, .stack => unreachable,
+                                                },
+                                                .target_symbol = air.tag.store_symbol.symbol,
+                                                .target_offset = @intCast(@divExact(write_offset, 8) + offset),
+                                            });
+                                        }
+
+                                        write_offset += 16;
+                                        continue;
+                                    }
+
+                                    try b.emit(air.node, switch (int_reg) {
+                                        .x => .{ .ldx_imm = .{ .imm16 = word } },
+                                        .y => .{ .ldy_imm = .{ .imm16 = word } },
+                                        else => unreachable,
+                                    });
+                                },
+                                .symbol => |source| {
+                                    const source_access = b.determineMemoryAccesibilty(source.symbol);
+                                    if (source_access == .long) {
+                                        try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
+                                        try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
+                                        return; // Non-fatal
+                                    }
+
+                                    try b.emitReloc(air.node, switch (source_access) {
+                                        .direct_page => switch (int_reg) {
+                                            .x => .{ .ldx_dp = undefined },
+                                            .y => .{ .ldy_dp = undefined },
+                                            else => unreachable,
+                                        },
+                                        .absolute => switch (int_reg) {
+                                            .x => .{ .ldx_addr16 = undefined },
+                                            .y => .{ .ldy_addr16 = undefined },
+                                            else => unreachable,
+                                        },
+                                        .long, .stack => unreachable,
+                                    }, .{
+                                        .type = switch (source_access) {
+                                            .direct_page => .rel8_dp,
+                                            .absolute => .addr16,
+                                            .long, .stack => unreachable,
+                                        },
+                                        .target_symbol = source.symbol,
+                                        .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                                    });
+                                },
+                            }
+
+                            try b.emitReloc(air.node, switch (target_access) {
+                                .direct_page => switch (int_reg) {
+                                    .x => .{ .stx_dp = undefined },
+                                    .y => .{ .sty_dp = undefined },
+                                    else => unreachable,
+                                },
+                                .absolute => switch (int_reg) {
+                                    .x => .{ .stx_addr16 = undefined },
+                                    .y => .{ .sty_addr16 = undefined },
+                                    else => unreachable,
+                                },
+                                .long, .stack => unreachable,
+                            }, .{
+                                .type = switch (target_access) {
+                                    .direct_page => .rel8_dp,
+                                    .absolute => .addr16,
+                                    .long, .stack => unreachable,
+                                },
+                                .target_symbol = air.tag.store_symbol.symbol,
+                                .target_offset = @divExact(write_offset, 8),
+                            });
+                            write_offset += 16;
+                        } else if (first_op.value == .immediate and second_op.value == .immediate) {
+                            // Operations can be combined -> full 16-bit write
+                            const first_read_offset = write_offset - first_op.bit_offset;
+                            const second_read_offset = write_offset + 8 - second_op.bit_offset;
+
                             // Extract relevant bytes from full value
-                            const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
-                            const second_byte: u8 = @truncate(value.limbs[@divFloor(read_offset + 8, @bitSizeOf(std.math.big.Limb))] >> @intCast((read_offset + 8) % @bitSizeOf(std.math.big.Limb)));
+                            const first_byte: u8 = @truncate(first_op.value.immediate.limbs[@divFloor(first_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(first_read_offset % @bitSizeOf(std.math.big.Limb)));
+                            const second_byte: u8 = @truncate(second_op.value.immediate.limbs[@divFloor(second_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(second_read_offset % @bitSizeOf(std.math.big.Limb)));
                             const word: u16 = first_byte | @as(u16, second_byte) << 8;
 
-                            try b.emit(air.node, switch (int_reg) {
-                                .x16 => .{ .ldx_imm = .{ .imm16 = word } },
-                                .y16 => .{ .ldy_imm = .{ .imm16 = word } },
-                                else => unreachable,
-                            });
-                        },
-                        .symbol => |source| {
-                            const source_access = b.determineMemoryAccesibilty(source.symbol);
-                            if (source_access == .long) {
-                                try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
-                                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
-                                return; // Non-fatal
+                            if (word == 0 and mem_size != .none) {
+                                // Optimize for zero-values
+                                // Perform 2 writes in 8-bit mode and 1 write in 16-bit mode
+                                for (0..(1 + @intFromBool(mem_size == .@"8bit"))) |offset| {
+                                    try b.emitReloc(air.node, switch (target_access) {
+                                        .direct_page => .{ .stz_dp = undefined },
+                                        .absolute => .{ .stz_addr16 = undefined },
+                                        .long, .stack => unreachable,
+                                    }, .{
+                                        .type = switch (target_access) {
+                                            .direct_page => .rel8_dp,
+                                            .absolute => .addr16,
+                                            .long, .stack => unreachable,
+                                        },
+                                        .target_symbol = air.tag.store_symbol.symbol,
+                                        .target_offset = @intCast(@divExact(write_offset, 8) + offset),
+                                    });
+                                }
+
+                                write_offset += 16;
+                                continue;
                             }
 
-                            try b.emitReloc(air.node, switch (source_access) {
+                            try b.emit(air.node, switch (int_reg) {
+                                .x => .{ .ldx_imm = .{ .imm16 = word } },
+                                .y => .{ .ldy_imm = .{ .imm16 = word } },
+                                else => unreachable,
+                            });
+
+                            try b.emitReloc(air.node, switch (target_access) {
                                 .direct_page => switch (int_reg) {
-                                    .x16 => .{ .ldx_dp = undefined },
-                                    .y16 => .{ .ldy_dp = undefined },
+                                    .x => .{ .stx_dp = undefined },
+                                    .y => .{ .sty_dp = undefined },
                                     else => unreachable,
                                 },
                                 .absolute => switch (int_reg) {
-                                    .x16 => .{ .ldx_addr16 = undefined },
-                                    .y16 => .{ .ldy_addr16 = undefined },
+                                    .x => .{ .stx_addr16 = undefined },
+                                    .y => .{ .sty_addr16 = undefined },
                                     else => unreachable,
                                 },
                                 .long, .stack => unreachable,
                             }, .{
-                                .type = switch (source_access) {
+                                .type = switch (target_access) {
                                     .direct_page => .rel8_dp,
                                     .absolute => .addr16,
                                     .long, .stack => unreachable,
                                 },
-                                .target_symbol = source.symbol,
-                                .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                                .target_symbol = air.tag.store_symbol.symbol,
+                                .target_offset = @divExact(write_offset, 8),
                             });
-                        },
-                    }
+                            write_offset += 16;
+                        } else {
+                            // Operations cannot be compiled -> half 8-bit write
+                            // 2nd byte is undefined and will be overwritten with next operation
+                            const read_offset = write_offset - first_op.bit_offset;
+                            switch (first_op.value) {
+                                .immediate => |value| {
+                                    // Extract relevant byte from full value
+                                    const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
 
-                    try b.emitReloc(air.node, switch (target_access) {
-                        .direct_page => switch (int_reg) {
-                            .x16 => .{ .stx_dp = undefined },
-                            .y16 => .{ .sty_dp = undefined },
-                            else => unreachable,
-                        },
-                        .absolute => switch (int_reg) {
-                            .x16 => .{ .stx_addr16 = undefined },
-                            .y16 => .{ .sty_addr16 = undefined },
-                            else => unreachable,
-                        },
-                        .long, .stack => unreachable,
-                    }, .{
-                        .type = switch (target_access) {
-                            .direct_page => .rel8_dp,
-                            .absolute => .addr16,
-                            .long, .stack => unreachable,
-                        },
-                        .target_symbol = air.tag.store_symbol.symbol,
-                        .target_offset = @divExact(write_offset, 8),
-                    });
-                    write_offset += 16;
-                } else if (first_op.value == .immediate and second_op.value == .immediate) {
-                    // Operations can be combined -> full 16-bit write
-                    const first_read_offset = write_offset - first_op.bit_offset;
-                    const second_read_offset = write_offset + 8 - second_op.bit_offset;
+                                    if (first_byte == 0 and mem_size != .none) {
+                                        // Optimize for zero-values
+                                        try b.emitReloc(air.node, switch (target_access) {
+                                            .direct_page => .{ .stz_dp = undefined },
+                                            .absolute => .{ .stz_addr16 = undefined },
+                                            .long, .stack => unreachable,
+                                        }, .{
+                                            .type = switch (target_access) {
+                                                .direct_page => .rel8_dp,
+                                                .absolute => .addr16,
+                                                .long, .stack => unreachable,
+                                            },
+                                            .target_symbol = air.tag.store_symbol.symbol,
+                                            .target_offset = @divExact(write_offset, 8),
+                                        });
 
-                    // Extract relevant bytes from full value
-                    const first_byte: u8 = @truncate(first_op.value.immediate.limbs[@divFloor(first_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(first_read_offset % @bitSizeOf(std.math.big.Limb)));
-                    const second_byte: u8 = @truncate(second_op.value.immediate.limbs[@divFloor(second_read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(second_read_offset % @bitSizeOf(std.math.big.Limb)));
-                    const word: u16 = first_byte | @as(u16, second_byte) << 8;
+                                        write_offset += 8;
+                                        continue;
+                                    }
 
-                    try b.emit(air.node, switch (int_reg) {
-                        .x16 => .{ .ldx_imm = .{ .imm16 = word } },
-                        .y16 => .{ .ldy_imm = .{ .imm16 = word } },
-                        else => unreachable,
-                    });
+                                    try b.emit(air.node, switch (int_reg) {
+                                        .x => .{ .ldx_imm = .{ .imm16 = first_byte } },
+                                        .y => .{ .ldy_imm = .{ .imm16 = first_byte } },
+                                        else => unreachable,
+                                    });
+                                },
+                                .symbol => |source| {
+                                    const source_access = b.determineMemoryAccesibilty(source.symbol);
+                                    if (source_access == .long) {
+                                        try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
+                                        try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
+                                        return; // Non-fatal
+                                    }
 
-                    try b.emitReloc(air.node, switch (target_access) {
-                        .direct_page => switch (int_reg) {
-                            .x16 => .{ .stx_dp = undefined },
-                            .y16 => .{ .sty_dp = undefined },
-                            else => unreachable,
-                        },
-                        .absolute => switch (int_reg) {
-                            .x16 => .{ .stx_addr16 = undefined },
-                            .y16 => .{ .sty_addr16 = undefined },
-                            else => unreachable,
-                        },
-                        .long, .stack => unreachable,
-                    }, .{
-                        .type = switch (target_access) {
-                            .direct_page => .rel8_dp,
-                            .absolute => .addr16,
-                            .long, .stack => unreachable,
-                        },
-                        .target_symbol = air.tag.store_symbol.symbol,
-                        .target_offset = @divExact(write_offset, 8),
-                    });
-                    write_offset += 16;
-                } else {
-                    // Operations cannot be compiled -> half 8-bit write
-                    // 2nd byte is undefined and will be overwritten with next operation
-                    const read_offset = write_offset - first_op.bit_offset;
-                    switch (first_op.value) {
-                        .immediate => |value| {
-                            // Extract relevant byte from full value
-                            const first_byte: u8 = @truncate(value.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
-
-                            try b.emit(air.node, switch (int_reg) {
-                                .x16 => .{ .ldx_imm = .{ .imm16 = first_byte } },
-                                .y16 => .{ .ldy_imm = .{ .imm16 = first_byte } },
-                                else => unreachable,
-                            });
-                        },
-                        .symbol => |source| {
-                            const source_access = b.determineMemoryAccesibilty(source.symbol);
-                            if (source_access == .long) {
-                                try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
-                                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a8, .a16 });
-                                return; // Non-fatal
+                                    try b.emitReloc(air.node, switch (source_access) {
+                                        .direct_page => switch (int_reg) {
+                                            .x => .{ .ldx_dp = undefined },
+                                            .y => .{ .ldy_dp = undefined },
+                                            else => unreachable,
+                                        },
+                                        .absolute => switch (int_reg) {
+                                            .x => .{ .ldx_addr16 = undefined },
+                                            .y => .{ .ldy_addr16 = undefined },
+                                            else => unreachable,
+                                        },
+                                        .long, .stack => unreachable,
+                                    }, .{
+                                        .type = switch (source_access) {
+                                            .direct_page => .rel8_dp,
+                                            .absolute => .addr16,
+                                            .long, .stack => unreachable,
+                                        },
+                                        .target_symbol = source.symbol,
+                                        .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                                    });
+                                },
                             }
 
-                            try b.emitReloc(air.node, switch (source_access) {
+                            try b.emitReloc(air.node, switch (target_access) {
                                 .direct_page => switch (int_reg) {
-                                    .x16 => .{ .ldx_dp = undefined },
-                                    .y16 => .{ .ldy_dp = undefined },
+                                    .x => .{ .stx_dp = undefined },
+                                    .y => .{ .sty_dp = undefined },
                                     else => unreachable,
                                 },
                                 .absolute => switch (int_reg) {
-                                    .x16 => .{ .ldx_addr16 = undefined },
-                                    .y16 => .{ .ldy_addr16 = undefined },
+                                    .x => .{ .stx_addr16 = undefined },
+                                    .y => .{ .sty_addr16 = undefined },
                                     else => unreachable,
                                 },
                                 .long, .stack => unreachable,
                             }, .{
-                                .type = switch (source_access) {
+                                .type = switch (target_access) {
                                     .direct_page => .rel8_dp,
                                     .absolute => .addr16,
                                     .long, .stack => unreachable,
                                 },
-                                .target_symbol = source.symbol,
-                                .target_offset = @divExact(source.bit_offset + read_offset, 8),
+                                .target_symbol = air.tag.store_symbol.symbol,
+                                .target_offset = @divExact(write_offset, 8),
                             });
-                        },
+                            write_offset += 8;
+                        }
                     }
 
-                    try b.emitReloc(air.node, switch (target_access) {
-                        .direct_page => switch (int_reg) {
-                            .x16 => .{ .stx_dp = undefined },
-                            .y16 => .{ .sty_dp = undefined },
-                            else => unreachable,
-                        },
-                        .absolute => switch (int_reg) {
-                            .x16 => .{ .stx_addr16 = undefined },
-                            .y16 => .{ .sty_addr16 = undefined },
-                            else => unreachable,
-                        },
-                        .long, .stack => unreachable,
-                    }, .{
-                        .type = switch (target_access) {
-                            .direct_page => .rel8_dp,
-                            .absolute => .addr16,
-                            .long, .stack => unreachable,
-                        },
-                        .target_symbol = air.tag.store_symbol.symbol,
-                        .target_offset = @divExact(write_offset, 8),
-                    });
-                    write_offset += 8;
+                    const emitted_instructions = b.instructions.items[state.instructions.items.len..];
+
+                    var byte_count: u16 = 0;
+                    var cycle_count: u16 = 0;
+                    for (emitted_instructions) |instr| {
+                        const size_mode: Instruction.SizeMode = switch (instr.instr.immediateSizeType()) {
+                            .none => .none,
+                            .mem => mem_size,
+                            .idx => idx_size,
+                        };
+                        byte_count += instr.instr.getByteSize(size_mode);
+                        cycle_count += instr.instr.getCycleCount(mem_size == .@"16bit", idx_size == .@"16bit");
+                    }
+
+                    matrix_results[result_idx] = .{
+                        .bytes = byte_count,
+                        .cycles = cycle_count,
+                        .uses_stz = mem_size != .none,
+
+                        .state = b.*,
+                        .instructions = try b.allocator().dupe(InstructionInfo, emitted_instructions),
+                    };
                 }
             }
+
+            // Determine best result
+            const S = struct {
+                /// Prefer No STZs -> Least Cycles -> Least Bytes
+                fn lessThanDebug(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
+                    // Check invalid
+                    if (lhs.instructions.len == 0) {
+                        return false;
+                    }
+                    if (rhs.instructions.len == 0) {
+                        return true;
+                    }
+
+                    // Check STZ
+                    if (!lhs.uses_stz and rhs.uses_stz) {
+                        return true;
+                    }
+                    if (lhs.uses_stz and !rhs.uses_stz) {
+                        return false;
+                    }
+
+                    // Check cycles
+                    if (lhs.cycles < rhs.cycles) {
+                        return true;
+                    }
+                    if (lhs.cycles > rhs.cycles) {
+                        return false;
+                    }
+
+                    // Check bytes
+                    if (lhs.bytes < rhs.bytes) {
+                        return true;
+                    }
+                    if (lhs.bytes > rhs.bytes) {
+                        return false;
+                    }
+
+                    return true; // Doesn't matter
+                }
+
+                /// Prefer Least Cycles -> Least Bytes -> No STZs
+                fn lessThanReleaseFast(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
+                    // Check invalid
+                    if (lhs.instructions.len == 0) {
+                        return false;
+                    }
+                    if (rhs.instructions.len == 0) {
+                        return true;
+                    }
+
+                    // Check cycles
+                    if (lhs.cycles < rhs.cycles) {
+                        return true;
+                    }
+                    if (lhs.cycles > rhs.cycles) {
+                        return false;
+                    }
+
+                    // Check bytes
+                    if (lhs.bytes < rhs.bytes) {
+                        return true;
+                    }
+                    if (lhs.bytes > rhs.bytes) {
+                        return false;
+                    }
+
+                    // Check STZ
+                    if (!lhs.uses_stz and rhs.uses_stz) {
+                        return true;
+                    }
+                    if (lhs.uses_stz and !rhs.uses_stz) {
+                        return false;
+                    }
+
+                    return true; // Doesn't matter
+                }
+
+                /// Prefer Least Bytes -> Least Cycles -> No STZs
+                fn lessThanReleaseSmall(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
+                    // Check invalid
+                    if (lhs.instructions.len == 0) {
+                        return false;
+                    }
+                    if (rhs.instructions.len == 0) {
+                        return true;
+                    }
+
+                    // Check bytes
+                    if (lhs.bytes < rhs.bytes) {
+                        return true;
+                    }
+                    if (lhs.bytes > rhs.bytes) {
+                        return false;
+                    }
+
+                    // Check cycles
+                    if (lhs.cycles < rhs.cycles) {
+                        return true;
+                    }
+                    if (lhs.cycles > rhs.cycles) {
+                        return false;
+                    }
+
+                    // Check STZ
+                    if (!lhs.uses_stz and rhs.uses_stz) {
+                        return true;
+                    }
+                    if (lhs.uses_stz and !rhs.uses_stz) {
+                        return false;
+                    }
+
+                    return true; // Doesn't matter
+                }
+            };
+
+            const build_config: enum { debug, release_fast, release_small } = .debug; // TODO: Configurable
+            std.mem.sortUnstable(MatrixResult, &matrix_results, {}, switch (build_config) {
+                .debug => S.lessThanDebug,
+                .release_fast => S.lessThanReleaseFast,
+                .release_small => S.lessThanReleaseSmall,
+            });
+
+            // Apply best solution
+            std.debug.assert(matrix_results[0].instructions.len != 0);
+
+            try b.instructions.appendSlice(b.allocator(), matrix_results[0].instructions);
+            b.restoreState(matrix_results[0].state);
         },
     }
 }

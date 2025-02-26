@@ -11,33 +11,37 @@ pub fn init(allocator: std.mem.Allocator) !Module {
 
 const module: Module.Index = .cast(0);
 const module_name = "BuiltIn";
-const access_type_symbol = "AccessType";
-const variable_location_symbol = "VariableLocation";
-const cpu_mode_symbol = "CpuMode";
 
-/// Storage location for local variables
+fn resolveBuiltinType(sema: *Sema, name: []const u8) !TypeExpression.Index {
+    std.debug.assert(std.mem.eql(u8, module.get(sema).name, module_name));
+
+    const symbol = module.get(sema).symbol_map.get(name) orelse unreachable;
+    try sema.analyzeSymbol(symbol, module, .none);
+
+    return try sema.addTypeExpression(.{ .@"enum" = symbol });
+}
+
+/// Available CPU registes for variable storage / intermediate use
 /// This type **must** be kept in sync with the implementation in `builtin.znasm`
-pub const VariableLocation = enum(u8) {
-    /// Scratch-memory in the zero page
-    scratch = 0,
+pub const CpuRegister = enum(u8) {
+    none = 0,
 
-    /// Stack-frame of current function
-    stack = 1,
+    /// A-Accumulator
+    a = 1,
+    /// X-Index
+    x = 2,
+    /// Y-Index
+    y = 3,
 
     var cached_type: TypeExpression.Index = .none;
 
-    /// Resolves the "BuiltIn::VariableLocation" type
+    /// Resolves the "BuiltIn::CpuMode" type
     pub fn resolveType(sema: *Sema) !TypeExpression.Index {
         if (cached_type != .none) {
             return cached_type;
         }
 
-        std.debug.assert(std.mem.eql(u8, module.get(sema).name, module_name));
-
-        const symbol = module.get(sema).symbol_map.get(variable_location_symbol) orelse unreachable;
-        try sema.analyzeSymbol(symbol, module, .none);
-
-        cached_type = try sema.addTypeExpression(.{ .@"enum" = symbol });
+        cached_type = try resolveBuiltinType(sema, "CpuRegister");
         return cached_type;
     }
 };
@@ -59,12 +63,29 @@ pub const CpuMode = enum(u8) {
             return cached_type;
         }
 
-        std.debug.assert(std.mem.eql(u8, module.get(sema).name, module_name));
+        cached_type = try resolveBuiltinType(sema, "CpuMode");
+        return cached_type;
+    }
+};
 
-        const symbol = module.get(sema).symbol_map.get(cpu_mode_symbol) orelse unreachable;
-        try sema.analyzeSymbol(symbol, module, .none);
+/// Storage location for local variables
+/// This type **must** be kept in sync with the implementation in `builtin.znasm`
+pub const VariableLocation = enum(u8) {
+    /// Scratch-memory in the zero page
+    scratch = 0,
 
-        cached_type = try sema.addTypeExpression(.{ .@"enum" = symbol });
+    /// Stack-frame of current function
+    stack = 1,
+
+    var cached_type: TypeExpression.Index = .none;
+
+    /// Resolves the "BuiltIn::VariableLocation" type
+    pub fn resolveType(sema: *Sema) !TypeExpression.Index {
+        if (cached_type != .none) {
+            return cached_type;
+        }
+
+        cached_type = try resolveBuiltinType(sema, "VariableLocation");
         return cached_type;
     }
 };

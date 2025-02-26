@@ -302,52 +302,19 @@ pub const Instruction = union(Opcode) {
     /// No Operation
     nop: void,
 
-    /// Coverts the instruction into the assembly bytes for it
-    pub fn writeData(instr: Instruction, writer: anytype, size_mode: SizeMode) !void {
-        // Opcode
-        try writer.writeByte(@intFromEnum(instr));
-
-        // Operands
-        inline for (@typeInfo(Instruction).@"union".fields) |field| {
-            if (std.mem.eql(u8, field.name, @tagName(instr))) {
-                if (@bitSizeOf(field.type) == 0) {
-                    // No other data associated
-                    return;
-                }
-
-                // Handle 8-bit / 16-bit instructions
-                if (field.type == Imm816) {
-                    std.debug.assert(size_mode != .none);
-
-                    if (size_mode == .@"8bit") {
-                        const value = @field(instr, field.name).imm8;
-                        try writer.writeInt(u8, value, .little);
-                    } else {
-                        const value = @field(instr, field.name).imm16;
-                        try writer.writeInt(u16, value, .little);
-                    }
-                } else if (field.type == u16) {
-                    try writer.writeInt(u16, @intFromEnum(@field(instr, field.name)), .little);
-                } else {
-                    const operand_data: [@bitSizeOf(field.type) / 8]u8 = @bitCast(@field(instr, field.name));
-                    try writer.writeAll(&operand_data);
-                }
-
-                return;
-            }
-        }
-
-        unreachable;
-    }
-
     /// Computes the size of opcode + operands
-    pub inline fn size(instr: Instruction, size_mode: SizeMode) u8 {
-        return @as(Opcode, instr).size(size_mode);
+    pub inline fn getByteSize(instr: Instruction, size_mode: SizeMode) u8 {
+        return @as(Opcode, instr).getByteSize(size_mode);
     }
 
     /// Checks which status flag is used for this immediate instruction
     pub fn immediateSizeType(instr: Instruction) SizeType {
         return @as(Opcode, instr).immediateSizeType();
+    }
+
+    /// Determine the amount of cycles this instruction requires to execute
+    pub fn getCycleCount(instr: Instruction, mem_16bit: bool, idx_16bit: bool) u8 {
+        return @as(Opcode, instr).getCycleCount(mem_16bit, idx_16bit);
     }
 };
 
@@ -517,9 +484,9 @@ pub const Opcode = enum(u8) {
     nop = 0xEA,
 
     /// Computes the size of opcode + operands
-    pub fn size(instr: Opcode, size_mode: Instruction.SizeMode) u8 {
+    pub fn getByteSize(opcode: Opcode, size_mode: Instruction.SizeMode) u8 {
         inline for (@typeInfo(Instruction).@"union".fields) |field| {
-            if (std.mem.eql(u8, field.name, @tagName(instr))) {
+            if (std.mem.eql(u8, field.name, @tagName(opcode))) {
                 const opcode_size = 1; // Always 1 byte
                 const operand_size: u8 = if (field.type == Instruction.Imm816)
                     switch (size_mode) {
@@ -538,8 +505,8 @@ pub const Opcode = enum(u8) {
     }
 
     /// Checks which status flag is used for this immediate instruction
-    pub fn immediateSizeType(instr: Opcode) Instruction.SizeType {
-        return switch (instr) {
+    pub fn immediateSizeType(opcode: Opcode) Instruction.SizeType {
+        return switch (opcode) {
             .and_imm,
             .ora_imm,
             .eor_imm,
@@ -557,6 +524,164 @@ pub const Opcode = enum(u8) {
             => .idx,
 
             else => .none,
+        };
+    }
+
+    /// Determine the amount of cycles this instruction requires to execute
+    pub fn getCycleCount(opcode: Opcode, mem_16bit: bool, idx_16bit: bool) u8 {
+        return switch (opcode) {
+            .bra => 2,
+            .brl => 2,
+            .bcs => 2,
+            .bcc => 2,
+            .bvs => 2,
+            .bvc => 2,
+            .beq => 2,
+            .bne => 2,
+            .bpl => 2,
+            .bmi => 2,
+
+            .jmp => 3,
+            .jml => 4,
+            .jsr => 6,
+            .jsl => 8,
+
+            .rti => 6,
+            .rts => 6,
+            .rtl => 6,
+
+            .lda_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .lda_dp => 3 + @as(u8, @intFromBool(mem_16bit)),
+            .lda_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .lda_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .lda_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .lda_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .ldx_imm => 2 + @as(u8, @intFromBool(idx_16bit)),
+            .ldx_dp => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .ldx_addr16 => 4 + @as(u8, @intFromBool(idx_16bit)),
+
+            .ldy_imm => 2 + @as(u8, @intFromBool(idx_16bit)),
+            .ldy_dp => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .ldy_addr16 => 4 + @as(u8, @intFromBool(idx_16bit)),
+
+            .stz_dp => 3 + @as(u8, @intFromBool(mem_16bit)),
+            .stz_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .stz_dp_idx_x => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .stz_addr16_idx_x => 5 + @as(u8, @intFromBool(mem_16bit)),
+
+            .sta_dp => 3 + @as(u8, @intFromBool(mem_16bit)),
+            .sta_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .sta_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .sta_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .sta_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .stx_dp => 3 + @as(u8, @intFromBool(idx_16bit)),
+            .stx_addr16 => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .stx_dp_idx_y => 4 + @as(u8, @intFromBool(idx_16bit)),
+
+            .sty_dp => 3 + @as(u8, @intFromBool(idx_16bit)),
+            .sty_addr16 => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .sty_dp_idx_x => 4 + @as(u8, @intFromBool(idx_16bit)),
+
+            .cmp_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .cpx_imm => 2 + @as(u8, @intFromBool(idx_16bit)),
+            .cpy_imm => 2 + @as(u8, @intFromBool(idx_16bit)),
+
+            .bit_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .bit_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+
+            .trb_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)) * 2,
+            .trb_dp => 5 + @as(u8, @intFromBool(mem_16bit)) * 2,
+            .tsb_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)) * 2,
+            .tsb_dp => 5 + @as(u8, @intFromBool(mem_16bit)) * 2,
+
+            .and_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .and_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .and_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .and_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .and_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .ora_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .ora_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .ora_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .ora_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .ora_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .eor_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .eor_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .eor_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .eor_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .eor_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .adc_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .adc_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .adc_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .adc_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .adc_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .sbc_imm => 2 + @as(u8, @intFromBool(mem_16bit)),
+            .sbc_addr16 => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .sbc_addr24 => 5 + @as(u8, @intFromBool(mem_16bit)),
+            .sbc_sr => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .sbc_ind_sr_idx_y => 7 + @as(u8, @intFromBool(mem_16bit)),
+
+            .asl_accum => 2,
+            .asl_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)) * 2,
+            .lsr_accum => 2,
+            .lsr_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)),
+            .rol_accum => 2,
+            .rol_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)),
+            .ror_accum => 2,
+            .ror_addr16 => 6 + @as(u8, @intFromBool(mem_16bit)),
+
+            .sec => 2,
+            .sei => 2,
+            .sed => 2,
+
+            .clc => 2,
+            .cli => 2,
+            .cld => 2,
+            .clv => 2,
+
+            .sep => 3,
+            .rep => 3,
+
+            .tax => 2,
+            .tay => 2,
+            .txa => 2,
+            .tya => 2,
+            .txy => 2,
+            .tyx => 2,
+            .tcd => 2,
+            .tcs => 2,
+            .tdc => 2,
+            .tsc => 2,
+            .txs => 2,
+            .tsx => 2,
+
+            .xce => 2,
+
+            .pha => 3 + @as(u8, @intFromBool(mem_16bit)),
+            .phx => 3 + @as(u8, @intFromBool(idx_16bit)),
+            .phy => 3 + @as(u8, @intFromBool(idx_16bit)),
+            .phb => 3,
+            .phd => 4,
+            .phk => 3,
+            .php => 3,
+            .pea => 5,
+            .pei => 6,
+            .per => 6,
+
+            .pla => 4 + @as(u8, @intFromBool(mem_16bit)),
+            .plx => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .ply => 4 + @as(u8, @intFromBool(idx_16bit)),
+            .plb => 4,
+            .pld => 5,
+            .plp => 4,
+
+            .wdm => 2,
+            .nop => 2,
         };
     }
 };

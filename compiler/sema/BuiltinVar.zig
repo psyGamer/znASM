@@ -4,7 +4,6 @@ const builtin_module = @import("../builtin_module.zig");
 
 const NodeIndex = @import("../Ast.zig").NodeIndex;
 const Sema = @import("../Sema.zig");
-const RegisterType = Sema.RegisterType;
 const Expression = Sema.Expression;
 const TypeExpression = Sema.TypeExpression;
 
@@ -22,7 +21,7 @@ tag: Tag,
 name: []const u8,
 
 /// List of allowed intermediate registers
-allowed_registers: []const RegisterType,
+allowed_registers: []const builtin_module.CpuRegister,
 
 // read: ?HandleReadFn,
 write: *const HandleWriteFn,
@@ -57,13 +56,13 @@ var all = std.EnumArray(Tag, BuiltinVar).init(.{
     .cpu_mode = .{
         .tag = .cpu_mode,
         .name = "@cpu_mode",
-        .allowed_registers = &.{.none},
+        .allowed_registers = &.{},
         .write = handleCpuMode,
     },
     .stack_pointer = .{
         .tag = .stack_pointer,
         .name = "@stack_pointer",
-        .allowed_registers = &.{ .a16, .x8, .x16 },
+        .allowed_registers = &.{ .a, .x },
         .write = handleStackPointerWrite,
     },
 });

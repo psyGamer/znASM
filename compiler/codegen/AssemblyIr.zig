@@ -1,10 +1,10 @@
 //! Low-level Assembly Intermediate Representation
 const std = @import("std");
+const builtin_module = @import("../builtin_module.zig");
 
 const Instruction = @import("../instruction.zig").Instruction;
 const Sema = @import("../Sema.zig");
 const Symbol = Sema.Symbol;
-const RegisterType = Sema.RegisterType;
 const Relocation = @import("../CodeGen.zig").Relocation;
 const BranchRelocation = @import("../CodeGen.zig").BranchRelocation;
 const NodeIndex = @import("../Ast.zig").NodeIndex;
@@ -51,18 +51,18 @@ pub const Tag = union(enum) {
     /// Stores the value of the following `store_operation`s into the target symbol
     store_symbol: struct {
         symbol: Symbol.Index,
-        intermediate_register: RegisterType,
+        intermediate_register: builtin_module.CpuRegister,
         operations: u16,
     },
     /// Stores the value of the following `store_operation`s into the target local variable
     // store_local: struct {
-    //     intermediate_register: RegisterType,
+    //     intermediate_register: builtin_module.CpuRegister,
     //     index: u16,
     //     operations: u16,
     // },
     /// Pushes the value of the following `store_operation`s onto the stack
     // store_push: struct {
-    //     intermediate_register: RegisterType,
+    //     intermediate_register: builtin_module.CpuRegister,
     //     operations: u16,
     // },
 
@@ -71,19 +71,19 @@ pub const Tag = union(enum) {
 
     /// Loads the immedate value into the register
     load_value: struct {
-        register: RegisterType,
+        register: builtin_module.CpuRegister,
         value: Instruction.Imm816,
     },
     /// Loads the variable at the offset into the register
     load_variable: struct {
-        register: RegisterType,
+        register: builtin_module.CpuRegister,
         symbol: Symbol.Index,
         offset: u16 = 0,
     },
 
     /// Stores the value of the register into the variable
     store_variable: struct {
-        register: RegisterType,
+        register: builtin_module.CpuRegister,
         symbol: Symbol.Index,
         offset: u16 = 0,
     },

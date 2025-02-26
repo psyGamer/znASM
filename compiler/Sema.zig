@@ -24,32 +24,6 @@ pub const TypeExpression = @import("sema/type_expression.zig").TypeExpression;
 
 const Sema = @This();
 
-/// Available registers on the SNES
-pub const RegisterType = enum {
-    none,
-    a8,
-    a16,
-    x8,
-    x16,
-    y8,
-    y16,
-
-    pub fn byteSize(reg: RegisterType) u16 {
-        return switch (reg) {
-            .none => unreachable,
-            .a8, .x8, .y8 => 1,
-            .a16, .x16, .y16 => 2,
-        };
-    }
-    pub fn bitSize(reg: RegisterType) u16 {
-        return switch (reg) {
-            .none => unreachable,
-            .a8, .x8, .y8 => 8,
-            .a16, .x16, .y16 => 16,
-        };
-    }
-};
-
 const InterruptVectors = struct {
     const Location = struct {
         pub const none: Location = .{

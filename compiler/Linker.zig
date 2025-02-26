@@ -204,7 +204,7 @@ pub fn resolveRelocations(link: *Linker) !void {
 
             switch (reloc.type) {
                 .rel8 => {
-                    const current_addr = memory_map.bankOffsetToAddr(link.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.size(.none);
+                    const current_addr = memory_map.bankOffsetToAddr(link.mapping_mode, func.bank, func.bank_offset) + info.offset + info.instr.getByteSize(.none);
                     const offset = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(current_addr));
                     if (offset < std.math.minInt(i8) or offset > std.math.maxInt(i8)) {
                         try link.errors.append(link.allocator, .{
