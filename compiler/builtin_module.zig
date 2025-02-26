@@ -33,6 +33,15 @@ pub const CpuRegister = enum(u8) {
     /// Y-Index
     y = 3,
 
+    pub fn displayName(reg: CpuRegister) []const u8 {
+        return switch (reg) {
+            .a => "A-Accumulator",
+            .x => "X-Index",
+            .y => "Y-Index",
+            .none => "None",
+        };
+    }
+
     var cached_type: TypeExpression.Index = .none;
 
     /// Resolves the "BuiltIn::CpuMode" type

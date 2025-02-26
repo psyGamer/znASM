@@ -14,6 +14,7 @@ const Instruction = @import("../instruction.zig").Instruction;
 const Opcode = @import("../instruction.zig").Opcode;
 
 const Builder = @This();
+const Error = error{InstructionFailed} || CodeGen.GenerateError;
 
 /// Index to a target instruction
 pub const Label = u16;
@@ -59,17 +60,19 @@ mem_size: Instruction.SizeMode,
 /// Size of the X/Y-Registers
 idx_size: Instruction.SizeMode,
 
-pub fn build(b: *Builder) !void {
+pub fn build(b: *Builder) CodeGen.GenerateError!void {
     // try b.emit(.none, .clc);
     // try b.emit(.none, .xce);
 
     const func = b.getFunction();
+    var has_errors = false;
+
     while (b.air_index < func.assembly_ir.len) : (b.air_index += 1) {
         const air = func.assembly_ir[b.air_index];
-        switch (air.tag) {
-            .instruction => try b.handleInstruction(air),
+        const result = switch (air.tag) {
+            .instruction => b.handleInstruction(air),
             // .change_status_flags => try b.handleChangeStatusFlags(ir),
-            .store_symbol => try b.handleStore(air),
+            .store_symbol => b.handleStore(air),
             .store_operation => {},
             // .load_value => try b.handleLoadValue(ir),
             // .load_variable => try b.handleLoadVariable(ir),
@@ -87,7 +90,7 @@ pub fn build(b: *Builder) !void {
             // .call => try b.handleCall(ir),
             // .branch => try b.handleBranch(ir),
             // .label => try b.handleLabel(ir),
-            .@"return" => try b.emit(air.node, .rts), // TODO: Support long calling convention
+            .@"return" => b.emit(air.node, .rts), // TODO: Support long calling convention
             .set_emulation_mode => |flag| {
                 if (flag) {
                     try b.emit(air.node, .sec);
@@ -97,7 +100,15 @@ pub fn build(b: *Builder) !void {
                 try b.emit(air.node, .xce);
             },
             inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
-        }
+        };
+        result catch |err| switch (err) {
+            error.InstructionFailed => has_errors = true,
+            else => |e| return e,
+        };
+    }
+
+    if (has_errors) {
+        return error.GenerateFailed;
     }
 }
 
@@ -302,7 +313,165 @@ fn handleChangeStatusFlags(b: *Builder, ir: AssemblyIr) !void {
     }
 }
 
-fn handleStore(b: *Builder, air: AssemblyIr) !void {
+const BuildConfiguration = enum { debug, release_safe, release_fast, release_small }; // Temporary location
+
+/// Defines the result of a matrix with multiple combinations
+const CodeMatrixResult = struct {
+    pub const failure: @This() = .{ .bytes = undefined, .cycles = undefined, .uses_stz = undefined, .state = undefined, .instructions = &.{} };
+
+    bytes: u16,
+    cycles: u16,
+    uses_stz: bool,
+
+    state: Builder,
+    instructions: []const InstructionInfo,
+
+    pub fn fromState(b: *Builder, state: Builder, mem_size: Instruction.SizeMode, idx_size: Instruction.SizeMode) !CodeMatrixResult {
+        const emitted_instructions = b.instructions.items[state.instructions.items.len..];
+
+        var byte_count: u16 = 0;
+        var cycle_count: u16 = 0;
+        for (emitted_instructions) |instr| {
+            const size_mode: Instruction.SizeMode = switch (instr.instr.immediateSizeType()) {
+                .none => .none,
+                .mem => mem_size,
+                .idx => idx_size,
+            };
+            byte_count += instr.instr.getByteSize(size_mode);
+            cycle_count += instr.instr.getCycleCount(mem_size == .@"16bit", idx_size == .@"16bit");
+        }
+
+        return .{
+            .bytes = byte_count,
+            .cycles = cycle_count,
+            .uses_stz = mem_size != .none,
+
+            .state = b.*,
+            .instructions = try b.allocator().dupe(InstructionInfo, emitted_instructions),
+        };
+    }
+
+    pub fn sortResults(results: []CodeMatrixResult, build_cfg: BuildConfiguration) void {
+        switch (build_cfg) {
+            .debug => std.mem.sortUnstable(CodeMatrixResult, results, {}, lessThanDebug),
+            .release_safe, .release_fast => std.mem.sortUnstable(CodeMatrixResult, results, {}, lessThanReleaseFast),
+            .release_small => std.mem.sortUnstable(CodeMatrixResult, results, {}, lessThanReleaseSmall),
+        }
+    }
+
+    /// Prefer No STZs -> Least Cycles -> Least Bytes
+    fn lessThanDebug(_: void, lhs: CodeMatrixResult, rhs: CodeMatrixResult) bool {
+        // Check invalid
+        if (lhs.instructions.len == 0) {
+            return false;
+        }
+        if (rhs.instructions.len == 0) {
+            return true;
+        }
+
+        // Check STZ
+        if (!lhs.uses_stz and rhs.uses_stz) {
+            return true;
+        }
+        if (lhs.uses_stz and !rhs.uses_stz) {
+            return false;
+        }
+
+        // Check cycles
+        if (lhs.cycles < rhs.cycles) {
+            return true;
+        }
+        if (lhs.cycles > rhs.cycles) {
+            return false;
+        }
+
+        // Check bytes
+        if (lhs.bytes < rhs.bytes) {
+            return true;
+        }
+        if (lhs.bytes > rhs.bytes) {
+            return false;
+        }
+
+        return true; // Doesn't matter
+    }
+
+    /// Prefer Least Cycles -> Least Bytes -> No STZs
+    fn lessThanReleaseFast(_: void, lhs: CodeMatrixResult, rhs: CodeMatrixResult) bool {
+        // Check invalid
+        if (lhs.instructions.len == 0) {
+            return false;
+        }
+        if (rhs.instructions.len == 0) {
+            return true;
+        }
+
+        // Check cycles
+        if (lhs.cycles < rhs.cycles) {
+            return true;
+        }
+        if (lhs.cycles > rhs.cycles) {
+            return false;
+        }
+
+        // Check bytes
+        if (lhs.bytes < rhs.bytes) {
+            return true;
+        }
+        if (lhs.bytes > rhs.bytes) {
+            return false;
+        }
+
+        // Check STZ
+        if (!lhs.uses_stz and rhs.uses_stz) {
+            return true;
+        }
+        if (lhs.uses_stz and !rhs.uses_stz) {
+            return false;
+        }
+
+        return true; // Doesn't matter
+    }
+
+    /// Prefer Least Bytes -> Least Cycles -> No STZs
+    fn lessThanReleaseSmall(_: void, lhs: CodeMatrixResult, rhs: CodeMatrixResult) bool {
+        // Check invalid
+        if (lhs.instructions.len == 0) {
+            return false;
+        }
+        if (rhs.instructions.len == 0) {
+            return true;
+        }
+
+        // Check bytes
+        if (lhs.bytes < rhs.bytes) {
+            return true;
+        }
+        if (lhs.bytes > rhs.bytes) {
+            return false;
+        }
+
+        // Check cycles
+        if (lhs.cycles < rhs.cycles) {
+            return true;
+        }
+        if (lhs.cycles > rhs.cycles) {
+            return false;
+        }
+
+        // Check STZ
+        if (!lhs.uses_stz and rhs.uses_stz) {
+            return true;
+        }
+        if (lhs.uses_stz and !rhs.uses_stz) {
+            return false;
+        }
+
+        return true; // Doesn't matter
+    }
+};
+
+fn handleStore(b: *Builder, air: AssemblyIr) Error!void {
     const operation_count = switch (air.tag) {
         inline .store_symbol => |info| info.operations,
         else => unreachable,
@@ -330,7 +499,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
         else => unreachable,
     };
 
-    var source_bits = try stack_fallback_allocator.alloc(OperationIndex, target_type.bitSize(b.sema()));
+    var source_bits = try stack_fallback_allocator.alloc(OperationIndex, target_type.byteSize(b.sema()) * 8);
     defer stack_fallback_allocator.free(source_bits);
 
     @memset(source_bits, std.math.maxInt(OperationIndex));
@@ -346,10 +515,89 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
 
     switch (int_reg) {
         .none => {
+            // Target needs to be accessible
+            if (target_access == .long) {
+                try b.codegen.emitError(air.node, b.symbol, .no_reg_long_write, .{});
+                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
+                return error.InstructionFailed;
+            }
 
-            // Only allowed if everything is zero
-            @panic("TODO");
-            // return b.codegen.failUnsupportedIntermediateRegister(air.node, b.symbol, int_reg, &.{ .a8, .a16, .x8, .x16, .y8, .y16 }, "non-zero assignment");
+            const mem_bit_sizes: [2]Instruction.SizeMode = .{ .@"8bit", .@"16bit" };
+            var matrix_results: [mem_bit_sizes.len]CodeMatrixResult = undefined;
+
+            matrix_loop: for (mem_bit_sizes, 0..) |mem_size, mem_i| {
+                const register_bits: u8 = switch (mem_size) {
+                    .@"8bit" => 8,
+                    .@"16bit" => 16,
+                    else => unreachable,
+                };
+                if (source_bits.len < register_bits) {
+                    matrix_results[mem_i] = .failure;
+                    continue;
+                }
+
+                const state = b.saveState();
+                defer b.restoreState(state);
+
+                try b.ensureStatusFlags(air.node, .{
+                    .mem_8bit = switch (mem_size) {
+                        .none => unreachable,
+                        .@"8bit" => true,
+                        .@"16bit" => false,
+                    },
+                });
+
+                var write_offset: u16 = 0;
+                while (write_offset <= source_bits.len - register_bits) : (write_offset += register_bits) {
+                    if (std.mem.allEqual(OperationIndex, source_bits[write_offset..(write_offset + register_bits)], std.math.maxInt(OperationIndex))) {
+                        continue; // Entire byte isn't written
+                    }
+
+                    // Require entire byte to be set to zero
+                    for (source_bits[write_offset..(write_offset + register_bits)], 0..) |op_idx, bit_idx| {
+                        const op = operations[op_idx].tag.store_operation;
+                        if (op.value != .immediate) {
+                            matrix_results[mem_i] = .failure;
+                            continue :matrix_loop;
+                        }
+
+                        const read_offset = write_offset + bit_idx - op.bit_offset;
+                        const bit: u1 = @truncate(op.value.immediate.limbs[@divFloor(read_offset, @bitSizeOf(std.math.big.Limb))] >> @intCast(read_offset % @bitSizeOf(std.math.big.Limb)));
+
+                        if (bit != 0) {
+                            matrix_results[mem_i] = .failure;
+                            continue :matrix_loop;
+                        }
+                    }
+
+                    try b.emitReloc(air.node, switch (target_access) {
+                        .direct_page => .{ .stz_dp = undefined },
+                        .absolute => .{ .stz_addr16 = undefined },
+                        .long, .stack => unreachable,
+                    }, .{
+                        .type = switch (target_access) {
+                            .direct_page => .rel8_dp,
+                            .absolute => .addr16,
+                            .long, .stack => unreachable,
+                        },
+                        .target_symbol = air.tag.store_symbol.symbol,
+                        .target_offset = @divExact(write_offset, 8),
+                    });
+                }
+
+                matrix_results[mem_i] = try .fromState(b, state, mem_size, .none);
+            }
+
+            // Determine best result
+            CodeMatrixResult.sortResults(&matrix_results, .debug);
+            if (matrix_results[0].instructions.len == 0) {
+                try b.codegen.emitError(air.node, b.symbol, .no_reg_non_zero, .{});
+                try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{ .a, .x, .y });
+                return error.InstructionFailed;
+            }
+
+            try b.instructions.appendSlice(b.allocator(), matrix_results[0].instructions);
+            b.restoreState(matrix_results[0].state);
         },
 
         .a => @panic("TODO"),
@@ -359,7 +607,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
             if (target_access == .long) {
                 try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_write, .{});
                 try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
-                return; // Non-fatal
+                return error.InstructionFailed;
             }
 
             // Variables have to be byte-aligned
@@ -377,17 +625,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
             const mem_bit_sizes: [3]Instruction.SizeMode = .{ .none, .@"8bit", .@"16bit" };
             const idx_bit_sizes: [2]Instruction.SizeMode = .{ .@"8bit", .@"16bit" };
 
-            const MatrixResult = struct {
-                pub const failure: @This() = .{ .bytes = undefined, .cycles = undefined, .uses_stz = undefined, .state = undefined, .instructions = &.{} };
-
-                bytes: u16,
-                cycles: u16,
-                uses_stz: bool,
-
-                state: Builder,
-                instructions: []const InstructionInfo,
-            };
-            var matrix_results: [mem_bit_sizes.len * idx_bit_sizes.len]MatrixResult = undefined;
+            var matrix_results: [mem_bit_sizes.len * idx_bit_sizes.len]CodeMatrixResult = undefined;
 
             for (mem_bit_sizes, 0..) |mem_size, mem_i| {
                 for (idx_bit_sizes, 0..) |idx_size, idx_i| {
@@ -440,7 +678,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
                             .@"16bit" => false,
                         },
                         .idx_8bit = switch (idx_size) {
-                            .none => null,
+                            .none => unreachable,
                             .@"8bit" => true,
                             .@"16bit" => false,
                         },
@@ -527,7 +765,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
                                     if (source_access == .long) {
                                         try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
                                         try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
-                                        return; // Non-fatal
+                                        return error.InstructionFailed;
                                     }
 
                                     try b.emitReloc(air.node, switch (source_access) {
@@ -630,7 +868,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
                                     if (source_access == .long) {
                                         try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
                                         try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
-                                        return; // Non-fatal
+                                        return error.InstructionFailed;
                                     }
 
                                     try b.emitReloc(air.node, switch (source_access) {
@@ -780,7 +1018,7 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
                                     if (source_access == .long) {
                                         try b.codegen.emitError(air.node, b.symbol, .idx_reg_long_read, .{});
                                         try b.codegen.emitSupportedIntermediateRegisters(air.node, b.symbol, &.{.a});
-                                        return; // Non-fatal
+                                        return error.InstructionFailed;
                                     }
 
                                     try b.emitReloc(air.node, switch (source_access) {
@@ -832,155 +1070,13 @@ fn handleStore(b: *Builder, air: AssemblyIr) !void {
                         }
                     }
 
-                    const emitted_instructions = b.instructions.items[state.instructions.items.len..];
-
-                    var byte_count: u16 = 0;
-                    var cycle_count: u16 = 0;
-                    for (emitted_instructions) |instr| {
-                        const size_mode: Instruction.SizeMode = switch (instr.instr.immediateSizeType()) {
-                            .none => .none,
-                            .mem => mem_size,
-                            .idx => idx_size,
-                        };
-                        byte_count += instr.instr.getByteSize(size_mode);
-                        cycle_count += instr.instr.getCycleCount(mem_size == .@"16bit", idx_size == .@"16bit");
-                    }
-
-                    matrix_results[result_idx] = .{
-                        .bytes = byte_count,
-                        .cycles = cycle_count,
-                        .uses_stz = mem_size != .none,
-
-                        .state = b.*,
-                        .instructions = try b.allocator().dupe(InstructionInfo, emitted_instructions),
-                    };
+                    matrix_results[result_idx] = try .fromState(b, state, mem_size, idx_size);
                 }
             }
 
             // Determine best result
-            const S = struct {
-                /// Prefer No STZs -> Least Cycles -> Least Bytes
-                fn lessThanDebug(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
-                    // Check invalid
-                    if (lhs.instructions.len == 0) {
-                        return false;
-                    }
-                    if (rhs.instructions.len == 0) {
-                        return true;
-                    }
-
-                    // Check STZ
-                    if (!lhs.uses_stz and rhs.uses_stz) {
-                        return true;
-                    }
-                    if (lhs.uses_stz and !rhs.uses_stz) {
-                        return false;
-                    }
-
-                    // Check cycles
-                    if (lhs.cycles < rhs.cycles) {
-                        return true;
-                    }
-                    if (lhs.cycles > rhs.cycles) {
-                        return false;
-                    }
-
-                    // Check bytes
-                    if (lhs.bytes < rhs.bytes) {
-                        return true;
-                    }
-                    if (lhs.bytes > rhs.bytes) {
-                        return false;
-                    }
-
-                    return true; // Doesn't matter
-                }
-
-                /// Prefer Least Cycles -> Least Bytes -> No STZs
-                fn lessThanReleaseFast(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
-                    // Check invalid
-                    if (lhs.instructions.len == 0) {
-                        return false;
-                    }
-                    if (rhs.instructions.len == 0) {
-                        return true;
-                    }
-
-                    // Check cycles
-                    if (lhs.cycles < rhs.cycles) {
-                        return true;
-                    }
-                    if (lhs.cycles > rhs.cycles) {
-                        return false;
-                    }
-
-                    // Check bytes
-                    if (lhs.bytes < rhs.bytes) {
-                        return true;
-                    }
-                    if (lhs.bytes > rhs.bytes) {
-                        return false;
-                    }
-
-                    // Check STZ
-                    if (!lhs.uses_stz and rhs.uses_stz) {
-                        return true;
-                    }
-                    if (lhs.uses_stz and !rhs.uses_stz) {
-                        return false;
-                    }
-
-                    return true; // Doesn't matter
-                }
-
-                /// Prefer Least Bytes -> Least Cycles -> No STZs
-                fn lessThanReleaseSmall(_: void, lhs: MatrixResult, rhs: MatrixResult) bool {
-                    // Check invalid
-                    if (lhs.instructions.len == 0) {
-                        return false;
-                    }
-                    if (rhs.instructions.len == 0) {
-                        return true;
-                    }
-
-                    // Check bytes
-                    if (lhs.bytes < rhs.bytes) {
-                        return true;
-                    }
-                    if (lhs.bytes > rhs.bytes) {
-                        return false;
-                    }
-
-                    // Check cycles
-                    if (lhs.cycles < rhs.cycles) {
-                        return true;
-                    }
-                    if (lhs.cycles > rhs.cycles) {
-                        return false;
-                    }
-
-                    // Check STZ
-                    if (!lhs.uses_stz and rhs.uses_stz) {
-                        return true;
-                    }
-                    if (lhs.uses_stz and !rhs.uses_stz) {
-                        return false;
-                    }
-
-                    return true; // Doesn't matter
-                }
-            };
-
-            const build_config: enum { debug, release_fast, release_small } = .debug; // TODO: Configurable
-            std.mem.sortUnstable(MatrixResult, &matrix_results, {}, switch (build_config) {
-                .debug => S.lessThanDebug,
-                .release_fast => S.lessThanReleaseFast,
-                .release_small => S.lessThanReleaseSmall,
-            });
-
-            // Apply best solution
+            CodeMatrixResult.sortResults(&matrix_results, .debug);
             std.debug.assert(matrix_results[0].instructions.len != 0);
-
             try b.instructions.appendSlice(b.allocator(), matrix_results[0].instructions);
             b.restoreState(matrix_results[0].state);
         },

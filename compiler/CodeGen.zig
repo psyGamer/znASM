@@ -19,7 +19,7 @@ const FunctionGenerator = @import("codegen/FunctionGenerator.zig");
 const FunctionBuilder = @import("codegen/FunctionBuilder.zig");
 
 const CodeGen = @This();
-pub const GenerateError = error{GenerateFailed} || std.mem.Allocator.Error;
+pub const GenerateError = error{GenerateFailed} || std.mem.Allocator.Error || std.fs.File.WriteError;
 
 /// A relocatoion indicates that this instruction has an operand to another symbol,
 /// which needs to be fixed after emitting the data into ROM
@@ -127,21 +127,26 @@ generated_functions: std.ArrayListUnmanaged(Symbol.Index) = .empty,
 has_errors: bool = false,
 
 pub fn process(codegen: *CodeGen) !void {
+    var has_errors = false;
+
     std.log.info("== AIR GEN ==", .{});
     inline for (std.meta.fields(@TypeOf(codegen.sema.interrupt_vectors))) |field| {
         if (@field(codegen.sema.interrupt_vectors, field.name).unpack()) |vector_loc| {
             try codegen.generateFunction(vector_loc.symbol, true);
         }
     }
-    if (codegen.has_errors) {
+    if (codegen.has_errors or has_errors) {
         return error.GenerateFailed;
     }
 
     std.log.info("== ASM GEN ==", .{});
     for (codegen.generated_functions.items) |symbol| {
-        try codegen.buildFunction(symbol);
+        codegen.buildFunction(symbol) catch |err| switch (err) {
+            error.GenerateFailed => has_errors = true,
+            else => |e| return e,
+        };
     }
-    if (codegen.has_errors) {
+    if (codegen.has_errors or has_errors) {
         return error.GenerateFailed;
     }
 }
@@ -202,10 +207,7 @@ pub fn buildFunction(codegen: *CodeGen, symbol: Symbol.Index) !void {
     errdefer builder.instructions.deinit(codegen.sema.allocator);
     defer builder.labels.deinit(codegen.sema.allocator);
 
-    builder.build() catch |err| switch (err) {
-        error.GenerateFailed => return,
-        else => |e| return e,
-    };
+    try builder.build();
     // try builder.resolveBranchRelocs();
 
     const fn_sym = symbol.getFn(codegen.sema);
@@ -228,7 +230,8 @@ pub fn buildFunction(codegen: *CodeGen, symbol: Symbol.Index) !void {
 // Error Handling
 
 const Error = ErrorSystem(.{
-    // .intermediate_register_too_large = "Intermediate register [!]{s}[] cannot write [!]single byte[] values",
+    .no_reg_long_write = "[!]Assignment without intermediate register[] cannot write memory to other banks, because [!]long memory accesses aren't supported[]",
+    .no_reg_non_zero = "[!]Assignment without intermediate register[] can only write zero to entire bytes. [!]Other values are not supported[]",
     .idx_reg_long_read = "[!]X/Y Index Registers[] cannot read memory from other banks, because [!]long memory accesses aren't supported[]",
     .idx_reg_long_write = "[!]X/Y Index Registers[] cannot write memory to other banks, because [!]long memory accesses aren't supported[]",
 });
@@ -266,12 +269,12 @@ pub fn emitSupportedIntermediateRegisters(codegen: *CodeGen, node: Node.Index, s
     for (allowed_registers, 0..) |register, i| {
         if (i > 0) {
             if (i == allowed_registers.len - 1) {
-                try note_ctx.print(" and [!]{s}", .{@tagName(register)});
+                try note_ctx.print(" and [!]{s}", .{register.displayName()});
             } else {
-                try note_ctx.print(", [!]{s}", .{@tagName(register)});
+                try note_ctx.print(", [!]{s}", .{register.displayName()});
             }
         } else {
-            try note_ctx.print("[!]{s}", .{@tagName(register)});
+            try note_ctx.print("[!]{s}", .{register.displayName()});
         }
     }
     try note_ctx.end();
