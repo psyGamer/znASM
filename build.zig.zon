@@ -1,7 +1,7 @@
 .{
     .name = "znASM",
     .version = "0.1.0",
-    .minimum_zig_version = "0.14.0-dev.1911+3bf89f55c",
+    .minimum_zig_version = "0.14.0-dev.3445+6c3cbb0c8",
     .dependencies = .{
         //
     },

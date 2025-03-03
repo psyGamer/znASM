@@ -44,4 +44,17 @@ fn buildCompiler(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 
     const docs_step = b.step("docs", "Generate znASM compiler documentation");
     docs_step.dependOn(&install_docs.step);
+
+    // Provide "check" step for ZLS
+    const exe_check = b.addExecutable(.{
+        .name = "znasm",
+        .root_source_file = b.path("compiler/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_check.use_llvm = use_llvm;
+    exe_check.use_lld = use_llvm;
+
+    const check = b.step("check", "Check if foo compiles");
+    check.dependOn(&exe_check.step);
 }

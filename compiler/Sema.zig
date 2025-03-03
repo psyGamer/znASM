@@ -97,7 +97,9 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
 
     // Only reset is required
     if (sema.interrupt_vectors.emulation_reset.unpack() == null) {
-        try sema.emitError(.none, undefined, .missing_reset_vector, .{});
+        const err_ctx = try Error.begin(undefined, .none, .err);
+        try err_ctx.print(comptime Error.tagMessage(.missing_reset_vector), .{});
+        try err_ctx.end();
     }
 
     if (sema.has_errors) {
@@ -159,7 +161,7 @@ fn gatherSymbols(sema: *Sema, module_idx: Module.Index) AnalyzeError!void {
         if (module.symbol_map.get(symbol_name)) |existing_symbol_idx| {
             try sema.emitError(token_idx.next(), module_idx, .duplicate_symbol, .{symbol_name});
             try sema.emitNote(ast.nodeToken(existing_symbol_idx.getCommon(sema).node), module_idx, .existing_symbol, .{});
-            return;
+            return error.AnalyzeFailed;
         }
 
         const result = switch (ast.nodeTag(node_idx)) {
