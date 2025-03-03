@@ -605,7 +605,20 @@ fn analyzeEnum(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeE
     enum_sym.fields = try fields.toOwnedSlice(sema.allocator);
 }
 
-// Helper functions
+// Symbol mangement
+
+/// Creates a new symbol and associates it with the given module
+pub fn createSymbol(sema: *Sema, module_idx: Module.Index, name: []const u8, symbol: Symbol) !void {
+    const module = module_idx.get(sema);
+
+    const symbol_idx: Symbol.Index = .cast(sema.symbols.items.len);
+    try sema.symbols.append(sema.allocator, symbol);
+    try module.symbol_map.putNoClobber(module.allocator, name, symbol_idx);
+
+    var common = symbol_idx.getCommon(sema);
+    common.module_index = module_idx;
+    common.module_symbol_index = .cast(module.symbol_map.count() - 1);
+}
 
 /// Resolves a `name` or `module::name` into the associated `Symbol`
 pub fn resolveSymbol(sema: *Sema, token: Ast.TokenIndex, module: Module.Index) AnalyzeError!Symbol.Index {
@@ -638,19 +651,6 @@ pub fn resolveSymbol(sema: *Sema, token: Ast.TokenIndex, module: Module.Index) A
     return error.AnalyzeFailed;
 }
 
-/// Creates a new symbol and associates it with the given module
-pub fn createSymbol(sema: *Sema, module_idx: Module.Index, name: []const u8, symbol: Symbol) !void {
-    const module = module_idx.get(sema);
-
-    const symbol_idx: Symbol.Index = .cast(sema.symbols.items.len);
-    try sema.symbols.append(sema.allocator, symbol);
-    try module.symbol_map.putNoClobber(module.allocator, name, symbol_idx);
-
-    var common = symbol_idx.getCommon(sema);
-    common.module_index = module_idx;
-    common.module_symbol_index = .cast(module.symbol_map.count() - 1);
-}
-
 /// Re-creates the symbol location of the specifed symbol
 pub fn getSymbolLocation(sema: Sema, symbol_idx: Symbol.Index) SymbolLocation {
     const symbol = &sema.symbols.items[@intFromEnum(symbol_idx)];
@@ -677,6 +677,14 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
         .@"struct", .@"packed", .@"enum" => unreachable,
     };
 }
+
+// Expression parsing
+
+// pub fn parseExpression(sema: *Sema, token: Ast.TokenIndex, module: Module.Index) !void {
+
+// }
+
+// Parsing (TODO: Remove!!)
 
 /// Tries parsing an integer and reports an error on failure
 pub fn parseInt(sema: *Sema, comptime T: type, token: Ast.TokenIndex, module: Module.Index) AnalyzeError!T {

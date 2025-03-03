@@ -168,14 +168,14 @@ fn compile(allocator: std.mem.Allocator, options: CompilerOptions) !u8 {
 
         const graph_writer = graph_file.writer();
 
-        try SemanticIr.NodeList.dumpPrologue(graph_writer);
+        try SemanticIr.NodeGraph.dumpPrologue(graph_writer);
         for (sema.symbols.items, 0..) |symbol, index| {
             switch (symbol) {
                 .function => |fn_sym| try fn_sym.semantic_ir.dumpGraph(graph_writer, &sema, .cast(index)),
                 else => {},
             }
         }
-        try SemanticIr.NodeList.dumpEpilogue(graph_writer);
+        try SemanticIr.NodeGraph.dumpEpilogue(graph_writer);
 
         const abs_path = try std.fs.cwd().realpathAlloc(allocator, options.dump_sir_graph);
         defer allocator.free(abs_path);

@@ -21,7 +21,7 @@ sema: *Sema,
 symbol: Symbol.Index,
 module: Module.Index,
 
-graph: SemanticIr.NodeList = .empty,
+graph: SemanticIr.NodeGraph = .empty,
 
 // Helper functions
 

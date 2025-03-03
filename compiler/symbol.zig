@@ -128,9 +128,9 @@ pub const Symbol = union(enum) {
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 },
 
-        /// High-level semantic IR
-        semantic_ir: SemanticIr.NodeList,
-        /// Low-level assembly IR
+        /// High-level semantic IR graph
+        semantic_ir: SemanticIr.NodeGraph,
+        /// Low-level assembly IR instructions
         assembly_ir: []const AssemblyIr,
 
         /// Higher-level instruction data
