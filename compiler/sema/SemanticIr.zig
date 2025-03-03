@@ -2,6 +2,7 @@
 //! Represented as a 'Sea of Nodes' directed acyclic graph
 const std = @import("std");
 const builtin_module = @import("../builtin_module.zig");
+const formatting = @import("../util/formatting.zig");
 
 const runtime_safty = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
@@ -23,10 +24,20 @@ pub const Index = enum(u16) {
     none = std.math.maxInt(u16),
     _,
 
-    pub fn getTag(index: Index, graph: NodeGraph) std.meta.Tag(Data) {
+    /// Helper function to cast a generic number to a `SemanticIr.Index`
+    pub inline fn cast(x: anytype) Index {
+        return switch (@typeInfo(@TypeOf(x))) {
+            .null => .none,
+            .int, .comptime_int => @enumFromInt(@as(u32, @intCast(x))),
+            .optional => if (x) |value| @enumFromInt(@as(u32, @intCast(value))) else .none,
+            else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a SemanticIr.Index"),
+        };
+    }
+
+    pub fn getTag(index: Index, graph: *const Graph) std.meta.Tag(Data) {
         return graph.slice.tags[@intFromEnum(index)];
     }
-    pub fn getData(index: Index, graph: NodeGraph) Data {
+    pub fn getData(index: Index, graph: *const Graph) Data {
         const tag = index.getTag(graph);
         const bare = graph.slice.data[@intFromEnum(index)];
 
@@ -34,18 +45,18 @@ pub const Index = enum(u16) {
             inline else => |t| @unionInit(Data.Packed, @tagName(t), @field(bare, @tagName(t))),
         }, graph.extra);
     }
-    pub fn getParents(index: Index, graph: NodeGraph) Parents {
-        return graph.slice.parents[@intFromEnum(index)];
+    pub fn getParents(index: Index, graph: *const Graph) *Parents {
+        return &graph.slice.parents[@intFromEnum(index)];
     }
-    pub fn getSourceNode(index: Index, graph: NodeGraph) Node.Index {
+    pub fn getSourceNode(index: Index, graph: *const Graph) Node.Index {
         return graph.slice.sources[@intFromEnum(index)];
     }
 
     /// Adds the target node as a dependency to the current node
-    pub fn addDependency(index: Index, allocator: std.mem.Allocator, graph: *NodeGraph, dependency: Index, location: enum { left, right, both }) !void {
+    pub fn addDependency(index: Index, allocator: std.mem.Allocator, graph: *Graph, dependency: Index, location: enum { left, right, both }) !void {
         var parents = &graph.slice.parents[@intFromEnum(index)];
 
-        if (index.getTag(graph.*) == .merge) {
+        if (index.getTag(graph) == .merge) {
             const data = &graph.slice.data[@intFromEnum(index)].merge;
 
             if (parents.left == .none) {
@@ -64,36 +75,36 @@ pub const Index = enum(u16) {
             }
 
             // Try forwarding to nested `merge` if they have space
-            if (parents.left.getTag(graph.*) == .merge and graph.slice.data[@intFromEnum(parents.left)].merge[data.len - 1] == .none) {
+            if (parents.left.getTag(graph) == .merge and graph.slice.data[@intFromEnum(parents.left)].merge[data.len - 1] == .none) {
                 return parents.left.addDependency(allocator, graph, dependency, undefined);
             }
-            if (parents.right.getTag(graph.*) == .merge and graph.slice.data[@intFromEnum(parents.right)].merge[data.len - 1] == .none) {
+            if (parents.right.getTag(graph) == .merge and graph.slice.data[@intFromEnum(parents.right)].merge[data.len - 1] == .none) {
                 return parents.right.addDependency(allocator, graph, dependency, undefined);
             }
             for (data) |*parent| {
-                if (parent.getTag(graph.*) == .merge and graph.slice.data[@intFromEnum(parent.*)].merge[data.len - 1] == .none) {
+                if (parent.getTag(graph) == .merge and graph.slice.data[@intFromEnum(parent.*)].merge[data.len - 1] == .none) {
                     return parent.addDependency(allocator, graph, dependency, undefined);
                 }
             }
 
             // Create new `merge` node if not already
-            if (parents.left.getTag(graph.*) != .merge) {
-                parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+            if (parents.left.getTag(graph) != .merge) {
+                parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph) });
                 return;
             }
-            if (parents.right.getTag(graph.*) != .merge) {
-                parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+            if (parents.right.getTag(graph) != .merge) {
+                parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph) });
                 return;
             }
             for (data) |*parent| {
-                if (parent.getTag(graph.*) != .merge) {
-                    parent.* = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parent.*, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+                if (parent.getTag(graph) != .merge) {
+                    parent.* = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parent.*, dependency, .none } }, .source = index.getSourceNode(graph) });
                     return;
                 }
             }
 
             // Everything is occuped -> forward to next `merge`
-            std.debug.assert(parents.left.getTag(graph.*) == .merge);
+            std.debug.assert(parents.left.getTag(graph) == .merge);
             return parents.left.addDependency(allocator, graph, dependency, undefined);
         }
 
@@ -101,19 +112,19 @@ pub const Index = enum(u16) {
             .left => {
                 if (parents.left == .none) {
                     parents.left = dependency;
-                } else if (parents.left.getTag(graph.*) == .merge) {
+                } else if (parents.left.getTag(graph) == .merge) {
                     return parents.left.addDependency(allocator, graph, dependency, undefined);
                 } else {
-                    parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+                    parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph) });
                 }
             },
             .right => {
                 if (parents.right == .none) {
                     parents.right = dependency;
-                } else if (parents.right.getTag(graph.*) == .merge) {
+                } else if (parents.right.getTag(graph) == .merge) {
                     return parents.right.addDependency(allocator, graph, dependency, undefined);
                 } else {
-                    parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+                    parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph) });
                 }
             },
             .both => {
@@ -121,21 +132,24 @@ pub const Index = enum(u16) {
                     parents.left = dependency;
                 } else if (parents.right == .none) {
                     parents.right = dependency;
-                } else if (parents.left.getTag(graph.*) == .merge) {
+                } else if (parents.left.getTag(graph) == .merge) {
                     return parents.left.addDependency(allocator, graph, dependency, undefined);
-                } else if (parents.right.getTag(graph.*) == .merge) {
+                } else if (parents.right.getTag(graph) == .merge) {
                     return parents.right.addDependency(allocator, graph, dependency, undefined);
-                } else if (parents.left.getTag(graph.*) != .merge) {
-                    parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+                } else if (parents.left.getTag(graph) != .merge) {
+                    parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(graph) });
                 } else {
-                    std.debug.assert(parents.right.getTag(graph.*) != .merge);
-                    parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph.*) });
+                    std.debug.assert(parents.right.getTag(graph) != .merge);
+                    parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(graph) });
                 }
             },
         }
     }
 };
 pub const Data = union(enum) {
+    /// Indicates the start of a Single-Static-Assignment (SSA) block
+    block_start: void,
+
     /// Merges up to 6 dependencies into a single dependency
     merge: [4]Index,
 
@@ -143,9 +157,14 @@ pub const Data = union(enum) {
     /// Cannot have dependencies
     value: std.math.big.int.Const,
 
-    /// Stores the `left` parent's value into the symbol
-    /// Depends on the `block_start` of the current SSA (`right`)
-    store_symbol: Symbol.Index,
+    /// Loads value from the target symbol if used as a depdenncy
+    /// Stores value to the target symbol if `left != .none`
+    /// Depends on the previous assignment to `symbol` with an overlapping range (`right`)
+    symbol: struct {
+        symbol: Symbol.Index,
+        byte_start: u16,
+        byte_end: u16,
+    },
 
     /// Return from the current function
     ///
@@ -154,7 +173,7 @@ pub const Data = union(enum) {
     ///  - Assignments to return variables (TODO)
     @"return": void,
 
-    pub fn unpack(packed_data: Packed, extra: NodeGraph.ExtraList) Data {
+    pub fn unpack(packed_data: Packed, extra: Graph.ExtraList) Data {
         switch (packed_data) {
             .value => |info| {
                 return .{ .value = .{
@@ -162,12 +181,12 @@ pub const Data = union(enum) {
                     .limbs = @alignCast(std.mem.bytesAsSlice(std.math.big.Limb, extra.items[info.limbs_index..(info.limbs_index + info.limbs_len * @sizeOf(std.math.big.Limb))])),
                 } };
             },
-            inline else => |info, tag| {
-                return @unionInit(Data, @tagName(tag), info);
+            inline else => |value, tag| {
+                return @unionInit(Data, @tagName(tag), value);
             },
         }
     }
-    pub fn pack(data: Data, allocator: std.mem.Allocator, extra: *NodeGraph.ExtraList) !Packed {
+    pub fn pack(data: Data, allocator: std.mem.Allocator, extra: *Graph.ExtraList) !Packed {
         switch (data) {
             .value => |info| {
                 // extra.appendUnalignedSlice(allocator, items)
@@ -179,21 +198,22 @@ pub const Data = union(enum) {
                     .limbs_index = index,
                 } };
             },
-            inline else => |info, tag| {
-                return @unionInit(Packed, @tagName(tag), info);
+            inline else => |value, tag| {
+                return @unionInit(Packed, @tagName(tag), value);
             },
         }
     }
 
     /// Packed representation, storing excess data into `graph.extra`
     pub const Packed = union(std.meta.Tag(Data)) {
+        block_start: void,
         merge: [4]Index,
         value: struct {
             positive: bool,
             limbs_len: u16,
             limbs_index: u32,
         },
-        store_symbol: Symbol.Index,
+        symbol: @TypeOf(@as(Data, undefined).symbol),
         @"return": void,
     };
 };
@@ -211,7 +231,7 @@ parents: Parents = .{},
 source: Node.Index,
 
 /// Efficent graph for storing SIR nodes
-pub const NodeGraph = b: {
+pub const Graph = b: {
     const data_info = @typeInfo(Data.Packed).@"union";
 
     const Tag = std.meta.Tag(Data);
@@ -227,8 +247,8 @@ pub const NodeGraph = b: {
     std.debug.assert(@sizeOf(Bare) <= @sizeOf(u64) + if (runtime_safty) 4 else 0);
 
     break :b struct {
-        const Graph = @This();
-        pub const empty: Graph = .{
+        const Self = @This();
+        pub const empty: Self = .{
             .list = .empty,
             .extra = .empty,
         };
@@ -262,13 +282,13 @@ pub const NodeGraph = b: {
         extra: ExtraList,
         slice: ComputedSlice = undefined,
 
-        pub fn deinit(graph: *Graph, allocator: std.mem.Allocator) void {
+        pub fn deinit(graph: *Self, allocator: std.mem.Allocator) void {
             graph.list.deinit(allocator);
             graph.extra.deinit(allocator);
         }
 
         /// Creates a new node in the graph
-        pub fn create(graph: *Graph, allocator: std.mem.Allocator, node: SemanticIr) !Index {
+        pub fn create(graph: *Self, allocator: std.mem.Allocator, node: SemanticIr) !Index {
             const node_index: Index = @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(graph.list.len)));
 
             const tag = std.meta.activeTag(node.data);
@@ -286,7 +306,7 @@ pub const NodeGraph = b: {
             return node_index;
         }
         /// Creates a new node in the graph and ensures `graph.slice` is valid
-        pub fn createRefresh(graph: *Graph, allocator: std.mem.Allocator, node: SemanticIr) !Index {
+        pub fn createRefresh(graph: *Self, allocator: std.mem.Allocator, node: SemanticIr) !Index {
             const will_reallocate = graph.list.capacity == graph.list.len;
             const index = graph.create(allocator, node);
             if (runtime_safty or will_reallocate) {
@@ -359,7 +379,7 @@ pub const NodeGraph = b: {
         /// The provided `queue` should be reused often, to avoid allocations.
         ///
         /// Only one iterator may be active at a time!
-        pub fn traverseIterator(graph: *const Graph, queue: *std.ArrayListUnmanaged(Index), comptime root_tag: Tag, comptime filter_tags: []const Tag) TraverseIterator(root_tag, filter_tags) {
+        pub fn traverseIterator(graph: *const Self, queue: *std.ArrayListUnmanaged(Index), comptime root_tag: Tag, comptime filter_tags: []const Tag) TraverseIterator(root_tag, filter_tags) {
             queue.clearRetainingCapacity();
             for (graph.slice.iter_data) |*data| {
                 data.visited = false;
@@ -374,7 +394,7 @@ pub const NodeGraph = b: {
 
         /// Updates slices to node data.
         /// Creating nodes invalidates any active slices
-        pub fn refresh(graph: *Graph) void {
+        pub fn refresh(graph: *Self) void {
             const slice = graph.list.slice();
             graph.slice = .{
                 .tags = slice.items(.tag),
@@ -399,39 +419,55 @@ pub const NodeGraph = b: {
         }
 
         /// Writes Graphviz DOT file into the writer for debugging purposed
-        pub fn dumpGraph(graph: Graph, writer: std.fs.File.Writer, sema: *const Sema, symbol: Symbol.Index) !void {
+        pub fn dumpGraph(graph: *Self, writer: std.fs.File.Writer, sema: *const Sema, symbol: Symbol.Index) !void {
             const id = @intFromEnum(symbol);
 
             try writer.print(
                 \\    subgraph {{
                 \\        cluster=true
                 \\        label="{}"
-                \\        bgcolor="#AED9E6"
+                \\        bgcolor="#{s}"
                 \\        # Nodes
                 \\
-            , .{sema.getSymbolLocation(symbol)});
+            , .{ sema.getSymbolLocation(symbol), switch (symbol.get(@constCast(sema)).*) {
+                .function => "AED9E6",
+                .constant => "E98B64",
+                else => unreachable,
+            } });
+
+            graph.refresh();
             for (0..graph.list.len) |idx| {
                 const indent = "        ";
+                // const src_template = "\\n{s}:{d}:{d}"; <BR/><FONT COLOR="#191919" POINT-SIZE="11">test3.znasm:48:11: 'src8  = my_const_value:x;'</FONT>
+                const src_template = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}: '{s}'</FONT>";
+                const src_template_small = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}</FONT>";
+
                 const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
+
+                const ast = &symbol.getCommon(@constCast(sema)).module_index.get(@constCast(sema)).ast;
+                const token_loc = ast.tokenLoc(ast.nodeToken(index.getSourceNode(graph)));
+                const src_loc = std.zig.findLineColumn(ast.source, token_loc.start);
+                const src_file = formatting.fmtHtmlEscape(ast.source_path);
+                const src_line = formatting.fmtHtmlEscape(std.mem.trim(u8, src_loc.source_line, " "));
 
                 switch (index.getTag(graph)) {
                     .value => {
                         const int_value = index.getData(graph).value;
-                        try writer.print(indent ++ "N{d}_{d} [label={},fillcolor=darkorange]\n", .{ idx, id, int_value });
+                        try writer.print(indent ++ "N{d}_{d} [label=<{}>,fillcolor=darkorange]\n", .{ idx, id, int_value });
                     },
-                    .store_symbol => {
-                        const target_symbol = index.getData(graph).store_symbol;
-                        const target_type = switch (target_symbol.get(@constCast(sema)).*) {
+                    .symbol => {
+                        const target = index.getData(graph).symbol;
+                        const target_type = switch (target.symbol.get(@constCast(sema)).*) {
                             .constant => |const_sym| const_sym.type,
                             .variable => |var_sym| var_sym.type,
                             .register => |reg_sym| reg_sym.type,
                             else => unreachable,
                         };
-                        try writer.print(indent ++ "N{d}_{d} [label=\"Store '{}' ({})\",shape=box,fillcolor=firebrick1]\n", .{ idx, id, sema.getSymbolLocation(target_symbol), target_type.fmt(sema) });
+                        try writer.print(indent ++ "N{d}_{d} [label=<{}[{d}..{d}] ({})" ++ src_template ++ ">,shape=box,fillcolor=firebrick1]\n", .{ idx, id, sema.getSymbolLocation(target.symbol), target.byte_start, target.byte_end, target_type.fmt(sema), src_file, src_loc.line + 1, src_loc.column + 1, src_line });
                     },
-                    .@"return" => try writer.print(indent ++ "N{d}_{d} [label=return,shape=diamond,fillcolor=darkorchid2]\n", .{ idx, id }),
+                    .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<return" ++ src_template_small ++ ">,shape=diamond,fillcolor=darkorchid2]\n", .{ idx, id, src_file, src_loc.line + 1, src_loc.column + 1 }),
                     .merge => {}, // ignore
-                    // else => try writer.print(indent ++ "N{d}_{d} [label={s}]\n", .{ idx, id, @tagName(index.getTag(graph)) }),
+                    else => try writer.print(indent ++ "N{d}_{d} [label=<{s}" ++ src_template ++ ">,fillcolor=lightgray]\n", .{ idx, id, @tagName(index.getTag(graph)), src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
                 }
             }
 
@@ -448,9 +484,11 @@ pub const NodeGraph = b: {
             try writer.writeAll("    }\n");
         }
 
-        fn writeGraphEdges(graph: Graph, writer: std.fs.File.Writer, id: u32, source: Index, target: Index) !void {
+        fn writeGraphEdges(graph: *const Self, writer: std.fs.File.Writer, id: u32, source: Index, target: Index) !void {
             const indent = "        ";
             const style_dependency = "[color=blue]\n";
+            _ = style_dependency; // autofix
+            const style_return = "[color=darkorchid2]\n";
 
             const parents = source.getParents(graph);
 
@@ -472,7 +510,7 @@ pub const NodeGraph = b: {
             } else {
                 if (target != .none) {
                     switch (target.getTag(graph)) {
-                        .@"return" => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} " ++ style_dependency, .{ @intFromEnum(source), id, @intFromEnum(target), id }),
+                        .@"return" => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} " ++ style_return, .{ @intFromEnum(source), id, @intFromEnum(target), id }),
                         else => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=red]\n", .{ @intFromEnum(source), id, @intFromEnum(target), id }),
                     }
                 }

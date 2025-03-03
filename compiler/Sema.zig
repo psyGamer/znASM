@@ -21,6 +21,7 @@ pub const Symbol = @import("symbol.zig").Symbol;
 pub const SymbolLocation = @import("symbol.zig").SymbolLocation;
 pub const Expression = @import("sema/expression.zig").Expression;
 pub const TypeExpression = @import("sema/type_expression.zig").TypeExpression;
+pub const Sir = @import("sema/SemanticIr.zig");
 
 const Sema = @This();
 
@@ -278,8 +279,9 @@ fn gatherConstantSymbol(sema: *Sema, symbol_name: []const u8, node: NodeIndex, m
             .bank = real_bank,
 
             // To be determined during analyzation
-            .type = undefined,
-            .value = undefined,
+            .type = .none,
+            .value = .none,
+            .sir_graph = .empty,
         },
     });
 }
@@ -417,9 +419,10 @@ pub fn analyzeSymbol(sema: *Sema, symbol_idx: Symbol.Index, module_idx: Module.I
         .constant => sema.analyzeConstant(symbol_idx, module_idx),
         .variable => sema.analyzeVariable(symbol_idx, module_idx),
         .register => sema.analyzeRegister(symbol_idx, module_idx),
-        .@"struct" => sema.analyzeStruct(symbol_idx, module_idx),
-        .@"packed" => sema.analyzePacked(symbol_idx, module_idx),
-        .@"enum" => sema.analyzeEnum(symbol_idx, module_idx),
+        // .@"struct" => sema.analyzeStruct(symbol_idx, module_idx),
+        // .@"packed" => sema.analyzePacked(symbol_idx, module_idx),
+        // .@"enum" => sema.analyzeEnum(symbol_idx, module_idx),
+        inline else => |_, t| std.log.err("TODO: {s}", .{@tagName(t)}),
     };
 }
 
@@ -443,7 +446,7 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     analyzer.graph.refresh();
     var iter = analyzer.graph.traverseIterator(&queue, .@"return", &.{});
     while (try iter.next(sema.allocator)) |index| {
-        std.log.debug(" - {}", .{index.getData(analyzer.graph)});
+        std.log.debug(" - {}", .{index.getData(&analyzer.graph)});
     }
 
     const fn_sym = symbol.getFn(sema);
@@ -457,12 +460,15 @@ fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     const const_def = ast.nodeData(symbol.getCommon(sema).node).const_def;
     const data = ast.readExtraData(Ast.Node.ConstDefData, const_def.extra);
 
-    const type_expr: TypeExpression.Index = try .resolve(sema, data.type, module, symbol);
-    const value_expr: Expression.Index = try .resolve(sema, type_expr, const_def.value, module);
+    var graph = symbol.getConst(sema).sir_graph;
+    const ty: TypeExpression.Index = try .resolve(sema, data.type, module, symbol);
+    // TODO: Support implicit typing
+    const value, _ = try sema.parseExpression(&graph, const_def.value, module, .{ .target_type = ty });
 
     const const_sym = symbol.getConst(sema);
-    const_sym.type = type_expr;
-    const_sym.value = value_expr;
+    const_sym.type = ty;
+    const_sym.value = value;
+    const_sym.sir_graph = graph;
 }
 fn analyzeVariable(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
@@ -680,9 +686,105 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
 
 // Expression parsing
 
-// pub fn parseExpression(sema: *Sema, token: Ast.TokenIndex, module: Module.Index) !void {
+const ParseExpressionOptions = struct {
+    /// Result type of the expression
+    /// Can be `.none` if the type can be inferred from the expression itself
+    target_type: TypeExpression.Index,
+    // TODO: Local variables
+};
+pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module: Module.Index, options: ParseExpressionOptions) AnalyzeError!struct { Sir.Index, TypeExpression } {
+    const ast = &module.get(sema).ast;
+    switch (ast.nodeTag(node)) {
+        .expr_int_value => {
+            const value_literal = ast.nodeToken(node);
+            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.allocator) catch {
+                try sema.emitError(value_literal, module, .invalid_number, .{ast.tokenSource(value_literal)});
+                return error.AnalyzeFailed;
+            };
 
-// }
+            if (options.target_type != .none) {
+                if (!options.target_type.get(sema).isAssignableFrom(&.comptime_integer)) {
+                    try sema.emitError(value_literal, module, .expected_type, .{ options.target_type.fmt(sema), "comptime_int" });
+                    return error.AnalyzeFailed;
+                }
+
+                // Validate size
+                switch (options.target_type.get(sema).*) {
+                    .comptime_integer => {},
+                    .integer => |info| switch (info.signedness) {
+                        .signed => if (!value.fitsInTwosComp(.signed, info.bits)) {
+                            try sema.emitError(value_literal, module, .value_too_large, .{ value, "a", "signed", info.bits });
+                            return error.AnalyzeFailed;
+                        },
+                        .unsigned => if (!value.fitsInTwosComp(.unsigned, info.bits)) {
+                            try sema.emitError(value_literal, module, .value_too_large, .{ value, "an", "unsigned", info.bits });
+                            return error.AnalyzeFailed;
+                        },
+                    },
+                    else => unreachable,
+                }
+            }
+
+            return .{ try graph.create(sema.allocator, .{ .data = .{ .value = value }, .source = node }), .comptime_integer };
+        },
+        .expr_ident => {
+            const symbol_ident = ast.nodeToken(node);
+            const symbol = try sema.resolveSymbol(symbol_ident, module);
+
+            const source_type = switch (symbol.get(sema).*) {
+                .constant => |const_sym| const_sym.type,
+                .variable => |var_sym| var_sym.type,
+                .register => |reg_sym| reg_sym.type,
+                else => {
+                    try sema.emitError(symbol_ident, module, .expected_const_var_reg_symbol, .{@tagName(symbol.get(sema).*)});
+                    return error.AnalyzeFailed;
+                },
+            };
+
+            // Validate type
+            if (options.target_type != .none and !options.target_type.get(sema).isAssignableFrom(source_type.get(sema))) {
+                try sema.emitError(symbol_ident, module, .expected_type, .{ options.target_type.fmt(sema), source_type.fmt(sema) });
+                return error.AnalyzeFailed;
+            }
+
+            // TODO: Field access support
+            const read_start = 0;
+            const read_end = source_type.byteSize(sema);
+
+            const store_node = try graph.create(sema.allocator, .{ .data = .{ .symbol = .{
+                .symbol = symbol,
+                .byte_start = 0,
+                .byte_end = source_type.byteSize(sema),
+            } }, .source = node });
+
+            // Find last `store_symbol`
+            graph.refresh();
+            var i: usize = graph.list.len - 1;
+            while (i > 0 and graph.slice.tags[i] != .block_start) : (i -= 1) {
+                const index: Sir.Index = .cast(i);
+
+                // Identify assignment
+                if (index.getTag(graph) != .symbol or index.getParents(graph).left == .none) {
+                    continue;
+                }
+
+                const data = index.getData(graph).symbol;
+                if (data.symbol == symbol and
+                    (data.byte_start >= read_start and data.byte_start < read_end or
+                        data.byte_end > read_start and data.byte_end <= read_end or
+                        data.byte_start <= read_start and data.byte_end >= read_end))
+                {
+                    store_node.getParents(graph).left = index;
+                }
+            }
+
+            return .{ store_node, .comptime_integer };
+        },
+        else => std.log.err("TODO: {s}", .{@tagName(ast.nodeTag(node))}),
+    }
+
+    return .{ .none, undefined };
+}
 
 // Parsing (TODO: Remove!!)
 

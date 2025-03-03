@@ -163,19 +163,29 @@ fn compile(allocator: std.mem.Allocator, options: CompilerOptions) !u8 {
     defer sema.deinit();
 
     if (options.dump_sir_graph.len != 0) {
-        const graph_file = try std.fs.cwd().createFile(options.dump_sir_graph, .{});
+        // Delete and re-create file to avoid "File changed" pop-up stacking up in KGraphViewer even tho the setting to ask is disabled... -_-
+        const cwd = std.fs.cwd();
+        const graph_file = cwd.createFile(options.dump_sir_graph, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => b: {
+                try cwd.deleteFile(options.dump_sir_graph);
+                break :b try cwd.createFile(options.dump_sir_graph, .{ .exclusive = true });
+            },
+            else => |e| return e,
+        };
         defer graph_file.close();
 
         const graph_writer = graph_file.writer();
 
-        try SemanticIr.NodeGraph.dumpPrologue(graph_writer);
+        try SemanticIr.Graph.dumpPrologue(graph_writer);
         for (sema.symbols.items, 0..) |symbol, index| {
-            switch (symbol) {
-                .function => |fn_sym| try fn_sym.semantic_ir.dumpGraph(graph_writer, &sema, .cast(index)),
-                else => {},
-            }
+            var graph = switch (symbol) {
+                .function => |fn_sym| fn_sym.semantic_ir,
+                .constant => |const_sym| const_sym.sir_graph,
+                else => continue,
+            };
+            try graph.dumpGraph(graph_writer, &sema, .cast(index));
         }
-        try SemanticIr.NodeGraph.dumpEpilogue(graph_writer);
+        try SemanticIr.Graph.dumpEpilogue(graph_writer);
 
         const abs_path = try std.fs.cwd().realpathAlloc(allocator, options.dump_sir_graph);
         defer allocator.free(abs_path);

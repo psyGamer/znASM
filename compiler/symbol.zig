@@ -128,9 +128,9 @@ pub const Symbol = union(enum) {
         /// Named indices to target instructions
         labels: []const struct { []const u8, u16 },
 
-        /// High-level semantic IR graph
-        semantic_ir: SemanticIr.NodeGraph,
-        /// Low-level assembly IR instructions
+        /// High-level Semantic IR graph
+        semantic_ir: SemanticIr.Graph,
+        /// Low-level Assembly IR instructions
         assembly_ir: []const AssemblyIr,
 
         /// Higher-level instruction data
@@ -149,8 +149,11 @@ pub const Symbol = union(enum) {
 
         /// Type of this constant
         type: TypeExpression.Index,
-        /// Value of this constant
-        value: Expression.Index,
+        /// Root SIR node for the value
+        value: SemanticIr.Index,
+
+        /// High-level Semantic IR graph
+        sir_graph: SemanticIr.Graph,
     };
     pub const Variable = struct {
         /// Commonly shared data between symbols
@@ -265,15 +268,16 @@ pub const Symbol = union(enum) {
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },
-            .@"struct" => |struct_sym| {
-                allocator.free(struct_sym.fields);
-            },
-            .@"packed" => |packed_sym| {
-                allocator.free(packed_sym.fields);
-            },
-            .@"enum" => |enum_sym| {
-                allocator.free(enum_sym.fields);
-            },
+            // TODO:
+            // .@"struct" => |struct_sym| {
+            //     allocator.free(struct_sym.fields);
+            // },
+            // .@"packed" => |packed_sym| {
+            //     allocator.free(packed_sym.fields);
+            // },
+            // .@"enum" => |enum_sym| {
+            //     allocator.free(enum_sym.fields);
+            // },
             else => {},
         }
     }

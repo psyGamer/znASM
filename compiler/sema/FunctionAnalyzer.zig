@@ -21,7 +21,7 @@ sema: *Sema,
 symbol: Symbol.Index,
 module: Module.Index,
 
-graph: SemanticIr.NodeGraph = .empty,
+graph: SemanticIr.Graph = .empty,
 
 // Helper functions
 
@@ -56,10 +56,38 @@ pub fn process(ana: *Analyzer) Error!void {
     // TODO: Handle return values
     const ret_node = try ana.create(.{ .data = .@"return", .source = node });
 
+    // Depend on latest assignment for each symbol
+    var returned_symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, []bool) = .empty;
+    defer {
+        for (returned_symbols.values()) |value| {
+            ana.sema.allocator.free(value);
+        }
+        returned_symbols.deinit(ana.sema.allocator);
+    }
+
     ana.graph.refresh();
     for (ana.graph.slice.tags, 0..) |tag, idx| {
-        if (tag == .store_symbol) {
-            try ret_node.addDependency(ana.sema.allocator, &ana.graph, @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(idx))), .both);
+        const index: SemanticIr.Index = .cast(idx);
+
+        // Identify symbol assignments
+        if (tag == .symbol and index.getParents(&ana.graph).left != .none) {
+            const data = index.getData(&ana.graph).symbol;
+            const gop = try returned_symbols.getOrPut(ana.sema.allocator, data.symbol);
+            if (!gop.found_existing) {
+                const ty = switch (data.symbol.get(ana.sema).*) {
+                    .constant => |const_sym| const_sym.type,
+                    .variable => |var_sym| var_sym.type,
+                    .register => |reg_sym| reg_sym.type,
+                    else => unreachable,
+                };
+                gop.value_ptr.* = try ana.sema.allocator.alloc(bool, ty.byteSize(ana.sema));
+            }
+
+            const range = gop.value_ptr.*[data.byte_start..data.byte_end];
+            if (!std.mem.allEqual(bool, range, true)) {
+                @memset(range, true);
+                try ret_node.addDependency(ana.sema.allocator, &ana.graph, @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(idx))), .both);
+            }
         }
     }
 }
@@ -306,7 +334,8 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     // Built-in variable
     if (ast.tokenTag(root_ident) == .builtin_ident) {
         if (try BuiltinVar.getByName(root_name, ana.sema)) |builtin| {
-            try builtin.write(ana, assign.value, try .resolve(ana.sema, try builtin.getType(ana.sema), assign.value, ana.module));
+            // try builtin.write(ana, assign.value, try .resolve(ana.sema, try builtin.getType(ana.sema), assign.value, ana.module));
+            std.log.err("TODO: {}", .{builtin});
             return;
         }
 
@@ -347,14 +376,17 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
             return error.AnalyzeFailed;
         },
     };
-    _ = root_type; // autofix
 
-    var int: std.math.big.int.Managed = try .init(ana.sema.allocator);
-    errdefer int.deinit();
-    int.setString(10, "12345") catch unreachable;
+    // TODO: Support field access
+    const write_start: u16 = 0;
+    const write_end: u16 = root_type.byteSize(ana.sema);
 
-    const val_node = try ana.create(.{ .data = .{ .value = int.toConst() }, .source = node });
-    _ = try ana.create(.{ .data = .{ .store_symbol = symbol }, .parents = .{ .left = val_node, .right = .none }, .source = node });
+    const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{ .target_type = root_type });
+    _ = try ana.create(.{ .data = .{ .symbol = .{
+        .symbol = symbol,
+        .byte_start = write_start,
+        .byte_end = write_end,
+    } }, .parents = .{ .left = expr_node, .right = .none }, .source = node });
 
     // const assign_idx = ana.graph.items.len;
     // try ana.emit(.{ .assign_global = undefined }, node);
