@@ -34,6 +34,9 @@ pub const Index = enum(u16) {
             inline else => |t| @unionInit(Data.Packed, @tagName(t), @field(bare, @tagName(t))),
         }, list.extra);
     }
+    pub fn getParents(index: Index, list: NodeList) Parents {
+        return list.slice.parents[@intFromEnum(index)];
+    }
     pub fn getSourceNode(index: Index, list: NodeList) Node.Index {
         return list.slice.sources[@intFromEnum(index)];
     }
@@ -235,7 +238,6 @@ pub const NodeList = b: {
             visited: bool = false,
             _: u7 = 0,
         };
-
         const Graph = std.MultiArrayList(struct {
             tag: Tag,
             data: Bare,
@@ -245,10 +247,7 @@ pub const NodeList = b: {
 
             source: Node.Index,
         });
-
         pub const ExtraList = std.ArrayListAlignedUnmanaged(u8, @alignOf(usize));
-
-        pub const Slice = Graph.Slice;
         const ComputedSlice = struct {
             tags: []Tag,
             data: []Bare,
@@ -386,9 +385,105 @@ pub const NodeList = b: {
             };
         }
 
-        /// The caller owns the returned memory. Empties this NodeList.
-        pub fn toOwnedSlice(list: *List) Slice {
-            return list.graph.toOwnedSlice();
+        pub fn dumpPrologue(writer: std.fs.File.Writer) !void {
+            try writer.writeAll(
+                \\strict digraph {
+                \\    fontname="JetBrainsMono,Arial,sans-serif"
+                \\    node [fontname="JetBrainsMono,Arial,sans-serif"]
+                \\    edge [fontname="JetBrainsMono,Arial,sans-serif"]
+                \\
+            );
+        }
+        pub fn dumpEpilogue(writer: std.fs.File.Writer) !void {
+            try writer.writeAll("}\n");
+        }
+
+        /// Writes Graphviz DOT file into the writer for debugging purposed
+        pub fn dumpGraph(list: List, writer: std.fs.File.Writer, sema: *const Sema, symbol: Symbol.Index) !void {
+            const id = @intFromEnum(symbol);
+
+            try writer.print(
+                \\    subgraph {{
+                \\        cluster=true
+                \\        label="{}"
+                \\        bgcolor="#AED9E6"
+                \\        # Nodes
+                \\
+            , .{sema.getSymbolLocation(symbol)});
+            for (0..list.graph.len) |idx| {
+                const indent = "        ";
+                const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
+
+                switch (index.getTag(list)) {
+                    .value => {
+                        const int_value = index.getData(list).value;
+                        try writer.print(indent ++ "N{d}_{d} [label={},fillcolor=darkorange]\n", .{ idx, id, int_value });
+                    },
+                    .store_symbol => {
+                        const target_symbol = index.getData(list).store_symbol;
+                        const target_type = switch (target_symbol.get(@constCast(sema)).*) {
+                            .constant => |const_sym| const_sym.type,
+                            .variable => |var_sym| var_sym.type,
+                            .register => |reg_sym| reg_sym.type,
+                            else => unreachable,
+                        };
+                        try writer.print(indent ++ "N{d}_{d} [label=\"Store '{}' ({})\",shape=box,fillcolor=firebrick1]\n", .{ idx, id, sema.getSymbolLocation(target_symbol), target_type.fmt(sema) });
+                    },
+                    .@"return" => try writer.print(indent ++ "N{d}_{d} [label=return,shape=diamond,fillcolor=darkorchid2]\n", .{ idx, id }),
+                    .merge => {}, // ignore
+                    // else => try writer.print(indent ++ "N{d}_{d} [label={s}]\n", .{ idx, id, @tagName(index.getTag(list)) }),
+                }
+            }
+
+            try writer.writeAll("        # Edges\n");
+            for (0..list.graph.len) |idx| {
+                const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
+                if (index.getTag(list) == .merge) {
+                    continue;
+                }
+
+                try list.writeGraphEdges(writer, id, index, .none);
+            }
+
+            try writer.writeAll("    }\n");
+        }
+
+        fn writeGraphEdges(list: List, writer: std.fs.File.Writer, id: u32, source: Index, target: Index) !void {
+            const indent = "        ";
+            const style_dependency = "[color=blue]\n";
+
+            const parents = source.getParents(list);
+
+            // Remove `merge` nodes from graph output
+            if (source.getTag(list) == .merge) {
+                if (parents.left != .none) {
+                    try list.writeGraphEdges(writer, id, parents.left, target);
+                }
+                if (parents.right != .none) {
+                    try list.writeGraphEdges(writer, id, parents.right, target);
+                }
+
+                const data = list.slice.data[@intFromEnum(source)].merge;
+                for (data) |parent| {
+                    if (parent != .none) {
+                        try list.writeGraphEdges(writer, id, parent, target);
+                    }
+                }
+            } else {
+                if (target != .none) {
+                    switch (target.getTag(list)) {
+                        .@"return" => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} " ++ style_dependency, .{ @intFromEnum(source), id, @intFromEnum(target), id }),
+                        else => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=red]\n", .{ @intFromEnum(source), id, @intFromEnum(target), id }),
+                    }
+                }
+
+                if (parents.left != .none) {
+                    try list.writeGraphEdges(writer, id, parents.left, source);
+                }
+                if (parents.right != .none) {
+                    try list.writeGraphEdges(writer, id, parents.right, source);
+                }
+            }
         }
     };
 };

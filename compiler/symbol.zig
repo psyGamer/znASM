@@ -129,7 +129,7 @@ pub const Symbol = union(enum) {
         labels: []const struct { []const u8, u16 },
 
         /// High-level semantic IR
-        semantic_ir: SemanticIr.NodeList.Slice,
+        semantic_ir: SemanticIr.NodeList,
         /// Low-level assembly IR
         assembly_ir: []const AssemblyIr,
 

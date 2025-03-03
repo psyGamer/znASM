@@ -8,6 +8,7 @@ const Tokenizer = @import("Tokenizer.zig");
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
+const SemanticIr = @import("sema/SemanticIr.zig");
 const CodeGen = @import("CodeGen.zig");
 const Linker = @import("Linker.zig");
 const Rom = @import("Rom.zig");
@@ -22,6 +23,14 @@ pub const std_options: std.Options = .{
     .logFn = log.logFn,
     .log_level = .debug,
     .fmt_max_depth = 4,
+};
+
+const CompilerOptions = struct {
+    name: [21]u8 = [_]u8{' '} ** 21,
+    output: []const u8 = "",
+    source_files: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    dump_sir_graph: []const u8 = "",
 };
 
 pub fn main() !u8 {
@@ -39,75 +48,78 @@ pub fn main() !u8 {
     _ = arg_iter.skip();
 
     // Parse CLI arguments
-    var rom_name: ?[21]u8 = null;
-    var output_file: ?[]const u8 = null;
-    var source_files: std.ArrayListUnmanaged([]const u8) = .{};
-    defer source_files.deinit(allocator);
-
-    var state: enum { none, name, output, source_files } = .none;
+    var options: CompilerOptions = .{};
 
     while (arg_iter.next()) |arg| {
-        sw: switch (state) {
-            .none => {
-                if (std.mem.eql(u8, arg, "--name")) {
-                    state = .name;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--output")) {
-                    state = .output;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--source")) {
-                    state = .source_files;
-                    continue;
-                }
-
-                std.log.err("Unknown CLI argument '{s}'", .{arg});
+        if (std.mem.eql(u8, arg, "--name")) {
+            if (!std.mem.allEqual(u8, &options.name, ' ')) {
+                std.log.err("Duplicate '--name' attribute", .{});
                 return 1;
-            },
-            .name => {
-                if (arg.len > 21) {
-                    std.log.err("ROM name has a maximum length of 21 characters, got {}", .{arg.len});
-                    return 1;
-                }
+            }
+            const name = arg_iter.next() orelse {
+                std.log.err("Missing ROM name after '--name' attribute", .{});
+                return 1;
+            };
+            if (name.len > options.name.len) {
+                std.log.err("ROM name has a maximum length of {} characters, got {}", .{ options.name.len, arg.len });
+                return 1;
+            }
 
-                rom_name = [_]u8{' '} ** 21;
-                @memcpy(rom_name.?[0..arg.len], arg);
-
-                state = .none;
-            },
-            .output => {
-                output_file = arg;
-                state = .none;
-            },
-            .source_files => {
-                if (std.mem.startsWith(u8, arg, "--")) {
-                    continue :sw .none;
-                }
-
-                try source_files.append(allocator, arg);
-            },
+            @memcpy(options.name[0..name.len], name);
+            continue;
         }
+        if (std.mem.eql(u8, arg, "--output")) {
+            if (options.output.len != 0) {
+                std.log.err("Duplicate '--output' attribute", .{});
+                return 1;
+            }
+            options.output = arg_iter.next() orelse {
+                std.log.err("Missing output file name after '--output' attribute", .{});
+                return 1;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--source")) {
+            try options.source_files.append(allocator, arg_iter.next() orelse {
+                std.log.err("Missing source file name after '--source' attribute", .{});
+                return 1;
+            });
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dump-sir-graph")) {
+            if (options.dump_sir_graph.len != 0) {
+                std.log.err("Duplicate '--dump-sir-graph' attribute", .{});
+                return 1;
+            }
+            options.dump_sir_graph = arg_iter.next() orelse {
+                std.log.err("Missing graph output file name after '--dump-sir-graph' attribute", .{});
+                return 1;
+            };
+            continue;
+        }
+
+        std.log.err("Unsupported command-line argument: '{s}'", .{arg});
+        return 1;
     }
 
     // Validate data
-    if (rom_name == null) {
-        std.log.err("No ROM name was specified", .{});
+    if (std.mem.allEqual(u8, &options.name, ' ')) {
+        std.log.err("No ROM name was specified ('--name')", .{});
         return 1;
     }
-    if (output_file == null) {
-        std.log.err("No output file was specified", .{});
+    if (options.output.len == 0) {
+        std.log.err("No output file was specified ('--output')", .{});
         return 1;
     }
-    if (source_files.items.len == 0) {
-        std.log.err("No source files were specified", .{});
+    if (options.source_files.items.len == 0) {
+        std.log.err("No source files were specified ('--source')", .{});
         return 1;
     }
 
-    return compile(allocator, rom_name.?, output_file.?, source_files.items);
+    return compile(allocator, options);
 }
 
-fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const u8, source_files: []const []const u8) !u8 {
+fn compile(allocator: std.mem.Allocator, options: CompilerOptions) !u8 {
     // Parse all files into modules
     var modules: std.ArrayListUnmanaged(Module) = .{};
     defer {
@@ -124,7 +136,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
     // User modules
     var has_errors = false;
-    for (source_files) |src| {
+    for (options.source_files.items) |src| {
         std.log.debug("Parsing file '{s}'...", .{src});
 
         const src_file = try std.fs.cwd().openFile(src, .{});
@@ -150,6 +162,27 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     };
     defer sema.deinit();
 
+    if (options.dump_sir_graph.len != 0) {
+        const graph_file = try std.fs.cwd().createFile(options.dump_sir_graph, .{});
+        defer graph_file.close();
+
+        const graph_writer = graph_file.writer();
+
+        try SemanticIr.NodeList.dumpPrologue(graph_writer);
+        for (sema.symbols.items, 0..) |symbol, index| {
+            switch (symbol) {
+                .function => |fn_sym| try fn_sym.semantic_ir.dumpGraph(graph_writer, &sema, .cast(index)),
+                else => {},
+            }
+        }
+        try SemanticIr.NodeList.dumpEpilogue(graph_writer);
+
+        const abs_path = try std.fs.cwd().realpathAlloc(allocator, options.dump_sir_graph);
+        defer allocator.free(abs_path);
+
+        std.log.info("Successfully dumped Semantic IR graph to '{s}'", .{abs_path});
+    }
+
     if (true) return 0;
 
     // Generate code
@@ -168,7 +201,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
 
     var rom: Rom = .{
         .header = .{
-            .title = rom_name,
+            .title = options.name,
             // TODO: Configurable Mode / Chipset / Country / Version
             .mode = .{
                 .map = sema.mapping_mode,
@@ -202,7 +235,7 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     const rom_data = try rom.generate(allocator);
     defer allocator.free(rom_data);
 
-    const rom_file = try std.fs.cwd().createFile(output_file, .{});
+    const rom_file = try std.fs.cwd().createFile(options.output, .{});
     defer rom_file.close();
 
     try rom_file.writeAll(rom_data);
@@ -210,9 +243,9 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     // Debug Data
     const debug = true; // TODO: Configurable
     if (debug) {
-        const mlb_file_path = try changeExtension(allocator, output_file, ".mlb");
+        const mlb_file_path = try changeExtension(allocator, options.output, ".mlb");
         defer allocator.free(mlb_file_path);
-        const cdl_file_path = try changeExtension(allocator, output_file, ".cdl");
+        const cdl_file_path = try changeExtension(allocator, options.output, ".cdl");
         defer allocator.free(cdl_file_path);
 
         const mlb_file = try std.fs.cwd().createFile(mlb_file_path, .{});

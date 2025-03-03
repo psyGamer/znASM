@@ -449,7 +449,7 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     const fn_sym = symbol.getFn(sema);
     // fn_sym.calling_convention = analyzer.calling_conv;
     // fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
-    fn_sym.semantic_ir = analyzer.graph.toOwnedSlice();
+    fn_sym.semantic_ir = analyzer.graph;
 }
 fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
