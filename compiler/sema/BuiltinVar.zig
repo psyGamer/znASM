@@ -68,7 +68,10 @@ var all = std.EnumArray(Tag, BuiltinVar).init(.{
 });
 
 fn handleCpuMode(ana: *Analyzer, node: NodeIndex, value_expr: Expression.Index) Sema.AnalyzeError!void {
-    try ana.emit(.{ .cpu_mode = try value_expr.toValue(builtin_module.CpuMode, ana.sema) }, node);
+    _ = ana; // autofix
+    _ = node; // autofix
+    _ = value_expr; // autofix
+    // try ana.emit(.{ .cpu_mode = try value_expr.toValue(builtin_module.CpuMode, ana.sema) }, node);
 }
 fn handleStackPointerWrite(ana: *Analyzer, node_idx: NodeIndex, expr_idx: Expression.Index) Sema.AnalyzeError!void {
     _ = ana; // autofix

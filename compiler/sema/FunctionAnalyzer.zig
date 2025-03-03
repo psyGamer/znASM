@@ -21,7 +21,7 @@ sema: *Sema,
 symbol: Symbol.Index,
 module: Module.Index,
 
-ir: std.ArrayListUnmanaged(SemanticIr) = .empty,
+graph: SemanticIr.NodeList = .empty,
 
 // Helper functions
 
@@ -29,12 +29,15 @@ pub inline fn getAst(ana: Analyzer) *Ast {
     return &ana.module.get(ana.sema).ast;
 }
 
-pub inline fn emit(ana: *Analyzer, tag: SemanticIr.Tag, node: Node.Index) !void {
-    try ana.ir.append(ana.sema.allocator, .{ .tag = tag, .node = node });
+pub inline fn create(ana: *Analyzer, node: SemanticIr) !SemanticIr.Index {
+    return ana.graph.create(ana.sema.allocator, node);
+}
+pub inline fn emit(ana: *Analyzer, tag: SemanticIr.Data, node: Node.Index) !void {
+    try ana.graph.append(ana.sema.allocator, .{ .tag = tag, .node = node });
 }
 
 pub fn deinit(ana: *Analyzer) void {
-    ana.ir.deinit(ana.sema.allocator);
+    ana.graph.deinit(ana.sema.allocator);
 }
 
 pub fn process(ana: *Analyzer) Error!void {
@@ -43,12 +46,22 @@ pub fn process(ana: *Analyzer) Error!void {
 
     try ana.handleBlock(fn_def.block);
 
-    if (ana.ir.items.len != 0 and ana.ir.getLast().tag == .@"return") {
-        return; // Already explicitly returned
-    }
+    // if (ana.ir.items.len != 0 and ana.ir.getLast().tag == .@"return") {
+    //     return; // Already explicitly returned
+    // }
+
+    var queue: std.ArrayListUnmanaged(SemanticIr.Index) = .empty;
+    defer queue.deinit(ana.sema.allocator);
 
     // TODO: Handle return values
-    try ana.emit(.@"return", node);
+    const ret_node = try ana.create(.{ .data = .@"return", .source = node });
+
+    ana.graph.refresh();
+    for (ana.graph.slice.tags, 0..) |tag, idx| {
+        if (tag == .store_symbol) {
+            try ret_node.addDependency(ana.sema.allocator, &ana.graph, @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(idx))), .both);
+        }
+    }
 }
 
 /// Searches for the Semantic IR index of the `declare_variable` for the target local variable
@@ -59,7 +72,7 @@ fn findLocalVariable(ana: *const Analyzer, name: []const u8) ?SemanticIr.Index {
     var iter: ScopeIterator = .init(ana);
     while (iter.next()) |ir| {
         if (ir.tag == .declare_variable) {
-            const var_name = ast.parseIdentifier(ast.nodeToken(ir.node));
+            const var_name = ast.parseIdentifier(ast.nodeToken(ir.source));
             if (std.mem.eql(u8, var_name, name)) {
                 return @enumFromInt(iter.index);
             }
@@ -129,7 +142,7 @@ const ScopeIterator = struct {
     pub fn init(ana: *const Analyzer) ScopeIterator {
         return .{
             .analyzer = ana,
-            .index = @intCast(ana.ir.items.len),
+            .index = @intCast(ana.graph.items.len),
         };
     }
 
@@ -137,7 +150,7 @@ const ScopeIterator = struct {
         while (iter.index > 0) : (iter.index -= 1) {
             iter.min_depth = @min(iter.min_depth, iter.curr_depth);
 
-            const ir = iter.analyzer.ir.items[iter.index - 1];
+            const ir = iter.analyzer.graph.items[iter.index - 1];
             switch (ir.tag) {
                 .begin_scope => iter.curr_depth -= 1,
                 .end_scope => iter.curr_depth += 1,
@@ -157,7 +170,7 @@ const ScopeIterator = struct {
 // AST node handling
 
 pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
-    try ana.emit(.begin_scope, node);
+    // try ana.emit(.begin_scope, node);
 
     const range = ana.getAst().nodeData(node).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra| {
@@ -165,16 +178,16 @@ pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
 
         switch (ana.getAst().nodeTag(child)) {
             .block => try ana.handleBlock(child),
-            .label => try ana.handleLabel(child),
-            .local_var_decl => try ana.handleLocalVarDecl(child),
+            // .label => try ana.handleLabel(child),
+            // .local_var_decl => try ana.handleLocalVarDecl(child),
             .assign_statement => try ana.handleAssignStatement(child),
-            .call_statement => try ana.handleCallStatement(child),
-            .while_statement => try ana.handleWhileStatement(child),
-            else => unreachable,
+            // .call_statement => try ana.handleCallStatement(child),
+            // .while_statement => try ana.handleWhileStatement(child),
+            else => {},
         }
     }
 
-    try ana.emit(.end_scope, node);
+    // try ana.emit(.end_scope, node);
 }
 
 fn handleLabel(ana: *Analyzer, node: Node.Index) Error!void {
@@ -190,7 +203,7 @@ fn handleLabel(ana: *Analyzer, node: Node.Index) Error!void {
     }
 
     // Avoid shadowing variables / labels
-    for (ana.ir.items) |ir| {
+    for (ana.graph.items) |ir| {
         if (ir.tag != .declare_variable and ir.tag != .declare_label) {
             continue;
         }
@@ -224,11 +237,11 @@ fn handleLocalVarDecl(ana: *Analyzer, node: Node.Index) Error!void {
     }
 
     // Avoid shadowing variables / labels in parent scopes
-    var idx: std.meta.Tag(SemanticIr.Index) = @intCast(ana.ir.items.len);
+    var idx: std.meta.Tag(SemanticIr.Index) = @intCast(ana.graph.items.len);
     var curr_depth: i16 = 0;
     var min_depth: i16 = 0;
     while (idx > 0) : (idx -= 1) {
-        const ir = ana.ir.items[idx - 1];
+        const ir = ana.graph.items[idx - 1];
 
         min_depth = @min(min_depth, curr_depth);
         switch (ir.tag) {
@@ -302,26 +315,26 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     }
 
     // Local variable
-    if (ana.findLocalVariable(root_name)) |ir_idx| {
-        const root_type = ana.ir.items[@intFromEnum(ir_idx)].tag.declare_variable.type;
+    // if (ana.findLocalVariable(root_name)) |ir_idx| {
+    //     const root_type = ana.graph.items[@intFromEnum(ir_idx)].tag.declare_variable.type;
 
-        const assign_idx = ana.ir.items.len;
-        try ana.emit(.{ .assign_local = undefined }, node);
-        try ana.parseFieldTarget(fields[1..], root_type, node);
+    //     const assign_idx = ana.graph.items.len;
+    //     try ana.emit(.{ .assign_local = undefined }, node);
+    //     try ana.parseFieldTarget(fields[1..], root_type, node);
 
-        const target_type = if (fields.len > 1)
-            ana.ir.getLast().tag.field_reference.type
-        else
-            root_type;
-        const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
+    //     const target_type = if (fields.len > 1)
+    //         ana.graph.getLast().tag.field_reference.type
+    //     else
+    //         root_type;
+    //     const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
 
-        ana.ir.items[assign_idx].tag.assign_local = .{
-            .local_index = ir_idx,
-            .field_target = @intCast(ana.ir.items.len - assign_idx - 1),
-            .value = value_expr,
-        };
-        return;
-    }
+    //     ana.graph.items[assign_idx].tag.assign_local = .{
+    //         .local_index = ir_idx,
+    //         .field_target = @intCast(ana.graph.items.len - assign_idx - 1),
+    //         .value = value_expr,
+    //     };
+    //     return;
+    // }
 
     // Global variable
     const symbol = try ana.sema.resolveSymbol(root_ident, ana.module);
@@ -334,22 +347,30 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
             return error.AnalyzeFailed;
         },
     };
+    _ = root_type; // autofix
 
-    const assign_idx = ana.ir.items.len;
-    try ana.emit(.{ .assign_global = undefined }, node);
-    try ana.parseFieldTarget(fields[1..], root_type, node);
+    var int: std.math.big.int.Managed = try .init(ana.sema.allocator);
+    errdefer int.deinit();
+    int.setString(10, "12345") catch unreachable;
 
-    const target_type = if (fields.len > 1)
-        ana.ir.getLast().tag.field_reference.type
-    else
-        root_type;
-    const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
+    const val_node = try ana.create(.{ .data = .{ .value = int.toConst() }, .source = node });
+    _ = try ana.create(.{ .data = .{ .store_symbol = symbol }, .parents = .{ .left = val_node, .right = .none }, .source = node });
 
-    ana.ir.items[assign_idx].tag.assign_global = .{
-        .symbol = symbol,
-        .field_target = @intCast(ana.ir.items.len - assign_idx - 1),
-        .value = value_expr,
-    };
+    // const assign_idx = ana.graph.items.len;
+    // try ana.emit(.{ .assign_global = undefined }, node);
+    // try ana.parseFieldTarget(fields[1..], root_type, node);
+
+    // const target_type = if (fields.len > 1)
+    //     ana.graph.getLast().tag.field_reference.type
+    // else
+    //     root_type;
+    // const value_expr: Expression.Index = try .resolve(ana.sema, target_type, assign.value, ana.module);
+
+    // ana.graph.items[assign_idx].tag.assign_global = .{
+    //     .symbol = symbol,
+    //     .field_target = @intCast(ana.graph.items.len - assign_idx - 1),
+    //     .value = value_expr,
+    // };
 }
 
 fn handleCallStatement(ana: *Analyzer, node: Node.Index) Error!void {

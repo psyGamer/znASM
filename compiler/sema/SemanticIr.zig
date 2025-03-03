@@ -1,18 +1,399 @@
 //! High-level Semantic Intermediate Representation
+//! Represented as a 'Sea of Nodes' directed acyclic graph
+const std = @import("std");
 const builtin_module = @import("../builtin_module.zig");
+
+const runtime_safty = switch (@import("builtin").mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+};
 
 const Ast = @import("../Ast.zig");
 const Sema = @import("../Sema.zig");
-const NodeIndex = Ast.NodeIndex;
+const Node = Ast.Node;
 const Symbol = @import("../symbol.zig").Symbol;
 const Expression = @import("expression.zig").Expression;
 const TypeExpression = @import("type_expression.zig").TypeExpression;
 const BuiltinVar = @import("BuiltinVar.zig");
 const BuiltinFn = @import("BuiltinFn.zig");
 
-pub const Index = enum(u32) { _ };
+const SemanticIr = @This();
 
-pub const Tag = union(enum) {
+pub const Index = enum(u16) {
+    none = std.math.maxInt(u16),
+    _,
+
+    pub fn getTag(index: Index, list: NodeList) std.meta.Tag(Data) {
+        return list.slice.tags[@intFromEnum(index)];
+    }
+    pub fn getData(index: Index, list: NodeList) Data {
+        const tag = index.getTag(list);
+        const bare = list.slice.data[@intFromEnum(index)];
+
+        return .unpack(switch (tag) {
+            inline else => |t| @unionInit(Data.Packed, @tagName(t), @field(bare, @tagName(t))),
+        }, list.extra);
+    }
+    pub fn getSourceNode(index: Index, list: NodeList) Node.Index {
+        return list.slice.sources[@intFromEnum(index)];
+    }
+
+    /// Adds the target node as a dependency to the current node
+    pub fn addDependency(index: Index, allocator: std.mem.Allocator, list: *NodeList, dependency: Index, location: enum { left, right, both }) !void {
+        var parents = &list.slice.parents[@intFromEnum(index)];
+
+        if (index.getTag(list.*) == .merge) {
+            const data = &list.slice.data[@intFromEnum(index)].merge;
+
+            if (parents.left == .none) {
+                parents.left = dependency;
+                return;
+            } else if (parents.right == .none) {
+                parents.right = dependency;
+                return;
+            } else {
+                for (data) |*parent| {
+                    if (parent.* == .none) {
+                        parent.* = dependency;
+                        return;
+                    }
+                }
+            }
+
+            // Try forwarding to nested `merge` if they have space
+            if (parents.left.getTag(list.*) == .merge and list.slice.data[@intFromEnum(parents.left)].merge[data.len - 1] == .none) {
+                return parents.left.addDependency(allocator, list, dependency, undefined);
+            }
+            if (parents.right.getTag(list.*) == .merge and list.slice.data[@intFromEnum(parents.right)].merge[data.len - 1] == .none) {
+                return parents.right.addDependency(allocator, list, dependency, undefined);
+            }
+            for (data) |*parent| {
+                if (parent.getTag(list.*) == .merge and list.slice.data[@intFromEnum(parent.*)].merge[data.len - 1] == .none) {
+                    return parent.addDependency(allocator, list, dependency, undefined);
+                }
+            }
+
+            // Create new `merge` node if not already
+            if (parents.left.getTag(list.*) != .merge) {
+                parents.left = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                return;
+            }
+            if (parents.right.getTag(list.*) != .merge) {
+                parents.right = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                return;
+            }
+            for (data) |*parent| {
+                if (parent.getTag(list.*) != .merge) {
+                    parent.* = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parent.*, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                    return;
+                }
+            }
+
+            // Everything is occuped -> forward to next `merge`
+            std.debug.assert(parents.left.getTag(list.*) == .merge);
+            return parents.left.addDependency(allocator, list, dependency, undefined);
+        }
+
+        switch (location) {
+            .left => {
+                if (parents.left == .none) {
+                    parents.left = dependency;
+                } else if (parents.left.getTag(list.*) == .merge) {
+                    return parents.left.addDependency(allocator, list, dependency, undefined);
+                } else {
+                    parents.left = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                }
+            },
+            .right => {
+                if (parents.right == .none) {
+                    parents.right = dependency;
+                } else if (parents.right.getTag(list.*) == .merge) {
+                    return parents.right.addDependency(allocator, list, dependency, undefined);
+                } else {
+                    parents.right = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                }
+            },
+            .both => {
+                if (parents.left == .none) {
+                    parents.left = dependency;
+                } else if (parents.right == .none) {
+                    parents.right = dependency;
+                } else if (parents.left.getTag(list.*) == .merge) {
+                    return parents.left.addDependency(allocator, list, dependency, undefined);
+                } else if (parents.right.getTag(list.*) == .merge) {
+                    return parents.right.addDependency(allocator, list, dependency, undefined);
+                } else if (parents.left.getTag(list.*) != .merge) {
+                    parents.left = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                } else {
+                    std.debug.assert(parents.right.getTag(list.*) != .merge);
+                    parents.right = try list.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, dependency, .none } }, .source = index.getSourceNode(list.*) });
+                }
+            },
+        }
+    }
+};
+pub const Data = union(enum) {
+    /// Merges up to 6 dependencies into a single dependency
+    merge: [4]Index,
+
+    /// Compile-time known immediate value
+    /// Cannot have dependencies
+    value: std.math.big.int.Const,
+
+    /// Stores the `left` parent's value into the symbol
+    /// Depends on the `block_start` of the current SSA (`right`)
+    store_symbol: Symbol.Index,
+
+    /// Return from the current function
+    ///
+    /// Dependencies:
+    ///  - Assignments to global variables (`var` / `reg`)
+    ///  - Assignments to return variables (TODO)
+    @"return": void,
+
+    pub fn unpack(packed_data: Packed, extra: NodeList.ExtraList) Data {
+        switch (packed_data) {
+            .value => |info| {
+                return .{ .value = .{
+                    .positive = info.positive,
+                    .limbs = @alignCast(std.mem.bytesAsSlice(std.math.big.Limb, extra.items[info.limbs_index..(info.limbs_index + info.limbs_len * @sizeOf(std.math.big.Limb))])),
+                } };
+            },
+            inline else => |info, tag| {
+                return @unionInit(Data, @tagName(tag), info);
+            },
+        }
+    }
+    pub fn pack(data: Data, allocator: std.mem.Allocator, extra: *NodeList.ExtraList) !Packed {
+        switch (data) {
+            .value => |info| {
+                // extra.appendUnalignedSlice(allocator, items)
+                const index: u32 = @intCast(extra.items.len);
+                try extra.appendSlice(allocator, std.mem.sliceAsBytes(info.limbs));
+                return .{ .value = .{
+                    .positive = info.positive,
+                    .limbs_len = @intCast(info.limbs.len),
+                    .limbs_index = index,
+                } };
+            },
+            inline else => |info, tag| {
+                return @unionInit(Packed, @tagName(tag), info);
+            },
+        }
+    }
+
+    /// Packed representation, storing excess data into `list.extra`
+    pub const Packed = union(std.meta.Tag(Data)) {
+        merge: [4]Index,
+        value: struct {
+            positive: bool,
+            limbs_len: u16,
+            limbs_index: u32,
+        },
+        store_symbol: Symbol.Index,
+        @"return": void,
+    };
+};
+pub const Parents = packed struct(u32) {
+    left: Index = .none,
+    right: Index = .none,
+};
+
+/// Data associated with the current node type
+data: Data,
+/// Parent connections for this node
+parents: Parents = .{},
+
+/// AST node which is responsible for this graph node
+source: Node.Index,
+
+/// Efficent list for storing SIR nodes
+pub const NodeList = b: {
+    const data_info = @typeInfo(Data.Packed).@"union";
+
+    const Tag = std.meta.Tag(Data);
+    const Bare = @Type(.{ .@"union" = .{
+        .layout = data_info.layout,
+        .tag_type = null,
+        .fields = data_info.fields,
+        .decls = &.{},
+    } });
+
+    // Limit memory usage of nodes
+    std.debug.assert(@sizeOf(Tag) <= @sizeOf(u8));
+    std.debug.assert(@sizeOf(Bare) <= @sizeOf(u64) + if (runtime_safty) 4 else 0);
+
+    break :b struct {
+        const List = @This();
+        pub const empty: List = .{
+            .graph = .empty,
+            .extra = .empty,
+        };
+
+        /// Additional data for each node, to avoid extra allocators for iterators
+        const IteratorData = packed struct(u8) {
+            visited: bool = false,
+            _: u7 = 0,
+        };
+
+        const Graph = std.MultiArrayList(struct {
+            tag: Tag,
+            data: Bare,
+            parents: Parents,
+
+            iter_data: IteratorData = .{},
+
+            source: Node.Index,
+        });
+
+        pub const ExtraList = std.ArrayListAlignedUnmanaged(u8, @alignOf(usize));
+
+        pub const Slice = Graph.Slice;
+        const ComputedSlice = struct {
+            tags: []Tag,
+            data: []Bare,
+            parents: []Parents,
+
+            iter_data: []IteratorData,
+
+            sources: []const Node.Index,
+        };
+
+        graph: Graph,
+        extra: ExtraList,
+        slice: ComputedSlice = undefined,
+
+        pub fn deinit(list: *List, allocator: std.mem.Allocator) void {
+            list.graph.deinit(allocator);
+            list.extra.deinit(allocator);
+        }
+
+        /// Creates a new node in the list
+        pub fn create(list: *List, allocator: std.mem.Allocator, node: SemanticIr) !Index {
+            const node_index: Index = @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(list.graph.len)));
+
+            const tag = std.meta.activeTag(node.data);
+            const packed_data = try node.data.pack(allocator, &list.extra);
+
+            try list.graph.append(allocator, .{
+                .tag = tag,
+                .data = switch (tag) {
+                    inline else => |t| @unionInit(Bare, @tagName(t), @field(packed_data, @tagName(t))),
+                },
+                .parents = node.parents,
+                .source = node.source,
+            });
+            list.slice = undefined;
+            return node_index;
+        }
+        /// Creates a new node in the list and ensures `list.slice` is valid
+        pub fn createRefresh(list: *List, allocator: std.mem.Allocator, node: SemanticIr) !Index {
+            const will_reallocate = list.graph.capacity == list.graph.len;
+            const index = list.create(allocator, node);
+            if (runtime_safty or will_reallocate) {
+                list.refresh();
+            }
+            return index;
+        }
+
+        fn TraverseIterator(comptime root_tag: Tag, comptime filter_tags: []const Tag) type {
+            return struct {
+                const Iterator = @This();
+
+                slice: *const ComputedSlice,
+                queue: *std.ArrayListUnmanaged(Index),
+                root_index: std.meta.Tag(Index),
+
+                pub fn next(iter: *Iterator, allocator: std.mem.Allocator) !?Index {
+                    // Search roots
+                    while (iter.queue.items.len == 0) {
+                        if (iter.root_index == 0) break;
+                        iter.root_index -= 1;
+
+                        if (iter.slice.tags[iter.root_index] == root_tag and !iter.slice.iter_data[iter.root_index].visited) {
+                            iter.slice.iter_data[iter.root_index].visited = true;
+                            try iter.queue.append(allocator, @enumFromInt(iter.root_index));
+                            break;
+                        }
+                    }
+
+                    // Traverse parents
+                    while (iter.queue.pop()) |current| {
+                        const parents = iter.slice.parents[@intFromEnum(current)];
+                        if (parents.left != .none and !iter.slice.iter_data[@intFromEnum(parents.left)].visited) {
+                            iter.slice.iter_data[@intFromEnum(parents.left)].visited = true;
+                            try iter.queue.append(allocator, parents.left);
+                        }
+                        if (parents.right != .none and !iter.slice.iter_data[@intFromEnum(parents.right)].visited) {
+                            iter.slice.iter_data[@intFromEnum(parents.right)].visited = true;
+                            try iter.queue.append(allocator, parents.right);
+                        }
+
+                        if (iter.slice.tags[@intFromEnum(current)] == .merge) {
+                            const data = iter.slice.data[@intFromEnum(current)].merge;
+                            for (data) |parent| {
+                                if (parent != .none and !iter.slice.iter_data[@intFromEnum(parent)].visited) {
+                                    iter.slice.iter_data[@intFromEnum(parent)].visited = true;
+                                    try iter.queue.append(allocator, parent);
+                                }
+                            }
+                        }
+
+                        if (filter_tags.len == 0) {
+                            return current;
+                        } else {
+                            inline for (filter_tags) |filter| {
+                                if (iter.slice.tags[@intFromEnum(current)] == filter) {
+                                    return current;
+                                }
+                            }
+                        }
+                    }
+
+                    return null;
+                }
+            };
+        }
+
+        /// Iterator which travers the graph from given root tags through their parents, with an optional tag filter.
+        /// If new nodes are created while iterating, `list.refresh()` must be called.
+        /// The provided `queue` should be reused often, to avoid allocations.
+        ///
+        /// Only one iterator may be active at a time!
+        pub fn traverseIterator(list: *const List, queue: *std.ArrayListUnmanaged(Index), comptime root_tag: Tag, comptime filter_tags: []const Tag) TraverseIterator(root_tag, filter_tags) {
+            queue.clearRetainingCapacity();
+            for (list.slice.iter_data) |*data| {
+                data.visited = false;
+            }
+
+            return .{
+                .slice = &list.slice,
+                .queue = queue,
+                .root_index = @intCast(list.graph.len),
+            };
+        }
+
+        /// Updates slices to node data.
+        /// Creating nodes invalidates any active slices
+        pub fn refresh(list: *List) void {
+            const slice = list.graph.slice();
+            list.slice = .{
+                .tags = slice.items(.tag),
+                .data = slice.items(.data),
+                .parents = slice.items(.parents),
+                .iter_data = slice.items(.iter_data),
+                .sources = slice.items(.source),
+            };
+        }
+
+        /// The caller owns the returned memory. Empties this NodeList.
+        pub fn toOwnedSlice(list: *List) Slice {
+            return list.graph.toOwnedSlice();
+        }
+    };
+};
+
+pub const Tag2 = union(enum) {
     /// Indicates n `field_reference` instructions following the current instruction
     pub const FieldTarget = u16;
 
@@ -71,6 +452,3 @@ pub const Tag = union(enum) {
     /// Returns from the current function
     @"return": void,
 };
-
-tag: Tag,
-node: NodeIndex,

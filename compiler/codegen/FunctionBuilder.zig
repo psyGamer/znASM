@@ -1461,7 +1461,7 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
                 shift_offset = @intCast(bit_offset);
             }
             if (shift_offset == std.math.maxInt(u8)) {
-                try b.emit(op_ir.node, switch (int_reg) {
+                try b.emit(op_ir.source, switch (int_reg) {
                     .a8, .a16 => .{ .lda_imm = imm_value },
                     .x8, .x16 => .{ .ldx_imm = imm_value },
                     .y8, .y16 => .{ .ldy_imm = imm_value },
@@ -1471,9 +1471,9 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
                 std.debug.assert(int_reg == .a8 or int_reg == .a16);
 
                 for (0..shift_offset) |_| {
-                    try b.emit(op_ir.node, .asl_accum);
+                    try b.emit(op_ir.source, .asl_accum);
                 }
-                try b.emit(op_ir.node, .{ .ora_imm = imm_value });
+                try b.emit(op_ir.source, .{ .ora_imm = imm_value });
             }
 
             switch (ir.tag) {
@@ -1487,7 +1487,7 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
                         else => unreachable,
                     };
 
-                    try b.emitReloc(op_ir.node, instr, .{
+                    try b.emitReloc(op_ir.source, instr, .{
                         .type = .addr16,
                         .target_symbol = global.symbol,
                         .target_offset = curr_offset,
@@ -1566,7 +1566,7 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
                 @panic("TODO");
             } else {
                 switch (ir.tag) {
-                    .store_global => |global| try b.emitReloc(op_ir.node, .{ .lda_addr16 = undefined }, .{
+                    .store_global => |global| try b.emitReloc(op_ir.source, .{ .lda_addr16 = undefined }, .{
                         .type = .addr16,
                         .target_symbol = global.symbol,
                         .target_offset = curr_offset,
@@ -1582,20 +1582,20 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
 
                 switch (ir.tag) {
                     .store_global, .store_local => {
-                        try b.emit(op_ir.node, .{ .and_imm = switch (int_reg) {
+                        try b.emit(op_ir.source, .{ .and_imm = switch (int_reg) {
                             .a8 => .{ .imm8 = @truncate(~mask_value) },
                             .a16 => .{ .imm16 = @truncate(~mask_value) },
                             else => undefined,
                         } });
-                        try b.emit(op_ir.node, .{ .ora_imm = imm_value });
+                        try b.emit(op_ir.source, .{ .ora_imm = imm_value });
                     },
                     // Value doesn't exist yet
-                    .store_push => try b.emit(op_ir.node, .{ .lda_imm = imm_value }),
+                    .store_push => try b.emit(op_ir.source, .{ .lda_imm = imm_value }),
                     else => unreachable,
                 }
 
                 switch (ir.tag) {
-                    .store_global => |global| try b.emitReloc(op_ir.node, .{ .sta_addr16 = undefined }, .{
+                    .store_global => |global| try b.emitReloc(op_ir.source, .{ .sta_addr16 = undefined }, .{
                         .type = .addr16,
                         .target_symbol = global.symbol,
                         .target_offset = curr_offset,
@@ -1604,7 +1604,7 @@ fn handleStoreOLD(b: *Builder, ir: AssemblyIr) !void {
                         .scratch => @panic("TODO"),
                         .stack => |offset| try b.emit(ir.node, .{ .sta_sr = offset }),
                     },
-                    .store_push => try b.emit(op_ir.node, .pha),
+                    .store_push => try b.emit(op_ir.source, .pha),
                     else => unreachable,
                 }
             }

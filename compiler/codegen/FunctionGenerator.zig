@@ -35,17 +35,17 @@ pub fn process(gen: *Generator) Error!void {
 
     const func = gen.getFunction();
     while (gen.sir_index < func.semantic_ir.len) : (gen.sir_index += 1) {
-        const sir = func.semantic_ir[gen.sir_index];
-        switch (sir.tag) {
-            .begin_scope, .end_scope => {},
+        // const sir = func.semantic_ir[gen.sir_index];
+        // switch (sir.tag) {
+        //     .begin_scope, .end_scope => {},
 
-            .assign_global => try gen.handleAssignGlobal(sir),
+        //     .assign_global => try gen.handleAssignGlobal(sir),
 
-            .cpu_mode => try gen.handleCpuMode(sir),
+        //     .cpu_mode => try gen.handleCpuMode(sir),
 
-            .@"return" => try gen.emit(.@"return", sir.node),
-            inline else => |_, t| @panic("TODO: " ++ @tagName(t)),
-        }
+        //     .@"return" => try gen.emit(.@"return", sir.source),
+        //     inline else => |_, t| @panic("TODO: " ++ @tagName(t)),
+        // }
     }
 }
 pub fn deinit(gen: *Generator) void {
@@ -91,9 +91,9 @@ fn handleAssignGlobal(gen: *Generator, sir: SemanticIr) Error!void {
         .symbol = assign_global.symbol,
         .intermediate_register = assign_global.value.get(gen.sema).intermediate_register,
         .operations = undefined,
-    } }, sir.node);
+    } }, sir.source);
 
-    try gen.generateStoreOperations(target_type, assign_global.value, bit_offset, sir.node);
+    try gen.generateStoreOperations(target_type, assign_global.value, bit_offset, sir.source);
 
     gen.air.items[start_idx].tag.store_symbol.operations = @intCast(gen.air.items.len - start_idx - 1);
 }
@@ -145,7 +145,7 @@ fn generateStoreOperations(gen: *Generator, target_type: TypeExpression.Index, e
 
 fn handleCpuMode(gen: *Generator, sir: SemanticIr) Error!void {
     switch (sir.tag.cpu_mode) {
-        .native => try gen.emit(.{ .set_emulation_mode = false }, sir.node),
-        .emulation => try gen.emit(.{ .set_emulation_mode = true }, sir.node),
+        .native => try gen.emit(.{ .set_emulation_mode = false }, sir.source),
+        .emulation => try gen.emit(.{ .set_emulation_mode = true }, sir.source),
     }
 }

@@ -258,7 +258,7 @@ fn branchHandler(comptime branch_type: BranchRelocation.Type) HandlerFn {
             const target_node = params[0];
             const target_name = ana.ast().parseIdentifier(ana.ast().nodeToken(target_node));
 
-            try ana.ir.append(ana.sema.allocator, .{
+            try ana.graph.append(ana.sema.allocator, .{
                 .tag = .{ .branch = .{
                     .type = branch_type,
                     .target_label = target_name,
@@ -272,7 +272,7 @@ fn branchHandler(comptime branch_type: BranchRelocation.Type) HandlerFn {
 fn instructionHandler(comptime instruction: Instruction) HandlerFn {
     return struct {
         pub fn handler(ana: *Analyzer, node_idx: NodeIndex, _: []const NodeIndex) Sema.AnalyzeError!void {
-            try ana.ir.append(ana.sema.allocator, .{
+            try ana.graph.append(ana.sema.allocator, .{
                 .tag = .{ .instruction = .{
                     .instr = instruction,
                     .reloc = null,
@@ -287,7 +287,7 @@ fn pushValueHandler(ana: *Analyzer, node_idx: NodeIndex, params: []const NodeInd
     const size_node = params[0];
     const size_value = try ana.sema.parseInt(u16, ana.ast().nodeToken(size_node), ana.module_idx);
 
-    try ana.ir.append(ana.sema.allocator, .{
+    try ana.graph.append(ana.sema.allocator, .{
         .tag = .{ .instruction = .{
             .instr = .{ .pea = size_value },
             .reloc = null,

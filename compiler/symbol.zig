@@ -129,7 +129,7 @@ pub const Symbol = union(enum) {
         labels: []const struct { []const u8, u16 },
 
         /// High-level semantic IR
-        semantic_ir: []const SemanticIr,
+        semantic_ir: SemanticIr.NodeList.Slice,
         /// Low-level assembly IR
         assembly_ir: []const AssemblyIr,
 
@@ -256,11 +256,11 @@ pub const Symbol = union(enum) {
 
     pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
         switch (sym.*) {
-            .function => |fn_sym| {
+            .function => |*fn_sym| {
                 // allocator.free(fn_sym.local_variables);
                 allocator.free(fn_sym.labels);
 
-                allocator.free(fn_sym.semantic_ir);
+                fn_sym.semantic_ir.deinit(allocator);
                 allocator.free(fn_sym.assembly_ir);
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);

@@ -150,6 +150,8 @@ fn compile(allocator: std.mem.Allocator, rom_name: [21]u8, output_file: []const 
     };
     defer sema.deinit();
 
+    if (true) return 0;
+
     // Generate code
     var codegen: CodeGen = .{ .sema = &sema };
     codegen.process() catch |err| switch (err) {

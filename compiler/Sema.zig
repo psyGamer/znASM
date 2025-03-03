@@ -215,7 +215,7 @@ fn gatherFunctionSymbol(sema: *Sema, symbol_name: []const u8, node: NodeIndex, m
             // .local_variables = &.{},
             .labels = &.{},
 
-            .semantic_ir = &.{},
+            .semantic_ir = .empty,
             .assembly_ir = &.{},
             .instructions = &.{},
             .assembly_data = &.{},
@@ -437,15 +437,19 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     try analyzer.process();
 
     const ast = &module.get(sema).ast;
+    var queue: std.ArrayListUnmanaged(@import("sema/SemanticIr.zig").Index) = .empty;
+    defer queue.deinit(sema.allocator);
     std.log.debug("SIR for {}", .{ast.parseSymbolLocation(ast.nodeToken(symbol.getCommon(sema).node).next())});
-    for (analyzer.ir.items) |ir| {
-        std.log.debug(" - {}", .{ir});
+    analyzer.graph.refresh();
+    var iter = analyzer.graph.traverseIterator(&queue, .@"return", &.{});
+    while (try iter.next(sema.allocator)) |index| {
+        std.log.debug(" - {}", .{index.getData(analyzer.graph)});
     }
 
     const fn_sym = symbol.getFn(sema);
     // fn_sym.calling_convention = analyzer.calling_conv;
     // fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
-    fn_sym.semantic_ir = try analyzer.ir.toOwnedSlice(sema.allocator);
+    fn_sym.semantic_ir = analyzer.graph.toOwnedSlice();
 }
 fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
