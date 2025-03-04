@@ -22,6 +22,7 @@ pub const SymbolLocation = @import("symbol.zig").SymbolLocation;
 pub const Expression = @import("sema/expression.zig").Expression;
 pub const TypeExpression = @import("sema/type_expression.zig").TypeExpression;
 pub const Sir = @import("sema/SemanticIr.zig");
+pub const SirIter = @import("sema/SirIter.zig");
 
 const Sema = @This();
 
@@ -438,13 +439,14 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     errdefer analyzer.deinit();
 
     try analyzer.process();
+    try SirIter.reduce(sema, &analyzer.graph);
 
     const ast = &module.get(sema).ast;
     var queue: std.ArrayListUnmanaged(@import("sema/SemanticIr.zig").Index) = .empty;
     defer queue.deinit(sema.allocator);
     std.log.debug("SIR for {}", .{ast.parseSymbolLocation(ast.nodeToken(symbol.getCommon(sema).node).next())});
     analyzer.graph.refresh();
-    var iter = analyzer.graph.traverseIterator(&queue, .@"return", &.{});
+    var iter = analyzer.graph.traverseRootsIterator(&queue, .@"return", &.{});
     while (try iter.next(sema.allocator)) |index| {
         std.log.debug(" - {}", .{index.getData(&analyzer.graph)});
     }
@@ -751,16 +753,16 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
             const read_start = 0;
             const read_end = source_type.byteSize(sema);
 
-            const store_node = try graph.create(sema.allocator, .{ .data = .{ .symbol = .{
+            const load_node = try graph.create(sema.allocator, .{ .data = .{ .symbol = .{
                 .symbol = symbol,
                 .byte_start = 0,
                 .byte_end = source_type.byteSize(sema),
             } }, .source = node });
 
-            // Find last `store_symbol`
+            // Add dependency on previous `symbol` store
             graph.refresh();
             var i: usize = graph.list.len - 1;
-            while (i > 0 and graph.slice.tags[i] != .block_start) : (i -= 1) {
+            while (graph.slice.tags[i] != .block_start) : (i -= 1) {
                 const index: Sir.Index = .cast(i);
 
                 // Identify assignment
@@ -774,11 +776,12 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
                         data.byte_end > read_start and data.byte_end <= read_end or
                         data.byte_start <= read_start and data.byte_end >= read_end))
                 {
-                    store_node.getParents(graph).left = index;
+                    load_node.getParents(graph).right = index;
+                    break;
                 }
             }
 
-            return .{ store_node, .comptime_integer };
+            return .{ load_node, .comptime_integer };
         },
         else => std.log.err("TODO: {s}", .{@tagName(ast.nodeTag(node))}),
     }

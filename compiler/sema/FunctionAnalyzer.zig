@@ -66,11 +66,12 @@ pub fn process(ana: *Analyzer) Error!void {
     }
 
     ana.graph.refresh();
-    for (ana.graph.slice.tags, 0..) |tag, idx| {
-        const index: SemanticIr.Index = .cast(idx);
+    var i: usize = ana.graph.list.len - 1;
+    while (ana.graph.slice.tags[i] != .block_start) : (i -= 1) {
+        const index: SemanticIr.Index = .cast(i);
 
         // Identify symbol assignments
-        if (tag == .symbol and index.getParents(&ana.graph).left != .none) {
+        if (index.getTag(&ana.graph) == .symbol and index.getParents(&ana.graph).left != .none) {
             const data = index.getData(&ana.graph).symbol;
             const gop = try returned_symbols.getOrPut(ana.sema.allocator, data.symbol);
             if (!gop.found_existing) {
@@ -86,7 +87,7 @@ pub fn process(ana: *Analyzer) Error!void {
             const range = gop.value_ptr.*[data.byte_start..data.byte_end];
             if (!std.mem.allEqual(bool, range, true)) {
                 @memset(range, true);
-                try ret_node.addDependency(ana.sema.allocator, &ana.graph, @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(idx))), .both);
+                try ret_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .both);
             }
         }
     }
@@ -199,6 +200,8 @@ const ScopeIterator = struct {
 
 pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
     // try ana.emit(.begin_scope, node);
+
+    _ = try ana.create(.{ .data = .block_start, .source = node });
 
     const range = ana.getAst().nodeData(node).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra| {
@@ -382,11 +385,24 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     const write_end: u16 = root_type.byteSize(ana.sema);
 
     const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{ .target_type = root_type });
-    _ = try ana.create(.{ .data = .{ .symbol = .{
+    const store_node = try ana.create(.{ .data = .{ .symbol = .{
         .symbol = symbol,
         .byte_start = write_start,
         .byte_end = write_end,
     } }, .parents = .{ .left = expr_node, .right = .none }, .source = node });
+
+    // TODO: Store `block_start` in current scope
+    ana.graph.refresh();
+    var i: usize = ana.graph.list.len;
+    while (true) {
+        if (i == 0) break;
+        i -= 1;
+
+        if (ana.graph.slice.tags[i] == .block_start) {
+            try store_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .right);
+            break;
+        }
+    }
 
     // const assign_idx = ana.graph.items.len;
     // try ana.emit(.{ .assign_global = undefined }, node);
