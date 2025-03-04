@@ -13,7 +13,7 @@ const TypeExpression = Sema.TypeExpression;
 const BuiltinVar = @import("BuiltinVar.zig");
 const BuiltinFn = @import("BuiltinFn.zig");
 
-const SemanticIr = @import("SemanticIr.zig");
+const Sir = @import("SemanticIr.zig");
 const Analyzer = @This();
 
 sema: *Sema,
@@ -21,7 +21,7 @@ sema: *Sema,
 symbol: Symbol.Index,
 module: Module.Index,
 
-graph: SemanticIr.Graph = .empty,
+graph: Sir.Graph = .empty,
 
 // Helper functions
 
@@ -29,10 +29,10 @@ pub inline fn getAst(ana: Analyzer) *Ast {
     return &ana.module.get(ana.sema).ast;
 }
 
-pub inline fn create(ana: *Analyzer, node: SemanticIr) !SemanticIr.Index {
-    return ana.graph.create(ana.sema.allocator, node);
+pub inline fn create(ana: *Analyzer, data: Sir.Data, edges: []const Sir.Edge, node: Node.Index) !Sir.Index {
+    return ana.graph.create(ana.sema.allocator, data, edges, node);
 }
-pub inline fn emit(ana: *Analyzer, tag: SemanticIr.Data, node: Node.Index) !void {
+pub inline fn emit(ana: *Analyzer, tag: Sir.Data, node: Node.Index) !void {
     try ana.graph.append(ana.sema.allocator, .{ .tag = tag, .node = node });
 }
 
@@ -50,51 +50,52 @@ pub fn process(ana: *Analyzer) Error!void {
     //     return; // Already explicitly returned
     // }
 
-    var queue: std.ArrayListUnmanaged(SemanticIr.Index) = .empty;
+    var queue: std.ArrayListUnmanaged(Sir.Index) = .empty;
     defer queue.deinit(ana.sema.allocator);
 
     // TODO: Handle return values
-    const ret_node = try ana.create(.{ .data = .@"return", .source = node });
+    const ret_node = try ana.create(.@"return", &.{}, node);
+    _ = ret_node; // autofix
 
     // Depend on latest assignment for each symbol
-    var returned_symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, []bool) = .empty;
-    defer {
-        for (returned_symbols.values()) |value| {
-            ana.sema.allocator.free(value);
-        }
-        returned_symbols.deinit(ana.sema.allocator);
-    }
+    // var returned_symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, []bool) = .empty;
+    // defer {
+    //     for (returned_symbols.values()) |value| {
+    //         ana.sema.allocator.free(value);
+    //     }
+    //     returned_symbols.deinit(ana.sema.allocator);
+    // }
 
-    ana.graph.refresh();
-    var i: usize = ana.graph.list.len - 1;
-    while (ana.graph.slice.tags[i] != .block_start) : (i -= 1) {
-        const index: SemanticIr.Index = .cast(i);
+    // ana.graph.refresh();
+    // var i: usize = ana.graph.list.len - 1;
+    // while (ana.graph.slice.tags[i] != .block_start) : (i -= 1) {
+    //     const index: Sir.Index = .cast(i);
 
-        // Identify symbol assignments
-        if (index.getTag(&ana.graph) == .symbol and index.getParents(&ana.graph).left != .none) {
-            const data = index.getData(&ana.graph).symbol;
-            const gop = try returned_symbols.getOrPut(ana.sema.allocator, data.symbol);
-            if (!gop.found_existing) {
-                const ty = switch (data.symbol.get(ana.sema).*) {
-                    .constant => |const_sym| const_sym.type,
-                    .variable => |var_sym| var_sym.type,
-                    .register => |reg_sym| reg_sym.type,
-                    else => unreachable,
-                };
-                gop.value_ptr.* = try ana.sema.allocator.alloc(bool, ty.byteSize(ana.sema));
-            }
+    //     // Identify symbol assignments
+    //     if (index.getTag(&ana.graph) == .symbol and index.getParents(&ana.graph).left != .none) {
+    //         const data = index.getData(&ana.graph).symbol;
+    //         const gop = try returned_symbols.getOrPut(ana.sema.allocator, data.symbol);
+    //         if (!gop.found_existing) {
+    //             const ty = switch (data.symbol.get(ana.sema).*) {
+    //                 .constant => |const_sym| const_sym.type,
+    //                 .variable => |var_sym| var_sym.type,
+    //                 .register => |reg_sym| reg_sym.type,
+    //                 else => unreachable,
+    //             };
+    //             gop.value_ptr.* = try ana.sema.allocator.alloc(bool, ty.byteSize(ana.sema));
+    //         }
 
-            const range = gop.value_ptr.*[data.byte_start..data.byte_end];
-            if (!std.mem.allEqual(bool, range, true)) {
-                @memset(range, true);
-                try ret_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .both);
-            }
-        }
-    }
+    //         const range = gop.value_ptr.*[data.byte_start..data.byte_end];
+    //         if (!std.mem.allEqual(bool, range, true)) {
+    //             @memset(range, true);
+    //             try ret_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .both);
+    //         }
+    //     }
+    // }
 }
 
 /// Searches for the Semantic IR index of the `declare_variable` for the target local variable
-fn findLocalVariable(ana: *const Analyzer, name: []const u8) ?SemanticIr.Index {
+fn findLocalVariable(ana: *const Analyzer, name: []const u8) ?Sir.Index {
     const ast = ana.getAst();
 
     // Find IR index
@@ -164,7 +165,7 @@ fn parseFieldTarget(ana: *Analyzer, fields: []const Ast.CommonIndex, root_type: 
 const ScopeIterator = struct {
     analyzer: *const Analyzer,
 
-    index: std.meta.Tag(SemanticIr.Index),
+    index: std.meta.Tag(Sir.Index),
     curr_depth: i16 = 0,
     min_depth: i16 = 0,
 
@@ -175,7 +176,7 @@ const ScopeIterator = struct {
         };
     }
 
-    pub fn next(iter: *ScopeIterator) ?SemanticIr {
+    pub fn next(iter: *ScopeIterator) ?Sir {
         while (iter.index > 0) : (iter.index -= 1) {
             iter.min_depth = @min(iter.min_depth, iter.curr_depth);
 
@@ -201,7 +202,7 @@ const ScopeIterator = struct {
 pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
     // try ana.emit(.begin_scope, node);
 
-    _ = try ana.create(.{ .data = .block_start, .source = node });
+    _ = try ana.create(.block_start, &.{}, node);
 
     const range = ana.getAst().nodeData(node).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra| {
@@ -268,7 +269,7 @@ fn handleLocalVarDecl(ana: *Analyzer, node: Node.Index) Error!void {
     }
 
     // Avoid shadowing variables / labels in parent scopes
-    var idx: std.meta.Tag(SemanticIr.Index) = @intCast(ana.graph.items.len);
+    var idx: std.meta.Tag(Sir.Index) = @intCast(ana.graph.items.len);
     var curr_depth: i16 = 0;
     var min_depth: i16 = 0;
     while (idx > 0) : (idx -= 1) {
@@ -385,24 +386,25 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     const write_end: u16 = root_type.byteSize(ana.sema);
 
     const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{ .target_type = root_type });
-    const store_node = try ana.create(.{ .data = .{ .symbol = .{
+    const store_node = try ana.create(.{ .symbol = .{
         .symbol = symbol,
         .byte_start = write_start,
         .byte_end = write_end,
-    } }, .parents = .{ .left = expr_node, .right = .none }, .source = node });
+    } }, &.{.withParent(expr_node, .a, (write_end - write_start) * 8)}, node);
+    _ = store_node; // autofix
 
-    // TODO: Store `block_start` in current scope
-    ana.graph.refresh();
-    var i: usize = ana.graph.list.len;
-    while (true) {
-        if (i == 0) break;
-        i -= 1;
+    // // TODO: Store `block_start` in current scope
+    // ana.graph.refresh();
+    // var i: usize = ana.graph.list.len;
+    // while (true) {
+    //     if (i == 0) break;
+    //     i -= 1;
 
-        if (ana.graph.slice.tags[i] == .block_start) {
-            try store_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .right);
-            break;
-        }
-    }
+    //     if (ana.graph.slice.tags[i] == .block_start) {
+    //         try store_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .right);
+    //         break;
+    //     }
+    // }
 
     // const assign_idx = ana.graph.items.len;
     // try ana.emit(.{ .assign_global = undefined }, node);

@@ -441,16 +441,6 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     try analyzer.process();
     try SirIter.reduce(sema, &analyzer.graph);
 
-    const ast = &module.get(sema).ast;
-    var queue: std.ArrayListUnmanaged(@import("sema/SemanticIr.zig").Index) = .empty;
-    defer queue.deinit(sema.allocator);
-    std.log.debug("SIR for {}", .{ast.parseSymbolLocation(ast.nodeToken(symbol.getCommon(sema).node).next())});
-    analyzer.graph.refresh();
-    var iter = analyzer.graph.traverseRootsIterator(&queue, .@"return", &.{});
-    while (try iter.next(sema.allocator)) |index| {
-        std.log.debug(" - {}", .{index.getData(&analyzer.graph)});
-    }
-
     const fn_sym = symbol.getFn(sema);
     // fn_sym.calling_convention = analyzer.calling_conv;
     // fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
@@ -727,7 +717,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
                 }
             }
 
-            return .{ try graph.create(sema.allocator, .{ .data = .{ .value = value }, .source = node }), .comptime_integer };
+            return .{ try graph.create(sema.allocator, .{ .value = value }, &.{}, node), .comptime_integer };
         },
         .expr_ident => {
             const symbol_ident = ast.nodeToken(node);
@@ -753,21 +743,20 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
             const read_start = 0;
             const read_end = source_type.byteSize(sema);
 
-            const load_node = try graph.create(sema.allocator, .{ .data = .{ .symbol = .{
-                .symbol = symbol,
-                .byte_start = 0,
-                .byte_end = source_type.byteSize(sema),
-            } }, .source = node });
-
             // Add dependency on previous `symbol` store
             graph.refresh();
             var i: usize = graph.list.len - 1;
-            while (graph.slice.tags[i] != .block_start) : (i -= 1) {
+            const store_node: Sir.Index = while (graph.slice.tags[i] != .block_start) : (i -= 1) {
                 const index: Sir.Index = .cast(i);
 
-                // Identify assignment
-                if (index.getTag(graph) != .symbol or index.getParents(graph).left == .none) {
-                    continue;
+                // Check if it's an assignment (has `block_start` parent)
+                var it = index.iterateParents(graph);
+                while (it.next()) |edge| {
+                    if (edge.parent.getTag(graph) == .block_start) {
+                        break; // Found assignment
+                    }
+                } else {
+                    continue; // Not an assignment
                 }
 
                 const data = index.getData(graph).symbol;
@@ -776,10 +765,15 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
                         data.byte_end > read_start and data.byte_end <= read_end or
                         data.byte_start <= read_start and data.byte_end >= read_end))
                 {
-                    load_node.getParents(graph).right = index;
-                    break;
+                    break index;
                 }
-            }
+            } else .none;
+
+            const load_node = try graph.create(sema.allocator, .{ .symbol = .{
+                .symbol = symbol,
+                .byte_start = 0,
+                .byte_end = source_type.byteSize(sema),
+            } }, if (store_node != .none) &.{.withParent(store_node, .none, (read_end - read_start) * 8)} else &.{}, node);
 
             return .{ load_node, .comptime_integer };
         },

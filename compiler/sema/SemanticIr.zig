@@ -18,7 +18,7 @@ const TypeExpression = @import("type_expression.zig").TypeExpression;
 const BuiltinVar = @import("BuiltinVar.zig");
 const BuiltinFn = @import("BuiltinFn.zig");
 
-const SemanticIr = @This();
+const Sir = @This();
 
 pub const Index = enum(u16) {
     none = std.math.maxInt(u16),
@@ -45,53 +45,48 @@ pub const Index = enum(u16) {
             inline else => |t| @unionInit(Data.Packed, @tagName(t), @field(bare, @tagName(t))),
         }, graph.extra);
     }
-    pub fn getParents(index: Index, graph: *const Graph) *Relationship {
-        return &graph.slice.parents[@intFromEnum(index)];
-    }
-    pub fn getChildren(index: Index, graph: *const Graph) *Relationship {
-        return &graph.slice.children[@intFromEnum(index)];
-    }
     pub fn getSourceNode(index: Index, graph: *const Graph) Node.Index {
         return graph.slice.sources[@intFromEnum(index)];
     }
 
-    /// Adds the target node as a parent to the child node
-    pub fn addParent(child: Index, allocator: std.mem.Allocator, graph: *Graph, parent: Index, location: Graph.RelationshipLocation) !void {
-        try graph.addChild(allocator, parent, child, location);
-        try graph.addParent(allocator, child, parent, location);
+    /// Iterates all edges of the current node
+    pub fn iterateEdges(index: Index, graph: *Graph) Graph.EdgeIterator(true, true) {
+        return graph.iterateEdges(index);
     }
-    /// Adds the target node as a child to the parent node
-    pub fn addChild(parent: Index, allocator: std.mem.Allocator, graph: *Graph, child: Index, location: Graph.RelationshipLocation) !void {
-        try graph.addChild(allocator, parent, child, location);
-        try graph.addParent(allocator, child, parent, location);
+    /// Iterates all parent-edges of the current node
+    pub fn iterateChildren(index: Index, graph: *Graph) Graph.EdgeIterator(true, false) {
+        return graph.iterateChildren(index);
+    }
+    /// Iterates all parent-edges of the current node
+    pub fn iterateParents(index: Index, graph: *Graph) Graph.EdgeIterator(false, true) {
+        return graph.iterateParents(index);
     }
 
-    /// Iterator which traverses all direct parents of this node
+    /// Iterativly traverses all children of the root node, with an optional filter and stop tags
     /// If new nodes are created while iterating, `graph.refresh()` must be called.
     /// The provided `queue` should be reused often, to avoid allocations.
     ///
-    /// Only one iterator may be active at a time!
-    pub fn iterateParents(child: Index, allocator: std.mem.Allocator, graph: *Graph, queue: *std.ArrayListUnmanaged(Index)) !Graph.RelationshipIterator(.parents) {
-        return graph.iterateParents(allocator, queue, child);
+    /// Only one traversing iterator may be active at a time!
+    pub fn traverseChildren(index: Index, allocator: std.mem.Allocator, graph: *Graph, queue: *std.ArrayListUnmanaged(Index), comptime filter_tags: ?[]const std.meta.Tag(Data), comptime stop_tags: []const std.meta.Tag(Data)) !Graph.TraverseIterator(.child, filter_tags, stop_tags) {
+        return graph.traverseChildren(allocator, queue, index, filter_tags, stop_tags);
     }
-    /// Iterator which traverses all direct children of this node
+    /// Iterativly traverses all parents of the root node, with an optional filter and stop tags
     /// If new nodes are created while iterating, `graph.refresh()` must be called.
     /// The provided `queue` should be reused often, to avoid allocations.
     ///
-    /// Only one iterator may be active at a time!
-    pub fn iterateChildren(parent: Index, allocator: std.mem.Allocator, graph: *Graph, queue: *std.ArrayListUnmanaged(Index)) !Graph.RelationshipIterator(.children) {
-        return graph.iterateChildren(allocator, queue, parent);
+    /// Only one traversing iterator may be active at a time!
+    pub fn traverseParents(index: Index, allocator: std.mem.Allocator, graph: *Graph, queue: *std.ArrayListUnmanaged(Index), comptime filter_tags: ?[]const std.meta.Tag(Data), comptime stop_tags: []const std.meta.Tag(Data)) !Graph.TraverseIterator(.parent, filter_tags, stop_tags) {
+        return graph.traverseParents(allocator, queue, index, filter_tags, stop_tags);
     }
 };
+
+/// Data associated with the current node type
 pub const Data = union(enum) {
     /// Nodes which indicate the end of an SSA block
     pub const block_ends: []const std.meta.Tag(Data) = &.{.@"return"};
 
     /// Indicates the start of a Single-Static-Assignment (SSA) block
     block_start: void,
-
-    /// Merges up to 6 dependencies into a single dependency
-    merge: [4]Index,
 
     /// Compile-time known immediate value
     /// Cannot have dependencies
@@ -132,7 +127,8 @@ pub const Data = union(enum) {
     pub fn pack(data: Data, allocator: std.mem.Allocator, extra: *Graph.ExtraList) !Packed {
         switch (data) {
             .value => |info| {
-                // extra.appendUnalignedSlice(allocator, items)
+                try Graph.alignExtraList(extra, allocator, @alignOf(std.math.big.Limb));
+
                 const index: u32 = @intCast(extra.items.len);
                 try extra.appendSlice(allocator, std.mem.sliceAsBytes(info.limbs));
                 return .{ .value = .{
@@ -150,7 +146,6 @@ pub const Data = union(enum) {
     /// Packed representation, storing excess data into `graph.extra`
     pub const Packed = union(std.meta.Tag(Data)) {
         block_start: void,
-        merge: [4]Index,
         value: struct {
             positive: bool,
             limbs_len: u16,
@@ -161,20 +156,97 @@ pub const Data = union(enum) {
         invalid: void,
     };
 };
-pub const Relationship = packed struct(u32) {
-    left: Index = .none,
-    right: Index = .none,
+
+/// Edge-connection between a parent and child node
+pub const Edge = packed struct(u64) {
+    pub const Index = enum(u32) {
+        const child_flag: u32 = 1 << 31;
+        const extra_flag: u32 = 1 << 30;
+
+        none = std.math.maxInt(u32),
+        _,
+
+        /// Helper function to cast a generic number to a `Edge.Index`
+        pub inline fn cast(x: anytype) Edge.Index {
+            return switch (@typeInfo(@TypeOf(x))) {
+                .null => .none,
+                .int, .comptime_int => @enumFromInt(@as(u32, @intCast(x))),
+                .optional => if (x) |value| @enumFromInt(@as(u32, @intCast(value))) else .none,
+                else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a Edge.Index"),
+            };
+        }
+
+        /// Resolves the `Edge` of this index
+        pub fn get(index: Edge.Index, extra: Graph.ExtraList) *Edge {
+            const idx = index.getIndex();
+            return @alignCast(std.mem.bytesAsValue(Edge, extra.items[idx..(idx + @sizeOf(Edge))]));
+        }
+        /// Gets the actual stored index
+        pub fn getIndex(index: Edge.Index) u32 {
+            return @intFromEnum(index) & ~(child_flag | extra_flag);
+        }
+
+        /// Marks whether this edges points to a child node
+        pub fn markChild(index: *Edge.Index, is_child: bool) void {
+            const idx_ptr: *u32 = @ptrCast(index);
+            if (is_child) {
+                idx_ptr.* |= child_flag;
+            } else {
+                idx_ptr.* &= ~child_flag;
+            }
+        }
+        /// Check if this edges points to a child node
+        pub fn isChild(index: Edge.Index) bool {
+            const idx: u32 = @intFromEnum(index);
+            return idx & child_flag != 0;
+        }
+
+        /// Marks whether this index pointer to further indicies in `graph.extra`
+        pub fn markExtra(index: *Edge.Index, is_extra: bool) void {
+            const idx_ptr: *u32 = @ptrCast(index);
+            if (is_extra) {
+                idx_ptr.* |= extra_flag;
+            } else {
+                idx_ptr.* &= ~extra_flag;
+            }
+        }
+        /// Check if this index pointer to further indicies in `graph.extra`
+        pub fn isExtra(index: Edge.Index) bool {
+            const idx: u32 = @intFromEnum(index);
+            return idx & extra_flag != 0;
+        }
+    };
+
+    child: Sir.Index,
+    parent: Sir.Index,
+
+    /// Intermediate register which performs this edge operation
+    intermediate_register: builtin_module.CpuRegister,
+
+    _: u8 = 0,
+
+    /// Bit-size of this connection
+    bit_size: u16,
+
+    /// Connections the to-be-added node with the parent
+    pub fn withParent(parent: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_size: u16) Edge {
+        return .{
+            .parent = parent,
+            .child = .none,
+            .intermediate_register = intermediate_register,
+            .bit_size = bit_size,
+        };
+    }
+    /// Connections the to-be-added node with the child
+    pub fn withChild(child: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_size: u16) Edge {
+        return .{
+            .parent = .none,
+            .child = child,
+            .intermediate_register = intermediate_register,
+            .bit_size = bit_size,
+        };
+    }
 };
-
-/// Data associated with the current node type
-data: Data,
-/// Parent connections for this node
-parents: Relationship = .{},
-/// Child connections for this node
-children: Relationship = .{},
-
-/// AST node which is responsible for this graph node
-source: Node.Index,
 
 /// Efficent graph for storing SIR nodes
 pub const Graph = b: {
@@ -194,10 +266,20 @@ pub const Graph = b: {
 
     break :b struct {
         const Self = @This();
+
+        /// Empty, ready-to-use Semantic IR graph
         pub const empty: Self = .{
             .list = .empty,
             .extra = .empty,
         };
+
+        /// Buffer for storing arbitrary extra data, associated with nodes
+        pub const ExtraList = std.ArrayListAlignedUnmanaged(u8, @alignOf(usize));
+        pub const ExtraIndex = u32;
+
+        /// References to edges, which are connected to this node
+        /// If more than 4 edges are required, they are stored in `extra`
+        const Edges = [4]Edge.Index;
 
         /// Additional data for each node, to avoid extra allocators for iterators
         const IteratorData = packed struct(u8) {
@@ -205,24 +287,22 @@ pub const Graph = b: {
             visited_2: bool = false,
             _: u6 = 0,
         };
-        const List = std.MultiArrayList(struct {
+
+        const ListElement = struct {
             tag: Tag,
             data: Bare,
-
-            parents: Relationship,
-            children: Relationship,
+            edges: Edges,
 
             iter_data: IteratorData = .{},
 
             source: Node.Index,
-        });
-        pub const ExtraList = std.ArrayListAlignedUnmanaged(u8, @alignOf(usize));
+        };
+        const List = std.MultiArrayList(ListElement);
+
         const ComputedSlice = struct {
             tags: []Tag,
             data: []Bare,
-
-            parents: []Relationship,
-            children: []Relationship,
+            edges: []Edges,
 
             iter_data: []IteratorData,
 
@@ -239,580 +319,318 @@ pub const Graph = b: {
         }
 
         /// Creates a new node in the graph
-        pub fn create(graph: *Self, allocator: std.mem.Allocator, node: SemanticIr) !Index {
-            const node_index: Index = @enumFromInt(@as(std.meta.Tag(SemanticIr.Index), @intCast(graph.list.len)));
-
-            const tag = std.meta.activeTag(node.data);
-            const packed_data = try node.data.pack(allocator, &graph.extra);
-
-            try graph.list.append(allocator, .{
-                .tag = tag,
-                .data = switch (tag) {
-                    inline else => |t| @unionInit(Bare, @tagName(t), @field(packed_data, @tagName(t))),
-                },
-                .parents = node.parents,
-                .children = node.children,
-                .source = node.source,
-            });
+        pub fn create(graph: *Self, allocator: std.mem.Allocator, data: Data, edges: []const Edge, node: Node.Index) !Index {
+            const index: Index = .cast(graph.list.len);
+            try graph.list.append(allocator, try graph.createRaw(allocator, index, data, edges, node));
             graph.slice = undefined;
-            return node_index;
-        }
-        /// Creates a new node in the graph and ensures `graph.slice` is valid
-        pub fn createRefresh(graph: *Self, allocator: std.mem.Allocator, node: SemanticIr) !Index {
-            const will_reallocate = graph.list.capacity == graph.list.len;
-            const index = graph.create(allocator, node);
-            if (runtime_safty or will_reallocate) {
-                graph.refresh();
-            }
             return index;
         }
-        /// Replaces the target with a new node, keeping depdendency connections
-        pub fn replace(graph: *Self, allocator: std.mem.Allocator, index: SemanticIr.Index, node: SemanticIr) !void {
-            const tag = std.meta.activeTag(node.data);
-            const packed_data = try node.data.pack(allocator, &graph.extra);
+        /// Creates a new node in the graph and ensures `graph.slice` is valid
+        pub fn createRefresh(graph: *Self, allocator: std.mem.Allocator, data: Data, edges: []const Edge, node: Node.Index) !Index {
+            const will_reallocate = graph.list.capacity == graph.list.len;
 
-            graph.list.set(@intFromEnum(index), .{
+            const index: Index = .cast(graph.list.len);
+            try graph.list.append(allocator, try graph.createRaw(allocator, index, data, edges, node));
+
+            if (will_reallocate) {
+                graph.refresh();
+            }
+
+            return index;
+        }
+        fn createRaw(graph: *Self, allocator: std.mem.Allocator, index: Index, data: Data, edges: []const Edge, node: Node.Index) !ListElement {
+            const tag = std.meta.activeTag(data);
+            const packed_data = try data.pack(allocator, &graph.extra);
+
+            try alignExtraList(&graph.extra, allocator, @alignOf(Edge));
+            const edge_index: ExtraIndex = @intCast(graph.extra.items.len);
+            try graph.extra.appendSlice(allocator, std.mem.sliceAsBytes(edges));
+
+            // Fix-up edges (one connection **must** be `.none`)
+            for (std.mem.bytesAsSlice(Edge, graph.extra.items[edge_index..(edge_index + edges.len * @sizeOf(Edge))])) |*edge| {
+                if (edge.parent == .none and edge.child != .none) {
+                    edge.parent = index;
+                } else if (edge.child == .none and edge.parent != .none) {
+                    edge.child = index;
+                } else {
+                    unreachable;
+                }
+            }
+
+            var edge_indices: Edges = @splat(.none);
+            if (edges.len <= edge_indices.len) {
+                for (edges, edge_indices[0..edges.len], 0..) |edge, *edge_idx, idx| {
+                    edge_idx.* = .cast(edge_index + idx * @sizeOf(Edge));
+                    edge_idx.markChild(edge.parent == index);
+                }
+            } else {
+                // Write additional edge indices into `extra`
+                const extra_index: ExtraIndex = @intCast(graph.extra.items.len);
+                try graph.extra.ensureUnusedCapacity(allocator, (edges.len - edge_indices.len) * @sizeOf(Edge.Index));
+                for (edges[edge_indices.len..], edge_indices.len..) |edge, idx| {
+                    var edge_idx: Edge.Index = .cast(edge_index + idx * @sizeOf(Edge));
+                    edge_idx.markChild(edge.parent == index);
+
+                    graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
+                }
+
+                edge_indices[edge_indices.len - 1] = .cast(extra_index);
+                edge_indices[edge_indices.len - 1].markExtra(true);
+                edge_indices[edge_indices.len - 2] = .cast(edges.len - edge_indices.len);
+                edge_indices[edge_indices.len - 2].markExtra(true);
+
+                for (edges[0 .. edge_indices.len - 2], edge_indices[0 .. edge_indices.len - 2], 0..) |edge, *edge_idx, idx| {
+                    edge_idx.* = .cast(edge_index + idx * @sizeOf(Edge));
+                    edge_idx.markChild(edge.parent == index);
+                }
+            }
+
+            return .{
                 .tag = tag,
                 .data = switch (tag) {
                     inline else => |t| @unionInit(Bare, @tagName(t), @field(packed_data, @tagName(t))),
                 },
-                .parents = node.parents,
-                .children = node.children,
-                .source = node.source,
-            });
+                .edges = edge_indices,
+                .source = node,
+            };
         }
-        /// Removes the node from the graph
-        /// Dependency connections need to be updated manually!
-        pub fn remove(graph: *Self, index: SemanticIr.Index) void {
+
+        /// Replaces the target with a new node, keeping edge connections
+        pub fn replace(graph: *Self, allocator: std.mem.Allocator, index: Index, data: Data, edges: []const Edge, node: Node.Index) !void {
+            graph.list.set(@intFromEnum(index), try graph.createRaw(allocator, index, data, edges, node));
+        }
+
+        /// Removes the node from the graph, including all edges pointing to/from this node
+        pub fn remove(graph: *Self, index: Index) void {
             graph.refresh();
             graph.slice.tags[@intFromEnum(index)] = .invalid;
             if (runtime_safty) {
                 graph.slice.data[@intFromEnum(index)] = .{ .invalid = {} };
             }
-        }
 
-        pub const RelationshipLocation = enum { left, right, both };
-
-        /// Adds the target node as a parent to the child node
-        pub fn addParent(graph: *Graph, allocator: std.mem.Allocator, child: Index, parent: Index, location: RelationshipLocation) std.mem.Allocator.Error!void {
-            var parents = child.getParents(graph);
-
-            if (child.getTag(graph) == .merge) {
-                const data = &graph.slice.data[@intFromEnum(child)].merge;
-
-                // Insert into free slot
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(parents, field.name) == .none) {
-                        @field(parents, field.name) = parent;
-                        return;
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.* == .none) {
-                        merge_slot.* = parent;
-                        return;
-                    }
-                }
-
-                // Try forwarding to nested `merge` if they have space
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(parents, field.name).getTag(graph) == .merge and @field(parents, field.name).getData(graph).merge[data.len - 1] == .none) {
-                        return graph.addParent(allocator, @field(parents, field.name), parent, undefined);
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.getTag(graph) == .merge and merge_slot.getData(graph).merge[data.len - 1] == .none) {
-                        return graph.addParent(allocator, merge_slot.*, parent, undefined);
-                    }
-                }
-
-                // Create new `merge` node if not already
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(parents, field.name).getTag(graph) != .merge) {
-                        @field(parents, field.name) = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, @field(parents, field.name), parent, .none } }, .source = child.getSourceNode(graph) });
-                        return;
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.getTag(graph) != .merge) {
-                        merge_slot.* = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, merge_slot.*, parent, .none } }, .source = child.getSourceNode(graph) });
-                        return;
-                    }
-                }
-
-                // Everything is occuped -> forward to next `merge`
-                std.debug.assert(parents.left.getTag(graph) == .merge);
-                return graph.addParent(allocator, parents.left, parent, undefined);
-            }
-
-            switch (location) {
-                .left => {
-                    if (parents.left == .none) {
-                        parents.left = parent;
-                    } else if (parents.left.getTag(graph) == .merge) {
-                        return graph.addParent(allocator, parents.left, parent, undefined);
-                    } else {
-                        parents.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.left, parent, .none } }, .source = child.getSourceNode(graph) });
-                    }
-                },
-                .right => {
-                    if (parents.right == .none) {
-                        parents.right = parent;
-                    } else if (parents.right.getTag(graph) == .merge) {
-                        return graph.addParent(allocator, parents.right, parent, undefined);
-                    } else {
-                        parents.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, parents.right, parent, .none } }, .source = child.getSourceNode(graph) });
-                    }
-                },
-                .both => {
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(parents, field.name) == .none) {
-                            @field(parents, field.name) = parent;
-                            return;
-                        }
-                    }
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(parents, field.name).getTag(graph) == .merge and @field(parents, field.name).getData(graph).merge[@field(parents, field.name).getData(graph).merge.len - 1] == .none) {
-                            return graph.addParent(allocator, @field(parents, field.name), parent, undefined);
-                        }
-                    }
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(parents, field.name).getTag(graph) != .merge) {
-                            @field(parents, field.name) = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, @field(parents, field.name), parent, .none } }, .source = child.getSourceNode(graph) });
-                            return;
-                        }
-                    }
-
-                    std.debug.assert(parents.left.getTag(graph) == .merge);
-                    return graph.addParent(allocator, parents.left, parent, undefined);
-                },
+            var it = graph.iterateEdges(index);
+            while (it.next()) |edge| {
+                graph.removeEdge(edge);
             }
         }
 
-        /// Adds the target node as a child to the parent node
-        pub fn addChild(graph: *Graph, allocator: std.mem.Allocator, parent: Index, child: Index, location: RelationshipLocation) std.mem.Allocator.Error!void {
-            var children = parent.getChildren(graph);
-
-            if (parent.getTag(graph) == .merge) {
-                const data = &graph.slice.data[@intFromEnum(parent)].merge;
-
-                // Insert into free slot
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(children, field.name) == .none) {
-                        @field(children, field.name) = child;
-                        return;
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.* == .none) {
-                        merge_slot.* = child;
-                        return;
-                    }
-                }
-
-                // Try forwarding to nested `merge` if they have space
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(children, field.name).getTag(graph) == .merge and @field(children, field.name).getData(graph).merge[data.len - 1] == .none) {
-                        return graph.addChild(allocator, @field(children, field.name), child, undefined);
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.getTag(graph) == .merge and merge_slot.getData(graph).merge[data.len - 1] == .none) {
-                        return graph.addChild(allocator, merge_slot.*, child, undefined);
-                    }
-                }
-
-                // Create new `merge` node if not already
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(children, field.name).getTag(graph) != .merge) {
-                        @field(children, field.name) = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, @field(children, field.name), child, .none } }, .source = parent.getSourceNode(graph) });
-                        return;
-                    }
-                }
-                for (data) |*merge_slot| {
-                    if (merge_slot.getTag(graph) != .merge) {
-                        merge_slot.* = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, merge_slot.*, child, .none } }, .source = parent.getSourceNode(graph) });
-                        return;
-                    }
-                }
-
-                // Everything is occuped -> forward to next `merge`
-                std.debug.assert(children.left.getTag(graph) == .merge);
-                return graph.addChild(allocator, children.left, child, undefined);
-            }
-
-            switch (location) {
-                .left => {
-                    if (children.left == .none) {
-                        children.left = child;
-                    } else if (children.left.getTag(graph) == .merge) {
-                        return graph.addChild(allocator, children.left, child, undefined);
-                    } else {
-                        children.left = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, children.left, child, .none } }, .source = parent.getSourceNode(graph) });
-                    }
-                },
-                .right => {
-                    if (children.right == .none) {
-                        children.right = child;
-                    } else if (children.right.getTag(graph) == .merge) {
-                        return graph.addChild(allocator, children.right, child, undefined);
-                    } else {
-                        children.right = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, children.right, child, .none } }, .source = parent.getSourceNode(graph) });
-                    }
-                },
-                .both => {
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(children, field.name) == .none) {
-                            @field(children, field.name) = child;
-                            return;
-                        }
-                    }
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(children, field.name).getTag(graph) == .merge and @field(children, field.name).getData(graph).merge[@field(children, field.name).getData(graph).merge.len - 1] == .none) {
-                            return graph.addChild(allocator, @field(children, field.name), child, undefined);
-                        }
-                    }
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(children, field.name).getTag(graph) != .merge) {
-                            @field(children, field.name) = try graph.createRefresh(allocator, .{ .data = .{ .merge = .{ .none, @field(children, field.name), child, .none } }, .source = parent.getSourceNode(graph) });
-                            return;
-                        }
-                    }
-
-                    std.debug.assert(children.left.getTag(graph) == .merge);
-                    return graph.addChild(allocator, children.left, child, undefined);
-                },
-            }
+        /// Adds a new edge connections between two nodes
+        pub fn addConnection(graph: *Self, allocator: std.mem.Allocator, child: Index, parent: Index, intermedite_register: builtin_module.CpuRegister, bit_size: u16) !void {
+            return graph.addEdge(allocator, .{
+                .child = child,
+                .parent = parent,
+                .intermediate_register = intermedite_register,
+                .bit_size = bit_size,
+            });
         }
+        /// Adds a new edge connections between two nodes
+        pub fn addEdge(graph: *Self, allocator: std.mem.Allocator, edge: Edge) !void {
+            try alignExtraList(&graph.extra, allocator, @alignOf(Edge));
+            const edge_index: ExtraIndex = @intCast(graph.extra.items.len);
+            try graph.extra.appendSlice(allocator, std.mem.asBytes(&edge));
 
-        pub fn RelationshipIterator(comptime relationship_direction: enum { parents, children }) type {
-            return struct {
-                const Iterator = @This();
-
-                slice: *const ComputedSlice,
-                queue: *std.ArrayListUnmanaged(Index),
-
-                pub fn next(iter: *Iterator, allocator: std.mem.Allocator) !?Index {
-                    while (iter.queue.pop()) |current| {
-                        if (iter.slice.tags[@intFromEnum(current)] != .merge) {
-                            return current;
-                        }
-
-                        const relationship = @field(iter.slice, @tagName(relationship_direction))[@intFromEnum(current)];
-                        if (relationship.left != .none and !iter.slice.iter_data[@intFromEnum(relationship.left)].visited) {
-                            iter.slice.iter_data[@intFromEnum(relationship.left)].visited = true;
-                            try iter.queue.append(allocator, relationship.left);
-                        }
-                        if (relationship.right != .none and !iter.slice.iter_data[@intFromEnum(relationship.right)].visited) {
-                            iter.slice.iter_data[@intFromEnum(relationship.right)].visited = true;
-                            try iter.queue.append(allocator, relationship.right);
-                        }
-
-                        const data = iter.slice.data[@intFromEnum(current)].merge;
-                        for (data) |connection| {
-                            if (connection != .none and !iter.slice.iter_data[@intFromEnum(connection)].visited) {
-                                iter.slice.iter_data[@intFromEnum(connection)].visited = true;
-                                try iter.queue.append(allocator, connection);
-                            }
-                        }
-                    }
-
-                    return null;
-                }
-            };
-        }
-
-        /// Iterator which traverses all direct parents of this node
-        /// If new nodes are created while iterating, `graph.refresh()` must be called.
-        /// The provided `queue` should be reused often, to avoid allocations.
-        ///
-        /// Only one iterator may be active at a time!
-        pub fn iterateParents(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), index: Index) !RelationshipIterator(.parents) {
-            queue.clearRetainingCapacity();
-
-            const parents = index.getParents(graph);
-            inline for (std.meta.fields(Relationship)) |field| {
-                if (@field(parents, field.name) != .none) {
-                    try queue.append(allocator, @field(parents, field.name));
-                }
-            }
-
-            for (graph.slice.iter_data) |*data| {
-                data.visited = false;
-            }
-
-            return .{
-                .slice = &graph.slice,
-                .queue = queue,
-            };
-        }
-        /// Iterator which traverses all direct children of this node
-        /// If new nodes are created while iterating, `graph.refresh()` must be called.
-        /// The provided `queue` should be reused often, to avoid allocations.
-        ///
-        /// Only one iterator may be active at a time!
-        pub fn iterateChildren(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), index: Index) !RelationshipIterator(.children) {
-            queue.clearRetainingCapacity();
-
-            const children = index.getChildren(graph);
-            inline for (std.meta.fields(Relationship)) |field| {
-                if (@field(children, field.name) != .none) {
-                    try queue.append(allocator, @field(children, field.name));
-                }
-            }
-
-            for (graph.slice.iter_data) |*data| {
-                data.visited = false;
-            }
-
-            return .{
-                .slice = &graph.slice,
-                .queue = queue,
-            };
-        }
-
-        /// Relocates all parents from the child node to another child node
-        pub fn relocateParents(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), child_from: Index, child_to: Index, location: RelationshipLocation) !void {
-            return graph.relocateRelationship(allocator, queue, child_from, child_to, location, .parents);
-        }
-
-        /// Relocates all children from the parent node to another parent node
-        pub fn relocateChildren(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), parent_from: Index, parent_to: Index, location: RelationshipLocation) !void {
-            return graph.relocateRelationship(allocator, queue, parent_from, parent_to, location, .children);
-        }
-
-        fn relocateRelationship(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), from: Index, to: Index, location: RelationshipLocation, comptime direction: enum { parents, children }) !void {
-            queue.clearRetainingCapacity();
-
-            // Iterate relationship
-            const root_relationship = switch (direction) {
-                .parents => from.getParents(graph),
-                .children => from.getChildren(graph),
-            };
-            inline for (std.meta.fields(Relationship)) |field| {
-                if (@field(root_relationship, field.name) != .none) {
-                    if (@field(root_relationship, field.name) == to) {
-                        @field(root_relationship, field.name) = .none;
-                    } else {
-                        try queue.append(allocator, @field(root_relationship, field.name));
-                    }
-                }
-            }
-
-            for (graph.slice.iter_data) |*data| {
-                data.visited = false;
-                data.visited_2 = false;
-            }
-
-            rel_loop: while (queue.pop()) |current_rel| {
-                const index = b: {
-                    if (current_rel.getTag(graph) != .merge) {
-                        break :b current_rel;
-                    }
-
-                    const relationship = switch (direction) {
-                        .parents => current_rel.getChildren(graph),
-                        .children => current_rel.getParents(graph),
-                    };
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(relationship, field.name) != .none and !graph.slice.iter_data[@intFromEnum(@field(relationship, field.name))].visited) {
-                            graph.slice.iter_data[@intFromEnum(@field(relationship, field.name))].visited = true;
-                            if (@field(relationship, field.name) == to) {
-                                @field(relationship, field.name) = .none;
-                            } else {
-                                try queue.append(allocator, @field(relationship, field.name));
-                            }
-                        }
-                    }
-
-                    const data = &graph.slice.data[@intFromEnum(current_rel)].merge;
-                    for (data) |*connection| {
-                        if (connection.* != .none and !graph.slice.iter_data[@intFromEnum(connection.*)].visited) {
-                            graph.slice.iter_data[@intFromEnum(connection.*)].visited = true;
-                            if (connection.* == to) {
-                                connection.* = .none;
-                            } else {
-                                try queue.append(allocator, connection.*);
-                            }
-                        }
-                    }
-
-                    continue :rel_loop;
-                };
-
-                // Redirect path to inverse relationship
-                const start_len = queue.items.len;
-
-                const root_inv_relationship = switch (direction) {
-                    .parents => index.getChildren(graph),
-                    .children => index.getParents(graph),
-                };
-                inline for (std.meta.fields(Relationship)) |field| {
-                    if (@field(root_inv_relationship, field.name) != .none and !graph.slice.iter_data[@intFromEnum(@field(root_inv_relationship, field.name))].visited_2) {
-                        graph.slice.iter_data[@intFromEnum(@field(root_inv_relationship, field.name))].visited_2 = true;
-                        if (@field(root_inv_relationship, field.name) == from) {
-                            @field(root_inv_relationship, field.name) = to;
-                        } else if (@field(root_inv_relationship, field.name).getTag(graph) == .merge) {
-                            try queue.append(allocator, @field(root_inv_relationship, field.name));
-                        }
-                    }
-                }
-
-                while (queue.items.len > start_len) {
-                    const current_inv_rel = queue.pop().?;
-                    std.debug.assert(current_inv_rel.getTag(graph) == .merge);
-
-                    const inv_relationship = switch (direction) {
-                        .parents => current_inv_rel.getChildren(graph),
-                        .children => current_inv_rel.getParents(graph),
-                    };
-                    inline for (std.meta.fields(Relationship)) |field| {
-                        if (@field(inv_relationship, field.name) != .none and !graph.slice.iter_data[@intFromEnum(@field(inv_relationship, field.name))].visited_2) {
-                            graph.slice.iter_data[@intFromEnum(@field(inv_relationship, field.name))].visited_2 = true;
-                            if (@field(root_inv_relationship, field.name) == from) {
-                                @field(root_inv_relationship, field.name) = to;
-                            } else if (@field(inv_relationship, field.name).getTag(graph) == .merge) {
-                                try queue.append(allocator, @field(root_inv_relationship, field.name));
-                            }
-                        }
-                    }
-
-                    const data = &graph.slice.data[@intFromEnum(current_inv_rel)].merge;
-                    for (data) |*connection| {
-                        if (connection.* != .none and !graph.slice.iter_data[@intFromEnum(connection.*)].visited_2) {
-                            graph.slice.iter_data[@intFromEnum(connection.*)].visited_2 = true;
-                            if (connection.* == from) {
-                                connection.* = to;
-                            } else if (connection.getTag(graph) == .merge) {
-                                try queue.append(allocator, connection.*);
-                            }
-                        }
-                    }
-                }
-
-                // Migrate relationships
-                switch (direction) {
-                    .parents => try graph.addParent(allocator, to, index, location),
-                    .children => try graph.addChild(allocator, to, index, location),
-                }
-            }
-        }
-
-        pub fn TraverseIterator(comptime filter_tags: []const Tag) type {
-            return struct {
-                const Iterator = @This();
-
-                slice: *const ComputedSlice,
-                queue: *std.ArrayListUnmanaged(Index),
-
-                pub fn next(iter: *Iterator, allocator: std.mem.Allocator) !?Index {
-                    // Traverse parents
-                    while (iter.queue.pop()) |current| {
-                        const parents = iter.slice.parents[@intFromEnum(current)];
-                        if (parents.left != .none and !iter.slice.iter_data[@intFromEnum(parents.left)].visited) {
-                            iter.slice.iter_data[@intFromEnum(parents.left)].visited = true;
-                            try iter.queue.append(allocator, parents.left);
-                        }
-                        if (parents.right != .none and !iter.slice.iter_data[@intFromEnum(parents.right)].visited) {
-                            iter.slice.iter_data[@intFromEnum(parents.right)].visited = true;
-                            try iter.queue.append(allocator, parents.right);
-                        }
-
-                        if (iter.slice.tags[@intFromEnum(current)] == .merge) {
-                            const data = iter.slice.data[@intFromEnum(current)].merge;
-                            for (data) |parent| {
-                                if (parent != .none and !iter.slice.iter_data[@intFromEnum(parent)].visited) {
-                                    iter.slice.iter_data[@intFromEnum(parent)].visited = true;
-                                    try iter.queue.append(allocator, parent);
-                                }
-                            }
-                        }
-
-                        if (filter_tags.len == 0) {
-                            return current;
-                        } else {
-                            inline for (filter_tags) |filter| {
-                                if (iter.slice.tags[@intFromEnum(current)] == filter) {
-                                    return current;
-                                }
-                            }
-                        }
-                    }
-
-                    return null;
-                }
-            };
-        }
-
-        /// Iterator which travers the graph from a given root node through their parents, with an optional tag filter.
-        /// If new nodes are created while iterating, `graph.refresh()` must be called.
-        /// The provided `queue` should be reused often, to avoid allocations.
-        ///
-        /// Only one iterator may be active at a time!
-        pub fn traverseIterator(graph: *const Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), root: Index, comptime filter_tags: []const Tag) !TraverseIterator(filter_tags) {
-            queue.clearRetainingCapacity();
-            try queue.append(allocator, root);
-
-            for (graph.slice.iter_data) |*data| {
-                data.visited = false;
-            }
-
-            return .{
-                .slice = &graph.slice,
-                .queue = queue,
-            };
-        }
-
-        fn TraverseRootsIterator(comptime root_tag: Tag, comptime filter_tags: []const Tag) type {
-            return struct {
-                const Iterator = @This();
-
-                slice: *const ComputedSlice,
-                queue: *std.ArrayListUnmanaged(Index),
-                root_index: std.meta.Tag(Index),
-
-                pub fn next(iter: *Iterator, allocator: std.mem.Allocator) !?Index {
-                    // Search roots
-                    while (iter.queue.items.len == 0) {
-                        if (iter.root_index == 0) break;
-                        iter.root_index -= 1;
-
-                        if (iter.slice.tags[iter.root_index] == root_tag and !iter.slice.iter_data[iter.root_index].visited) {
-                            iter.slice.iter_data[iter.root_index].visited = true;
-                            try iter.queue.append(allocator, @enumFromInt(iter.root_index));
+            // Update edges
+            inline for (&.{ .child, .parent }) |relation| {
+                // TODO: Maybe iterate edges and replace removed ones?
+                const edges = &graph.slice.edges[@intCast(@field(edge, @tagName(relation)))];
+                if (edges[edges.len - 1] == .none) {
+                    // Free slot in node
+                    for (edges) |*edge_idx| {
+                        if (edge_idx.* == .none) {
+                            edge_idx.* = .cast(edge_index);
+                            edge_idx.markChild(relation == .parent);
                             break;
                         }
                     }
+                } else if (!edges[edges.len - 1].isExtra()) {
+                    // Need to migrate to `extra`
+                    std.debug.assert(!edges[edges.len - 2].isExtra());
 
-                    // Traverse parents
+                    const extra_index: ExtraIndex = @intCast(graph.extra.items.len);
+                    try graph.extra.ensureUnusedCapacity(allocator, 3 * @sizeOf(Edge.Index));
+                    for (edges[(edges.len - 2)..]) |edge_idx| {
+                        graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
+                    }
+
+                    var edge_idx: Edge.Index = .cast(edge_index + 2 * @sizeOf(Edge));
+                    edge_idx.markChild(relation == .parent);
+                    graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
+
+                    edges[edges.len - 1] = .cast(extra_index);
+                    edges[edges.len - 1].markExtra(true);
+                    edges[edges.len - 2] = .cast(3);
+                    edges[edges.len - 2].markExtra(true);
+                } else {
+                    // Need to expand `extra`
+                    std.debug.assert(edges[edges.len - 1].isExtra());
+                    std.debug.assert(edges[edges.len - 2].isExtra());
+
+                    const extra_index: ExtraIndex = edges[edges.len - 1].getIndex();
+                    const extra_length: ExtraIndex = edges[edges.len - 2].getIndex();
+                    try graph.extra.ensureUnusedCapacity(allocator, (extra_length + 1) * @sizeOf(Edge.Index));
+
+                    const new_extra_index: ExtraIndex = @intCast(graph.extra.items.len);
+                    @memcpy(graph.extra.items[new_extra_index..(new_extra_index + extra_length * @sizeOf(Edge.Index))], graph.extra.items[extra_index..(extra_index + extra_length * @sizeOf(Edge.Index))]);
+                    graph.extra.items.len += extra_length * @sizeOf(Edge.Index);
+
+                    var edge_idx: Edge.Index = .cast(edge_index + 2 * @sizeOf(Edge));
+                    edge_idx.markChild(relation == .parent);
+                    graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
+
+                    edges[edges.len - 2] = .cast(edges[edges.len - 2].getIndex() + 1);
+                    edges[edges.len - 2].markExtra(true);
+                }
+            }
+        }
+        /// Removes an existing edge connection between two nodes
+        pub fn removeConnection(graph: *Self, child: Index, parent: Index) void {
+            var it = graph.iterateParents(child);
+            while (it.next()) |edge| {
+                if (edge.parent == parent) {
+                    graph.removeEdge(edge);
+                    return;
+                }
+            }
+        }
+        /// Removes an existing edge connection between two nodes
+        pub fn removeEdge(_: *Self, edge: *Edge) void {
+            edge.child = .none;
+            edge.parent = .none;
+        }
+
+        /// Aligns `extra` to the given alignment, for the next write
+        pub fn alignExtraList(extra: *ExtraList, allocator: std.mem.Allocator, comptime alignment: comptime_int) !void {
+            std.debug.assert(alignment <= @alignOf(usize));
+            const aligned_len = std.mem.alignForward(usize, extra.items.len, alignment);
+            try extra.ensureTotalCapacity(allocator, aligned_len);
+            extra.items.len = std.mem.alignForward(usize, extra.items.len, alignment);
+        }
+
+        pub fn EdgeIterator(comptime yield_children: bool, comptime yield_parents: bool) type {
+            return struct {
+                const Iterator = @This();
+
+                graph: *Graph,
+                edge_index: ExtraIndex,
+                access_data: union {
+                    node: Sir.Index,
+                    extra_end: ExtraIndex,
+                },
+
+                pub fn next(iter: *Iterator) ?*Edge {
+                    // Stored in the node
+                    while (iter.edge_index < @as(Edges, undefined).len) : (iter.edge_index += 1) {
+                        const edges = iter.graph.slice.edges[@intFromEnum(iter.access_data.node)];
+                        if (edges[iter.edge_index] == .none) {
+                            return null;
+                        }
+
+                        // Check for `extra` encoding
+                        if (edges[iter.edge_index].isExtra()) {
+                            std.debug.assert(iter.edge_index == @as(Edges, undefined).len - 2);
+                            std.debug.assert(edges[iter.edge_index + 1].isExtra());
+                            iter.edge_index = edges[iter.edge_index + 1].getIndex();
+                            std.debug.assert(iter.edge_index > @as(Edges, undefined).len);
+                            iter.access_data.extra_end = iter.edge_index + edges[iter.edge_index].getIndex() * @sizeOf(Edge.Index);
+                            break;
+                        }
+
+                        if (yield_children and edges[iter.edge_index].isChild() or
+                            yield_parents and !edges[iter.edge_index].isChild())
+                        {
+                            const edge = edges[iter.edge_index].get(iter.graph.extra);
+                            if (edge.child != .none and edge.parent != .none) {
+                                iter.edge_index += 1;
+                                return edge;
+                            }
+                        }
+                    }
+                    if (iter.edge_index == @as(Edges, undefined).len) {
+                        return null;
+                    }
+
+                    // Stored in `extra`
+                    while (iter.edge_index < iter.access_data.extra_end) : (iter.edge_index += @sizeOf(Edge.Index)) {
+                        const index = std.mem.bytesToValue(Edge.Index, iter.graph.extra.items[iter.edge_index..(iter.edge_index + @sizeOf(Edge.Index))]);
+
+                        if (yield_children and index.isChild() or
+                            yield_parents and !index.isChild())
+                        {
+                            const edge = index.get(iter.graph.extra);
+                            if (edge.child != .none and edge.parent != .none) {
+                                return edge;
+                            }
+                        }
+                    }
+
+                    return null;
+                }
+            };
+        }
+        /// Iterates all edges of the given node
+        pub fn iterateEdges(graph: *Self, index: Index) EdgeIterator(true, true) {
+            return .{
+                .graph = graph,
+                .edge_index = 0,
+                .access_data = .{ .node = index },
+            };
+        }
+        /// Iterates all child-edges of the given node
+        pub fn iterateChildren(graph: *Self, index: Index) EdgeIterator(true, false) {
+            return .{
+                .graph = graph,
+                .edge_index = 0,
+                .access_data = .{ .node = index },
+            };
+        }
+        /// Iterates all parent-edges of the given node
+        pub fn iterateParents(graph: *Self, index: Index) EdgeIterator(false, true) {
+            return .{
+                .graph = graph,
+                .edge_index = 0,
+                .access_data = .{ .node = index },
+            };
+        }
+
+        pub fn TraverseIterator(comptime relation: enum { child, parent }, comptime filter_tags: ?[]const Tag, comptime stop_tags: []const Tag) type {
+            return struct {
+                const Iterator = @This();
+
+                graph: *Graph,
+                queue: *std.ArrayListUnmanaged(Index),
+
+                pub fn next(iter: *Iterator, allocator: std.mem.Allocator) !?Sir.Index {
                     while (iter.queue.pop()) |current| {
-                        const parents = iter.slice.parents[@intFromEnum(current)];
-                        if (parents.left != .none and !iter.slice.iter_data[@intFromEnum(parents.left)].visited) {
-                            iter.slice.iter_data[@intFromEnum(parents.left)].visited = true;
-                            try iter.queue.append(allocator, parents.left);
-                        }
-                        if (parents.right != .none and !iter.slice.iter_data[@intFromEnum(parents.right)].visited) {
-                            iter.slice.iter_data[@intFromEnum(parents.right)].visited = true;
-                            try iter.queue.append(allocator, parents.right);
+                        if (filter_tags) |filter| {
+                            inline for (filter) |tag| {
+                                if (tag == current.getTag(iter.graph)) {
+                                    return current;
+                                }
+                            }
+                        } else {
+                            return current;
                         }
 
-                        if (iter.slice.tags[@intFromEnum(current)] == .merge) {
-                            const data = iter.slice.data[@intFromEnum(current)].merge;
-                            for (data) |parent| {
-                                if (parent != .none and !iter.slice.iter_data[@intFromEnum(parent)].visited) {
-                                    iter.slice.iter_data[@intFromEnum(parent)].visited = true;
-                                    try iter.queue.append(allocator, parent);
-                                }
+                        inline for (stop_tags) |tag| {
+                            if (tag == current.getTag(iter.graph)) {
+                                continue;
                             }
                         }
 
-                        if (filter_tags.len == 0) {
-                            return current;
-                        } else {
-                            inline for (filter_tags) |filter| {
-                                if (iter.slice.tags[@intFromEnum(current)] == filter) {
-                                    return current;
-                                }
+                        var it: EdgeIterator(relation == .parent, relation == .child) = .{
+                            .graph = iter.graph,
+                            .edge_index = 0,
+                            .access_data = .{ .node = current },
+                        };
+                        while (it.next()) |edge| {
+                            const next_node = switch (relation) {
+                                .child => edge.child,
+                                .parent => edge.parent,
+                            };
+
+                            if (!iter.graph.slice.iter_data[@intFromEnum(next_node)].visited) {
+                                iter.graph.slice.iter_data[@intFromEnum(next_node)].visited = true;
+                                try iter.queue.append(allocator, next_node);
                             }
                         }
                     }
@@ -822,21 +640,52 @@ pub const Graph = b: {
             };
         }
 
-        /// Iterator which travers the graph from given root tags through their parents, with an optional tag filter.
+        /// Iterativly traverses all children of the root node, with an optional filter and stop tags
         /// If new nodes are created while iterating, `graph.refresh()` must be called.
         /// The provided `queue` should be reused often, to avoid allocations.
         ///
-        /// Only one iterator may be active at a time!
-        pub fn traverseRootsIterator(graph: *const Self, queue: *std.ArrayListUnmanaged(Index), comptime root_tag: Tag, comptime filter_tags: []const Tag) TraverseRootsIterator(root_tag, filter_tags) {
+        /// Only one traversing iterator may be active at a time!
+        pub fn traverseChildren(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), root: Index, comptime filter_tags: ?[]const Tag, comptime stop_tags: []const Tag) !TraverseIterator(.child, filter_tags, stop_tags) {
             queue.clearRetainingCapacity();
+
+            graph.refresh();
             for (graph.slice.iter_data) |*data| {
                 data.visited = false;
             }
 
+            var it = graph.iterateChildren(root);
+            while (it.next()) |edge| {
+                graph.slice.iter_data[@intFromEnum(edge.child)].visited = true;
+                try queue.append(allocator, edge.child);
+            }
+
             return .{
-                .slice = &graph.slice,
+                .graph = graph,
                 .queue = queue,
-                .root_index = @intCast(graph.list.len),
+            };
+        }
+        /// Iterativly traverses all parents of the root node, with an optional filter and stop tags
+        /// If new nodes are created while iterating, `graph.refresh()` must be called.
+        /// The provided `queue` should be reused often, to avoid allocations.
+        ///
+        /// Only one traversing iterator may be active at a time!
+        pub fn traverseParents(graph: *Self, allocator: std.mem.Allocator, queue: *std.ArrayListUnmanaged(Index), root: Index, comptime filter_tags: ?[]const Tag, comptime stop_tags: []const Tag) !TraverseIterator(.parent, filter_tags, stop_tags) {
+            queue.clearRetainingCapacity();
+
+            graph.refresh();
+            for (graph.slice.iter_data) |*data| {
+                data.visited = false;
+            }
+
+            var it = graph.iterateParents(root);
+            while (it.next()) |edge| {
+                graph.slice.iter_data[@intFromEnum(edge.parent)].visited = true;
+                try queue.append(allocator, edge.parent);
+            }
+
+            return .{
+                .graph = graph,
+                .queue = queue,
             };
         }
 
@@ -847,8 +696,7 @@ pub const Graph = b: {
             graph.slice = .{
                 .tags = slice.items(.tag),
                 .data = slice.items(.data),
-                .parents = slice.items(.parents),
-                .children = slice.items(.children),
+                .edges = slice.items(.edges),
                 .iter_data = slice.items(.iter_data),
                 .sources = slice.items(.source),
             };
@@ -884,9 +732,10 @@ pub const Graph = b: {
                 else => unreachable,
             } });
 
+            const indent = "        ";
+
             graph.refresh();
             for (0..graph.list.len) |idx| {
-                const indent = "        ";
                 // const src_template = "\\n{s}:{d}:{d}"; <BR/><FONT COLOR="#191919" POINT-SIZE="11">test3.znasm:48:11: 'src8  = my_const_value:x;'</FONT>
                 const idx_template = "<FONT COLOR=\"#191919\" POINT-SIZE=\"11\">[{d}] = </FONT>";
                 const src_template = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}: '{s}'</FONT>";
@@ -917,62 +766,31 @@ pub const Graph = b: {
                     },
                     .block_start => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA Start>,shape=Msquare,fillcolor=darkorchid2]\n", .{ idx, id, idx }),
                     .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "return>,shape=Msquare,fillcolor=darkorchid2]\n", .{ idx, id, idx }),
-                    .merge, .invalid => {}, // ignore
+                    .invalid => {}, // ignore
                     // else => try writer.print(indent ++ "N{d}_{d} [label=<{s}" ++ src_template ++ ">,fillcolor=lightgray]\n", .{ idx, id, @tagName(index.getTag(graph)), src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
                 }
             }
 
-            try writer.writeAll("        # Edges\n");
-            for (0..graph.list.len) |idx| {
-                const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
-                if (index.getTag(graph) == .merge or index.getTag(graph) == .invalid) {
-                    continue;
-                }
-
-                try graph.writeGraphEdges(writer, id, index, .none);
-            }
-
-            try writer.writeAll("    }\n");
-        }
-
-        fn writeGraphEdges(graph: *const Self, writer: std.fs.File.Writer, id: u32, source: Index, target: Index) !void {
-            const indent = "        ";
             const style_dependency = "[color=blue]\n";
             _ = style_dependency; // autofix
             const style_return = "[color=darkorchid2]\n";
-
-            const parents = source.getParents(graph);
-
-            // Remove `merge` nodes from graph output
-            if (source.getTag(graph) == .merge) {
-                if (parents.left != .none) {
-                    try graph.writeGraphEdges(writer, id, parents.left, target);
-                }
-                if (parents.right != .none) {
-                    try graph.writeGraphEdges(writer, id, parents.right, target);
+            try writer.writeAll("        # Edges\n");
+            for (0..graph.list.len) |idx| {
+                const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
+                if (index.getTag(graph) == .invalid) {
+                    continue;
                 }
 
-                const data = graph.slice.data[@intFromEnum(source)].merge;
-                for (data) |parent| {
-                    if (parent != .none) {
-                        try graph.writeGraphEdges(writer, id, parent, target);
+                var it = graph.iterateChildren(index);
+                while (it.next()) |edge| {
+                    switch (edge.child.getTag(graph)) {
+                        .@"return" => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} " ++ style_return, .{ @intFromEnum(index), id, @intFromEnum(edge.child), id }),
+                        else => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=red]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id }),
                     }
-                }
-            } else {
-                if (target != .none) {
-                    switch (target.getTag(graph)) {
-                        .@"return" => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} " ++ style_return, .{ @intFromEnum(source), id, @intFromEnum(target), id }),
-                        else => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=red]\n", .{ @intFromEnum(source), id, @intFromEnum(target), id }),
-                    }
-                }
-
-                if (parents.left != .none) {
-                    try graph.writeGraphEdges(writer, id, parents.left, source);
-                }
-                if (parents.right != .none) {
-                    try graph.writeGraphEdges(writer, id, parents.right, source);
                 }
             }
+
+            try writer.writeAll("    }\n");
         }
     };
 };

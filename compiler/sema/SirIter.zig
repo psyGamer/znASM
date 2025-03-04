@@ -71,7 +71,7 @@ const graph_optimizations = &.{
 /// Optimizations applied to specific nodes
 const node_optimizations = &.{
     // optInlineConstantGraphs,
-    optRemoveRedundantLoad,
+    // optRemoveRedundantLoad,
 };
 
 inline fn arena(iter: Iter) std.mem.Allocator {
