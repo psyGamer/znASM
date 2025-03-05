@@ -2,11 +2,21 @@
 const std = @import("std");
 
 const Module = @import("Module.zig");
+const Ast = @import("Ast.zig");
 const Sema = @import("Sema.zig");
 const TypeExpression = Sema.TypeExpression;
 
-pub fn init(allocator: std.mem.Allocator) !Module {
-    return try Module.init(allocator, try allocator.dupeZ(u8, @embedFile("builtin.znasm")), "<builtin>") orelse unreachable;
+pub fn init(data_allocator: std.mem.Allocator, temp_allocator: std.mem.Allocator) !Module {
+    var ast: Ast = .{
+        .source = @embedFile("builtin.znasm"),
+        .source_path = "<builtin>",
+    };
+    ast.parse(data_allocator, temp_allocator) catch |err| switch (err) {
+        error.ParseFailed => unreachable,
+        else => |e| return e,
+    };
+
+    return .init(ast);
 }
 
 const module: Module.Index = .cast(0);

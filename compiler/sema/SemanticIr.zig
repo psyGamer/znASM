@@ -87,6 +87,8 @@ pub const Data = union(enum) {
 
     /// Indicates the start of a Single-Static-Assignment (SSA) block
     block_start: void,
+    /// Indicates the end of a Single-Static-Assignment (SSA) block
+    block_end: void,
 
     /// Compile-time known immediate value
     /// Cannot have dependencies
@@ -116,7 +118,7 @@ pub const Data = union(enum) {
             .value => |info| {
                 return .{ .value = .{
                     .positive = info.positive,
-                    .limbs = @alignCast(std.mem.bytesAsSlice(std.math.big.Limb, extra.items[info.limbs_index..(info.limbs_index + info.limbs_len * @sizeOf(std.math.big.Limb))])),
+                    .limbs = @alignCast(@ptrCast(extra.items[info.limbs_index..(info.limbs_index + info.limbs_len * @sizeOf(std.math.big.Limb))])),
                 } };
             },
             inline else => |value, tag| {
@@ -130,7 +132,7 @@ pub const Data = union(enum) {
                 try Graph.alignExtraList(extra, allocator, @alignOf(std.math.big.Limb));
 
                 const index: u32 = @intCast(extra.items.len);
-                try extra.appendSlice(allocator, std.mem.sliceAsBytes(info.limbs));
+                try extra.appendSlice(allocator, @ptrCast(info.limbs));
                 return .{ .value = .{
                     .positive = info.positive,
                     .limbs_len = @intCast(info.limbs.len),
@@ -146,6 +148,7 @@ pub const Data = union(enum) {
     /// Packed representation, storing excess data into `graph.extra`
     pub const Packed = union(std.meta.Tag(Data)) {
         block_start: void,
+        block_end: void,
         value: struct {
             positive: bool,
             limbs_len: u16,
@@ -179,7 +182,7 @@ pub const Edge = packed struct(u64) {
         /// Resolves the `Edge` of this index
         pub fn get(index: Edge.Index, extra: Graph.ExtraList) *Edge {
             const idx = index.getIndex();
-            return @alignCast(std.mem.bytesAsValue(Edge, extra.items[idx..(idx + @sizeOf(Edge))]));
+            return @alignCast(@ptrCast(extra.items[idx..(idx + @sizeOf(Edge))]));
         }
         /// Gets the actual stored index
         pub fn getIndex(index: Edge.Index) u32 {
@@ -344,10 +347,10 @@ pub const Graph = b: {
 
             try alignExtraList(&graph.extra, allocator, @alignOf(Edge));
             const edge_index: ExtraIndex = @intCast(graph.extra.items.len);
-            try graph.extra.appendSlice(allocator, std.mem.sliceAsBytes(edges));
+            try graph.extra.appendSlice(allocator, @ptrCast(edges));
 
             // Fix-up edges (one connection **must** be `.none`)
-            for (std.mem.bytesAsSlice(Edge, graph.extra.items[edge_index..(edge_index + edges.len * @sizeOf(Edge))])) |*edge| {
+            for (@as([]Edge, @alignCast(@ptrCast(graph.extra.items[edge_index..(edge_index + edges.len * @sizeOf(Edge))])))) |*edge| {
                 if (edge.parent == .none and edge.child != .none) {
                     edge.parent = index;
                 } else if (edge.child == .none and edge.parent != .none) {
@@ -741,6 +744,8 @@ pub const Graph = b: {
                 const src_template = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}: '{s}'</FONT>";
                 // const src_template_small = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}</FONT>";
 
+                const color_control_flow = "fillcolor=darkorchid2";
+
                 const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
 
                 const ast = &symbol.getCommon(@constCast(sema)).module_index.get(@constCast(sema)).ast;
@@ -764,8 +769,9 @@ pub const Graph = b: {
                         };
                         try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "{}[{d}..{d}] ({})" ++ src_template ++ ">,shape=box,fillcolor=firebrick1]\n", .{ idx, id, idx, sema.getSymbolLocation(target.symbol), target.byte_start, target.byte_end, target_type.fmt(sema), src_file, src_loc.line + 1, src_loc.column + 1, src_line });
                     },
-                    .block_start => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA Start>,shape=Msquare,fillcolor=darkorchid2]\n", .{ idx, id, idx }),
-                    .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "return>,shape=Msquare,fillcolor=darkorchid2]\n", .{ idx, id, idx }),
+                    .block_start => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA Start>,shape=Msquare,fillcolor=blueviolet]\n", .{ idx, id, idx }),
+                    .block_end => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA End>,shape=Msquare,fillcolor=blueviolet]\n", .{ idx, id, idx }),
+                    .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "return>,shape=Msquare," ++ color_control_flow ++ "]\n", .{ idx, id, idx }),
                     .invalid => {}, // ignore
                     // else => try writer.print(indent ++ "N{d}_{d} [label=<{s}" ++ src_template ++ ">,fillcolor=lightgray]\n", .{ idx, id, @tagName(index.getTag(graph)), src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
                 }

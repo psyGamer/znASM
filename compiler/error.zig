@@ -85,7 +85,7 @@ pub fn ErrorSystem(comptime error_set: anytype) type {
         pub const MessageType = enum { err, note };
 
         /// Starts a new message context for outputting information
-        pub fn begin(module: *const Module, token_idx: Ast.TokenIndex, comptime msg_type: MessageType) !MessageContext {
+        pub fn begin(ast: *const Ast, token: Ast.TokenIndex, comptime msg_type: MessageType) !MessageContext {
             std.debug.lockStdErr();
             errdefer std.debug.unlockStdErr();
 
@@ -94,10 +94,8 @@ pub fn ErrorSystem(comptime error_set: anytype) type {
 
             const writer = stderr.writer();
 
-            if (token_idx != .none) {
-                const ast = &module.ast;
-
-                const token_loc = ast.tokenLoc(token_idx);
+            if (token != .none) {
+                const token_loc = ast.tokenLoc(token);
                 const src_loc = std.zig.findLineColumn(ast.source, token_loc.start);
 
                 const src_args = .{ ast.source_path, src_loc.line + 1, src_loc.column + 1 };

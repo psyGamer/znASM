@@ -92,10 +92,7 @@ fn optRemoveUnused(iter: *Iter) !void {
 
     iter.queue.clearRetainingCapacity();
     for (0..graph.list.len) |i| {
-        const is_root = switch (graph.slice.tags[i]) {
-            inline else => |tag| comptime std.mem.indexOfScalar(std.meta.Tag(Sir.Data), Sir.Data.block_ends, tag) != null,
-        };
-        if (is_root) {
+        if (graph.slice.tags[i] == .block_end) {
             graph.slice.iter_data[i].visited = true;
             try iter.queue.append(iter.arena(), .cast(i));
         }

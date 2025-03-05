@@ -1,8 +1,42 @@
 const std = @import("std");
 
+const Ast = @import("../Ast.zig");
 const Tokenizer = @This();
 
 pub const Token = struct {
+    pub const Index = enum(u32) {
+        //  0 is valid, so use maxInt as null
+        none = std.math.maxInt(u32),
+        _,
+
+        pub inline fn next(index: Index) Index {
+            return @enumFromInt(@intFromEnum(index) + 1);
+        }
+        pub inline fn prev(index: Index) Index {
+            return @enumFromInt(@intFromEnum(index) - 1);
+        }
+        pub inline fn offset(index: Index, off: i32) Index {
+            return @enumFromInt(@intFromEnum(index) + off);
+        }
+
+        pub inline fn getTag(index: Index, ast: *const Ast) Tag {
+            return ast.token_tags[@intFromEnum(index)];
+        }
+        pub inline fn getLocation(index: Index, ast: *const Ast) Loc {
+            return ast.token_locs[@intFromEnum(index)];
+        }
+
+        /// Cast a generic number to a Token.Index
+        pub inline fn cast(x: anytype) Index {
+            return switch (@typeInfo(@TypeOf(x))) {
+                .null => .none,
+                .int, .comptime_int => @enumFromInt(@as(std.meta.Tag(Index), @intCast(x))),
+                .optional => if (x) |value| @enumFromInt(@as(std.meta.Tag(Index), @intCast(value))) else .none,
+                else => @compileError("Cannot cast " ++ @typeName(@TypeOf(x)) ++ " to a Token.Index"),
+            };
+        }
+    };
+
     pub const Tag = enum {
         invalid,
         eof,

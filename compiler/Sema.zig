@@ -5,8 +5,8 @@ const builtin_module = @import("builtin_module.zig");
 
 const ErrorSystem = @import("error.zig").ErrorSystem;
 const TypedIndex = @import("util/typed_index.zig").TypedIndex;
-const Token = @import("Tokenizer.zig").Token;
 const Ast = @import("Ast.zig");
+const Token = Ast.Token;
 const Node = Ast.Node;
 const NodeIndex = Ast.NodeIndex;
 const Module = @import("Module.zig");
@@ -81,19 +81,25 @@ has_errors: bool = false,
 
 /// Collection of strings which needed to be dynamically allocated
 string_pool: std.ArrayListUnmanaged([]u8) = .empty,
+
+/// General purpose allocator
 allocator: std.mem.Allocator,
+/// Arena allocator for storing permanent data, which lives until the end of the compilation
+data_arena: *std.heap.ArenaAllocator,
+/// Arena allocator for storing temporary data
+temp_arena: *std.heap.ArenaAllocator,
 
-pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: MappingMode) AnalyzeError!Sema {
-    var sema: Sema = .{
-        .modules = modules,
-        .mapping_mode = mapping_mode,
-        .allocator = allocator,
-    };
-    errdefer sema.deinit();
+pub inline fn dataAllocator(sema: Sema) std.mem.Allocator {
+    return sema.data_arena.allocator();
+}
+pub inline fn tempAllocator(sema: Sema) std.mem.Allocator {
+    return sema.temp_arena.allocator();
+}
 
+pub fn process(sema: *Sema) AnalyzeError!void {
     // Gather symbols
-    try sema.module_map.ensureUnusedCapacity(sema.allocator, modules.len);
-    for (0..modules.len) |module_idx| {
+    try sema.module_map.ensureUnusedCapacity(sema.allocator, sema.modules.len);
+    for (0..sema.modules.len) |module_idx| {
         try sema.gatherSymbols(.cast(module_idx));
     }
 
@@ -121,12 +127,12 @@ pub fn process(allocator: std.mem.Allocator, modules: []Module, mapping_mode: Ma
     if (sema.has_errors) {
         return error.AnalyzeFailed;
     }
-
-    return sema;
 }
 
 pub fn deinit(sema: *Sema) void {
     sema.module_map.deinit(sema.allocator);
+    sema.type_expressions.deinit(sema.allocator);
+
     for (sema.symbols.items) |*symbol| {
         symbol.deinit(sema.allocator);
     }
@@ -611,7 +617,7 @@ pub fn createSymbol(sema: *Sema, module_idx: Module.Index, name: []const u8, sym
 
     const symbol_idx: Symbol.Index = .cast(sema.symbols.items.len);
     try sema.symbols.append(sema.allocator, symbol);
-    try module.symbol_map.putNoClobber(module.allocator, name, symbol_idx);
+    try module.symbol_map.putNoClobber(sema.dataAllocator(), name, symbol_idx);
 
     var common = symbol_idx.getCommon(sema);
     common.module_index = module_idx;
@@ -689,7 +695,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
     switch (ast.nodeTag(node)) {
         .expr_int_value => {
             const value_literal = ast.nodeToken(node);
-            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.allocator) catch {
+            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.tempAllocator()) catch {
                 try sema.emitError(value_literal, module, .invalid_number, .{ast.tokenSource(value_literal)});
                 return error.AnalyzeFailed;
             };
@@ -887,12 +893,12 @@ pub const Error = ErrorSystem(.{
 });
 
 pub fn emitError(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, comptime tag: Error.Tag, args: anytype) AnalyzeError!void {
-    const err_ctx = try Error.begin(module.get(sema), token, .err);
+    const err_ctx = try Error.begin(&module.get(sema).ast, token, .err);
     try err_ctx.print(comptime Error.tagMessage(tag), args);
     try err_ctx.end();
 }
 pub fn emitNote(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, comptime tag: Error.Tag, args: anytype) AnalyzeError!void {
-    const note_ctx = try Error.begin(module.get(sema), token, .note);
+    const note_ctx = try Error.begin(&module.get(sema).ast, token, .note);
     try note_ctx.print(comptime Error.tagMessage(tag), args);
     try note_ctx.end();
 }
@@ -906,11 +912,11 @@ pub fn errDuplicateSymbol(sema: *Sema, token: Ast.TokenIndex, module: Module.Ind
     try sema.emitNote(module.get(sema).ast.nodeToken(existing_symbol.getCommon(sema).node), module, .existing_symbol, .{});
 }
 pub fn errUnknownInterruptVector(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, symbol_name: []const u8) AnalyzeError!void {
-    const err_ctx = try Error.begin(module.get(sema), token, .err);
+    const err_ctx = try Error.begin(&module.get(sema).ast, token, .err);
     try err_ctx.print("Unknown interrupt vector [!]{s}", .{symbol_name});
     try err_ctx.end();
 
-    const note_ctx = try Error.begin(module.get(sema), token, .note);
+    const note_ctx = try Error.begin(&module.get(sema).ast, token, .note);
     try note_ctx.print("Possible [!]interrupt vectors[] are: ", .{});
 
     const fields = std.meta.fields(InterruptVectors);
@@ -933,11 +939,11 @@ pub fn errUnknownInterruptVector(sema: *Sema, token: Ast.TokenIndex, module: Mod
     try note_ctx.end();
 }
 pub fn errInvalidRomBank(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, bank: u8) AnalyzeError!void {
-    const err_ctx = try Error.begin(module.get(sema), token, .err);
+    const err_ctx = try Error.begin(&module.get(sema).ast, token, .err);
     try err_ctx.print("Invalid bank [!]${x}[] for data to be placed in ROM", .{bank});
     try err_ctx.end();
 
-    const note_ctx = try Error.begin(module.get(sema), token, .note);
+    const note_ctx = try Error.begin(&module.get(sema).ast, token, .note);
     switch (sema.mapping_mode) {
         .lorom => try note_ctx.print("[!]ROM data[] needs to be in banks [!]$80..$FF[] or mirrors of them", .{}),
         .hirom => try note_ctx.print("[!]ROM data[] needs to be in banks [!]$C0..$FF[] or mirrors of them", .{}),
@@ -946,20 +952,20 @@ pub fn errInvalidRomBank(sema: *Sema, token: Ast.TokenIndex, module: Module.Inde
     try note_ctx.end();
 }
 pub fn errInvalidRamBank(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, bank: u8) AnalyzeError!void {
-    const err_ctx = try Error.begin(module.get(sema), token, .err);
+    const err_ctx = try Error.begin(&module.get(sema).ast, token, .err);
     try err_ctx.print("Invalid bank [!]${x}[] for variables to be placed in RAM", .{bank});
     try err_ctx.end();
 
-    const note_ctx = try Error.begin(module.get(sema), token, .note);
+    const note_ctx = try Error.begin(&module.get(sema).ast, token, .note);
     try note_ctx.print("[!]RAM variables[] needs to be in banks [!]7E[], [!]7F[] or mirrors of them", .{});
     try note_ctx.end();
 }
 pub fn errInvalidVectorBank(sema: *Sema, token: Ast.TokenIndex, module: Module.Index, symbol_name: []const u8, bank: u8) AnalyzeError!void {
-    const err_ctx = try Error.begin(module.get(sema), token, .err);
+    const err_ctx = try Error.begin(&module.get(sema).ast, token, .err);
     try err_ctx.print("Invalid bank [!]${x}[] for interrupt vector [!]{s}", .{ bank, symbol_name });
     try err_ctx.end();
 
-    const note_ctx = try Error.begin(module.get(sema), token, .note);
+    const note_ctx = try Error.begin(&module.get(sema).ast, token, .note);
     try note_ctx.print("[!]Interrupt vectors[] need to be accessible from bank [!]$00", .{});
     try note_ctx.end();
 }

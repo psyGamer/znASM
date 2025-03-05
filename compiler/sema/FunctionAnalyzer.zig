@@ -16,12 +16,22 @@ const BuiltinFn = @import("BuiltinFn.zig");
 const Sir = @import("SemanticIr.zig");
 const Analyzer = @This();
 
+/// Scope for the currently active Static-Single-Assignment (SSA)
+const Scope = struct {
+    /// `block_start` node of this scope
+    start: Sir.Index,
+    /// `block_end` node of this scope
+    end: Sir.Index,
+};
+
 sema: *Sema,
 
 symbol: Symbol.Index,
 module: Module.Index,
 
 graph: Sir.Graph = .empty,
+
+scopes: std.ArrayListUnmanaged(Scope) = .empty,
 
 // Helper functions
 
@@ -32,8 +42,16 @@ pub inline fn getAst(ana: Analyzer) *Ast {
 pub inline fn create(ana: *Analyzer, data: Sir.Data, edges: []const Sir.Edge, node: Node.Index) !Sir.Index {
     return ana.graph.create(ana.sema.allocator, data, edges, node);
 }
-pub inline fn emit(ana: *Analyzer, tag: Sir.Data, node: Node.Index) !void {
-    try ana.graph.append(ana.sema.allocator, .{ .tag = tag, .node = node });
+
+/// Arena for temporary allocations while analyzing
+pub inline fn arena(ana: Analyzer) std.mem.Allocator {
+    // TODO: Actually use an arena
+    return ana.sema.allocator;
+}
+/// Allocator specific for usage in the SIR node graph
+pub inline fn sirAllocator(ana: Analyzer) std.mem.Allocator {
+    // TODO: Use a more optimal allocator for lots of allocations with (almost) no frees
+    return ana.sema.allocator;
 }
 
 pub fn deinit(ana: *Analyzer) void {
@@ -202,6 +220,7 @@ const ScopeIterator = struct {
 pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
     // try ana.emit(.begin_scope, node);
 
+    // try ana.scopes.append(allocator, item)
     _ = try ana.create(.block_start, &.{}, node);
 
     const range = ana.getAst().nodeData(node).sub_range;

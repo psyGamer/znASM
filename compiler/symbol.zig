@@ -268,6 +268,9 @@ pub const Symbol = union(enum) {
                 allocator.free(fn_sym.instructions);
                 allocator.free(fn_sym.assembly_data);
             },
+            .constant => |*const_sym| {
+                const_sym.sir_graph.deinit(allocator);
+            },
             // TODO:
             // .@"struct" => |struct_sym| {
             //     allocator.free(struct_sym.fields);
