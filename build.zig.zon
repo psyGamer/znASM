@@ -1,14 +1,17 @@
 .{
-    .name = "znASM",
+    .name = .znasm,
     .version = "0.1.0",
-    .minimum_zig_version = "0.14.0-dev.3445+6c3cbb0c8",
+    .minimum_zig_version = "0.14.0",
+    .fingerprint = 0xd0bd1984c6baaac5,
+
     .dependencies = .{
         //
     },
+
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
+        "compiler",
         "LICENSE",
         "README.md",
     },
