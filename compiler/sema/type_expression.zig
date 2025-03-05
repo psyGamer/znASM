@@ -19,7 +19,7 @@ pub const TypeExpression = union(enum) {
 
         /// Parses the type-expr ession and resolves an index to it
         pub fn resolve(sema: *Sema, node: Node.Index, module: Module.Index, parent: Symbol.Index) Error!TypeExpression.Index {
-            try sema.type_expressions.append(sema.allocator, try .parse(sema, node, module, parent));
+            try sema.type_expressions.append(sema.dataAllocator(), try .parse(sema, node, module, parent));
             return @enumFromInt(@as(u32, @intCast(sema.type_expressions.items.len - 1)));
         }
 
@@ -137,8 +137,7 @@ pub const TypeExpression = union(enum) {
                 };
 
                 const symbol: Symbol.Index = .cast(sema.symbols.items.len);
-                const symbol_name = try std.fmt.allocPrint(sema.allocator, "{s}__" ++ container_name ++ "_{d}", .{ parent_name, @intFromEnum(symbol) });
-                try sema.string_pool.append(sema.allocator, symbol_name);
+                const symbol_name = try std.fmt.allocPrint(sema.dataAllocator(), "{s}__" ++ container_name ++ "_{d}", .{ parent_name, @intFromEnum(symbol) });
 
                 if (module.get(sema).symbol_map.get(symbol_name)) |existing_symbol| {
                     try sema.emitError(ast.nodeToken(node).next(), module, .duplicate_symbol, .{symbol_name});

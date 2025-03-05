@@ -40,22 +40,14 @@ pub inline fn getAst(ana: Analyzer) *Ast {
 }
 
 pub inline fn create(ana: *Analyzer, data: Sir.Data, edges: []const Sir.Edge, node: Node.Index) !Sir.Index {
-    return ana.graph.create(ana.sema.allocator, data, edges, node);
+    return ana.graph.create(ana.dataAllocator(), data, edges, node);
 }
 
-/// Arena for temporary allocations while analyzing
-pub inline fn arena(ana: Analyzer) std.mem.Allocator {
-    // TODO: Actually use an arena
-    return ana.sema.allocator;
+pub inline fn dataAllocator(ana: Analyzer) std.mem.Allocator {
+    return ana.sema.dataAllocator();
 }
-/// Allocator specific for usage in the SIR node graph
-pub inline fn sirAllocator(ana: Analyzer) std.mem.Allocator {
-    // TODO: Use a more optimal allocator for lots of allocations with (almost) no frees
-    return ana.sema.allocator;
-}
-
-pub fn deinit(ana: *Analyzer) void {
-    ana.graph.deinit(ana.sema.allocator);
+pub inline fn tempAllocator(ana: Analyzer) std.mem.Allocator {
+    return ana.sema.tempAllocator();
 }
 
 pub fn process(ana: *Analyzer) Error!void {
@@ -218,10 +210,11 @@ const ScopeIterator = struct {
 // AST node handling
 
 pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
-    // try ana.emit(.begin_scope, node);
+    const start = try ana.create(.block_start, &.{}, node);
+    const end = try ana.create(.block_end, &.{}, node);
 
-    // try ana.scopes.append(allocator, item)
-    _ = try ana.create(.block_start, &.{}, node);
+    try ana.scopes.append(ana.tempAllocator(), .{ .start = start, .end = end });
+    defer _ = ana.scopes.pop();
 
     const range = ana.getAst().nodeData(node).sub_range;
     for (@intFromEnum(range.extra_start)..@intFromEnum(range.extra_end)) |extra| {
@@ -238,7 +231,11 @@ pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
         }
     }
 
-    // try ana.emit(.end_scope, node);
+    // Ensure start and end are somehow connected
+    var it = start.iterateChildren(&ana.graph);
+    if (it.next() == null) {
+        try ana.graph.addEdge(ana.dataAllocator(), .initDependency(end, start));
+    }
 }
 
 fn handleLabel(ana: *Analyzer, node: Node.Index) Error!void {
@@ -404,26 +401,40 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
     const write_start: u16 = 0;
     const write_end: u16 = root_type.byteSize(ana.sema);
 
-    const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{ .target_type = root_type });
+    // Depend on previous symbol, to keep a correct order
+    const scope = ana.scopes.getLast();
+    var it = scope.end.iterateParents(&ana.graph);
+    const prev_store_node = while (it.next()) |edge| {
+        if (edge.parent.getTag(&ana.graph) != .symbol) {
+            continue;
+        }
+
+        const data = edge.parent.getData(&ana.graph).symbol;
+        if (data.symbol == symbol and
+            (data.byte_start >= write_start and data.byte_start < write_end or
+                data.byte_end > write_start and data.byte_end <= write_end or
+                data.byte_start <= write_start and data.byte_end >= write_end))
+        {
+            break edge.parent;
+        }
+    } else scope.start; // This is the first store
+
+    const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{
+        .start_node = scope.start,
+        .end_node = scope.end,
+        .target_type = root_type,
+    });
     const store_node = try ana.create(.{ .symbol = .{
         .symbol = symbol,
         .byte_start = write_start,
         .byte_end = write_end,
-    } }, &.{.withParent(expr_node, .a, (write_end - write_start) * 8)}, node);
-    _ = store_node; // autofix
+    } }, &.{ .withDataParent(expr_node, .a, (write_end - write_start) * 8), .withParent(prev_store_node) }, node);
 
-    // // TODO: Store `block_start` in current scope
-    // ana.graph.refresh();
-    // var i: usize = ana.graph.list.len;
-    // while (true) {
-    //     if (i == 0) break;
-    //     i -= 1;
-
-    //     if (ana.graph.slice.tags[i] == .block_start) {
-    //         try store_node.addParent(ana.sema.allocator, &ana.graph, .cast(i), .right);
-    //         break;
-    //     }
-    // }
+    // Update `block_end` connection
+    if (prev_store_node != scope.start) {
+        ana.graph.removeConnection(scope.end, prev_store_node);
+    }
+    try ana.graph.addEdge(ana.dataAllocator(), .initDependency(scope.end, store_node));
 
     // const assign_idx = ana.graph.items.len;
     // try ana.emit(.{ .assign_global = undefined }, node);

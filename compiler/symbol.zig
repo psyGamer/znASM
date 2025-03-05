@@ -256,32 +256,4 @@ pub const Symbol = union(enum) {
     pub fn commonConst(sym: *const Symbol) *const Common {
         return @constCast(sym).common();
     }
-
-    pub fn deinit(sym: *Symbol, allocator: std.mem.Allocator) void {
-        switch (sym.*) {
-            .function => |*fn_sym| {
-                // allocator.free(fn_sym.local_variables);
-                allocator.free(fn_sym.labels);
-
-                fn_sym.semantic_ir.deinit(allocator);
-                allocator.free(fn_sym.assembly_ir);
-                allocator.free(fn_sym.instructions);
-                allocator.free(fn_sym.assembly_data);
-            },
-            .constant => |*const_sym| {
-                const_sym.sir_graph.deinit(allocator);
-            },
-            // TODO:
-            // .@"struct" => |struct_sym| {
-            //     allocator.free(struct_sym.fields);
-            // },
-            // .@"packed" => |packed_sym| {
-            //     allocator.free(packed_sym.fields);
-            // },
-            // .@"enum" => |enum_sym| {
-            //     allocator.free(enum_sym.fields);
-            // },
-            else => {},
-        }
-    }
 };

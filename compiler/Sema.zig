@@ -79,9 +79,6 @@ interrupt_vectors: InterruptVectors = .{},
 
 has_errors: bool = false,
 
-/// Collection of strings which needed to be dynamically allocated
-string_pool: std.ArrayListUnmanaged([]u8) = .empty,
-
 /// General purpose allocator
 allocator: std.mem.Allocator,
 /// Arena allocator for storing permanent data, which lives until the end of the compilation
@@ -89,16 +86,18 @@ data_arena: *std.heap.ArenaAllocator,
 /// Arena allocator for storing temporary data
 temp_arena: *std.heap.ArenaAllocator,
 
+/// Allocator for permanent data storage
 pub inline fn dataAllocator(sema: Sema) std.mem.Allocator {
     return sema.data_arena.allocator();
 }
+/// Allocator for temporary data storage
 pub inline fn tempAllocator(sema: Sema) std.mem.Allocator {
     return sema.temp_arena.allocator();
 }
 
 pub fn process(sema: *Sema) AnalyzeError!void {
     // Gather symbols
-    try sema.module_map.ensureUnusedCapacity(sema.allocator, sema.modules.len);
+    try sema.module_map.ensureUnusedCapacity(sema.dataAllocator(), sema.modules.len);
     for (0..sema.modules.len) |module_idx| {
         try sema.gatherSymbols(.cast(module_idx));
     }
@@ -127,20 +126,6 @@ pub fn process(sema: *Sema) AnalyzeError!void {
     if (sema.has_errors) {
         return error.AnalyzeFailed;
     }
-}
-
-pub fn deinit(sema: *Sema) void {
-    sema.module_map.deinit(sema.allocator);
-    sema.type_expressions.deinit(sema.allocator);
-
-    for (sema.symbols.items) |*symbol| {
-        symbol.deinit(sema.allocator);
-    }
-    sema.symbols.deinit(sema.allocator);
-    for (sema.string_pool.items) |str| {
-        sema.allocator.free(str);
-    }
-    sema.string_pool.deinit(sema.allocator);
 }
 
 pub const AnalyzeError = error{AnalyzeFailed} || std.mem.Allocator.Error || std.fs.File.WriteError;
@@ -442,7 +427,6 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
         .symbol = symbol,
         .module = module,
     };
-    errdefer analyzer.deinit();
 
     try analyzer.process();
     try SirIter.reduce(sema, &analyzer.graph);
@@ -455,13 +439,23 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
 fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
 
-    const const_def = ast.nodeData(symbol.getCommon(sema).node).const_def;
+    const node = symbol.getCommon(sema).node;
+    const const_def = ast.nodeData(node).const_def;
     const data = ast.readExtraData(Ast.Node.ConstDefData, const_def.extra);
 
     var graph = symbol.getConst(sema).sir_graph;
     const ty: TypeExpression.Index = try .resolve(sema, data.type, module, symbol);
+
+    const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
+    const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
     // TODO: Support implicit typing
-    const value, _ = try sema.parseExpression(&graph, const_def.value, module, .{ .target_type = ty });
+    const value, _ = try sema.parseExpression(&graph, const_def.value, module, .{
+        .start_node = start,
+        .end_node = end,
+        .target_type = ty,
+    });
+    try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
+    try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
 
     const const_sym = symbol.getConst(sema);
     const_sym.type = ty;
@@ -616,7 +610,7 @@ pub fn createSymbol(sema: *Sema, module_idx: Module.Index, name: []const u8, sym
     const module = module_idx.get(sema);
 
     const symbol_idx: Symbol.Index = .cast(sema.symbols.items.len);
-    try sema.symbols.append(sema.allocator, symbol);
+    try sema.symbols.append(sema.dataAllocator(), symbol);
     try module.symbol_map.putNoClobber(sema.dataAllocator(), name, symbol_idx);
 
     var common = symbol_idx.getCommon(sema);
@@ -685,6 +679,11 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
 // Expression parsing
 
 const ParseExpressionOptions = struct {
+    /// `block_start` node of the current SSA
+    start_node: Sir.Index,
+    /// `block_end` node of the current SSA
+    end_node: Sir.Index,
+
     /// Result type of the expression
     /// Can be `.none` if the type can be inferred from the expression itself
     target_type: TypeExpression.Index,
@@ -723,7 +722,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
                 }
             }
 
-            return .{ try graph.create(sema.allocator, .{ .value = value }, &.{}, node), .comptime_integer };
+            return .{ try graph.create(sema.dataAllocator(), .{ .value = value }, &.{}, node), .comptime_integer };
         },
         .expr_ident => {
             const symbol_ident = ast.nodeToken(node);
@@ -750,36 +749,27 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
             const read_end = source_type.byteSize(sema);
 
             // Add dependency on previous `symbol` store
-            graph.refresh();
-            var i: usize = graph.list.len - 1;
-            const store_node: Sir.Index = while (graph.slice.tags[i] != .block_start) : (i -= 1) {
-                const index: Sir.Index = .cast(i);
-
-                // Check if it's an assignment (has `block_start` parent)
-                var it = index.iterateParents(graph);
-                while (it.next()) |edge| {
-                    if (edge.parent.getTag(graph) == .block_start) {
-                        break; // Found assignment
-                    }
-                } else {
-                    continue; // Not an assignment
+            var it = options.end_node.iterateParents(graph);
+            const prev_store_node = while (it.next()) |edge| {
+                if (edge.parent.getTag(graph) != .symbol) {
+                    continue;
                 }
 
-                const data = index.getData(graph).symbol;
+                const data = edge.parent.getData(graph).symbol;
                 if (data.symbol == symbol and
                     (data.byte_start >= read_start and data.byte_start < read_end or
                         data.byte_end > read_start and data.byte_end <= read_end or
                         data.byte_start <= read_start and data.byte_end >= read_end))
                 {
-                    break index;
+                    break edge.parent;
                 }
             } else .none;
 
-            const load_node = try graph.create(sema.allocator, .{ .symbol = .{
+            const load_node = try graph.create(sema.dataAllocator(), .{ .symbol = .{
                 .symbol = symbol,
                 .byte_start = 0,
                 .byte_end = source_type.byteSize(sema),
-            } }, if (store_node != .none) &.{.withParent(store_node, .none, (read_end - read_start) * 8)} else &.{}, node);
+            } }, if (prev_store_node != .none) &.{.withParent(prev_store_node)} else &.{}, node);
 
             return .{ load_node, .comptime_integer };
         },

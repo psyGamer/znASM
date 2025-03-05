@@ -18,18 +18,32 @@ graph: *Graph,
 
 queue: std.ArrayListUnmanaged(Sir.Index) = .empty,
 
+inline fn dataAllocator(iter: Iter) std.mem.Allocator {
+    return iter.sema.dataAllocator();
+}
+inline fn tempAllocator(iter: Iter) std.mem.Allocator {
+    return iter.sema.tempAllocator();
+}
+
 /// Applies all available optimizations to the graph
 pub fn reduce(sema: *Sema, graph: *Graph) !void {
     log.info("Applying SIR-reduction...", .{});
 
     var iter: Iter = .{ .sema = sema, .graph = graph };
-    defer iter.queue.deinit(sema.allocator);
+    defer iter.queue.deinit(sema.tempAllocator());
 
-    iter.graph.refresh();
-    inline for (graph_optimizations) |opt| {
-        try opt(&iter);
+    // Apply pre graph reductions
+    next_iter: while (true) {
+        inline for (graph_optimizations) |opt| {
+            if (try opt(&iter)) {
+                continue :next_iter;
+            }
+        }
+
+        break;
     }
 
+    // Apply node reductions
     next_iter: while (true) {
         for (0..graph.list.len) |i| {
             const index: Sir.Index = .cast(i);
@@ -52,6 +66,17 @@ pub fn reduce(sema: *Sema, graph: *Graph) !void {
         break;
     }
 
+    // Apply post graph optimizations
+    next_iter: while (true) {
+        inline for (graph_optimizations) |opt| {
+            if (try opt(&iter)) {
+                continue :next_iter;
+            }
+        }
+
+        break;
+    }
+
     log.info("Finished SIR-reduction", .{});
 }
 
@@ -66,23 +91,18 @@ fn RootNode(comptime tags: []const std.meta.Tag(Sir.Data)) type {
 
 /// General optimizations applied to the graph before applying `node_optimizations`
 const graph_optimizations = &.{
-    // optRemoveUnused,
+    optRemoveUnused,
 };
 /// Optimizations applied to specific nodes
 const node_optimizations = &.{
-    // optInlineConstantGraphs,
-    // optRemoveRedundantLoad,
+    optInlineConstantValue,
+    optRemoveRedundantSymbols,
 };
-
-inline fn arena(iter: Iter) std.mem.Allocator {
-    // TODO: Actually use an arena
-    return iter.sema.allocator;
-}
 
 // Graph Optimizations
 
 /// Removes unused nodes
-fn optRemoveUnused(iter: *Iter) !void {
+fn optRemoveUnused(iter: *Iter) !bool {
     const graph = iter.graph;
 
     // Traverse from ends to mark visited
@@ -94,80 +114,137 @@ fn optRemoveUnused(iter: *Iter) !void {
     for (0..graph.list.len) |i| {
         if (graph.slice.tags[i] == .block_end) {
             graph.slice.iter_data[i].visited = true;
-            try iter.queue.append(iter.arena(), .cast(i));
+            try iter.queue.append(iter.tempAllocator(), .cast(i));
         }
     }
 
-    // Search for `invalid`, to iterate all at once
-    var it: Graph.TraverseIterator(&.{.invalid}) = .{
-        .slice = &graph.slice,
+    var it: Graph.TraverseIterator(.parent, &.{}, &.{}) = .{
+        .graph = graph,
         .queue = &iter.queue,
     };
-    const found = try it.next(iter.arena());
-    std.debug.assert(found == null);
+    std.debug.assert(try it.next(iter.tempAllocator()) == null);
 
+    // Everything not visited is unused
+    var removed_any = false;
     for (0..graph.list.len) |i| {
         if (!graph.slice.iter_data[i].visited and graph.slice.tags[i] != .invalid) {
-            // Unused
+            log.debug("Removed unused node '{s}' at [{}]", .{ @tagName(graph.slice.tags[i]), i });
             graph.remove(.cast(i));
+            removed_any = true;
         }
     }
+    return removed_any;
 }
 
 // Node Optimizations
 
 /// Inlines the value of referenced global constants
-fn optInlineConstantGraphs(iter: *Iter, root: RootNode(&.{.symbol})) !bool {
-    const sema = iter.sema;
+fn optInlineConstantValue(iter: *Iter, root: RootNode(&.{.symbol})) !bool {
     const graph = iter.graph;
-    const node = root.index;
 
-    if (node.getParents(graph).left != .none) {
-        return false; // Constants can't be assigned to
-    }
-
-    const symbol = node.getData(graph).symbol.symbol;
-    const sym = symbol.get(sema);
-    if (sym.* != .constant) {
+    const data = root.index.getData(graph).symbol;
+    const symbol = data.symbol.get(iter.sema);
+    if (symbol.* != .constant) {
         return false;
     }
 
-    const sym_graph = &sym.constant.sir_graph;
-    sym_graph.refresh();
+    const const_sym = symbol.constant;
+    const const_value = const_sym.value.getData(&const_sym.sir_graph).value;
 
-    // Global constants **must** only be a single `value` node
-    std.debug.assert(sym.constant.value.getTag(sym_graph) == .value);
-    std.debug.assert(sym.constant.value.getParents(sym_graph).left == .none and sym.constant.value.getParents(sym_graph).right == .none);
-    try graph.replace(sema.allocator, node, .{ .data = sym.constant.value.getData(sym_graph), .source = node.getSourceNode(graph) });
+    const value =
+        if (data.byte_start == 0 and data.byte_end == const_sym.type.byteSize(iter.sema))
+            // Entire value is referenced
+            const_value
+        else b: {
+            // Only sub-range is referenced
+            var new_value = const_value.toMutable(try iter.tempAllocator().alloc(std.math.big.Limb, const_value.limbs.len));
+            new_value.shiftRight(new_value.toConst(), data.byte_start * 8);
+            // Manually preform AND to avoid allocations
+            const limb_idx = @divFloor(data.byte_end - data.byte_start - 1, @sizeOf(std.math.big.Limb));
+            // const limb_mask = @as(std.math.big.Limb, 1) <<| ((symbol_data.byte_end - symbol_data.byte_start - 1) % @sizeOf(std.math.big.Limb) + 1) * 8 -% 1;
+            // TODO: Use above calculation once self-hosted backend has shl_sat implemented
+            const limb_mask =
+                if (data.byte_end - data.byte_start % @sizeOf(std.math.big.Limb) == 0)
+                    std.math.maxInt(std.math.big.Limb)
+                else
+                    @as(std.math.big.Limb, 1) << @intCast(((data.byte_end - data.byte_start - 1) % @sizeOf(std.math.big.Limb) + 1) * 8 -% 1);
+            new_value.limbs[limb_idx] &= limb_mask;
+            new_value.len = new_value.limbs.len;
+            // Check if sign-bit is included
+            new_value.positive = const_value.positive or data.byte_end != const_sym.type.byteSize(iter.sema);
 
-    log.debug("Inlined constant graph of '{}' into [{}]", .{ sema.getSymbolLocation(symbol), @intFromEnum(node) });
+            break :b new_value.toConst();
+        };
+    try graph.replace(iter.dataAllocator(), root.index, .{ .value = value }, root.index.getSourceNode(graph));
+
+    log.debug("Inlined constant value of {}[{d}..{d}] at [{}]", .{ iter.sema.getSymbolLocation(data.symbol), data.byte_start, data.byte_end, @intFromEnum(root.index) });
     return true;
 }
 
-/// Removes redundant symbol loads
-fn optRemoveRedundantLoad(iter: *Iter, root: RootNode(&.{.symbol})) !bool {
+/// Removes redundant symbol loads / stores
+fn optRemoveRedundantSymbols(iter: *Iter, root: RootNode(&.{.symbol})) !bool {
     const graph = iter.graph;
-    const load = root.index;
 
-    if (load.getParents(graph).left != .none) {
-        return false; // Not a load
+    const data = root.index.getData(graph).symbol;
+
+    var prev_store: Sir.Index = .none;
+    var load_value: Sir.Index = .none;
+
+    var parent_it = graph.iterateParents(root.index);
+    while (parent_it.next()) |edge| {
+        if (edge.intermediate_register == .none and edge.bit_size == 0) {
+            if (edge.parent.getTag(graph) != .symbol) {
+                continue;
+            }
+
+            const other_data = edge.parent.getData(graph).symbol;
+            if (data.symbol == other_data.symbol and data.byte_start == other_data.byte_start and data.byte_end == other_data.byte_end) {
+                prev_store = edge.parent;
+            }
+        } else {
+            load_value = edge.parent;
+        }
     }
 
-    const store = load.getParents(graph).right;
-    if (store == .none or store.getTag(graph) != .symbol) {
-        return false;
+    if (load_value == .none and prev_store != .none) {
+        // Remove redudntant load
+        parent_it = graph.iterateParents(root.index);
+        while (parent_it.next()) |edge| {
+            if (edge.parent != prev_store) {
+                edge.child = prev_store;
+                try graph.addEdge(iter.dataAllocator(), edge.*);
+            }
+        }
+        var child_it = graph.iterateChildren(root.index);
+        while (child_it.next()) |edge| {
+            edge.parent = prev_store;
+            try graph.addEdge(iter.dataAllocator(), edge.*);
+        }
+
+        graph.remove(root.index);
+        log.debug("Removed redudant load of {}[{d}..{d}] at [{d}]", .{ iter.sema.getSymbolLocation(data.symbol), data.byte_start, data.byte_end, @intFromEnum(root.index) });
+        return true;
+    } else if (load_value != .none and prev_store != .none) {
+        // Remove redundant previous store
+        parent_it = graph.iterateParents(prev_store);
+        while (parent_it.next()) |edge| {
+            if (edge.intermediate_register == .none and edge.bit_size == 0) {
+                edge.child = root.index;
+                try graph.addEdge(iter.dataAllocator(), edge.*);
+            }
+        }
+        var child_it = graph.iterateChildren(prev_store);
+        while (child_it.next()) |edge| {
+            if (edge.child != root.index) {
+                edge.parent = root.index;
+                try graph.addEdge(iter.dataAllocator(), edge.*);
+            }
+        }
+
+        graph.remove(prev_store);
+        log.debug("Removed redudant store of {}[{d}..{d}] at [{d}]", .{ iter.sema.getSymbolLocation(data.symbol), data.byte_start, data.byte_end, @intFromEnum(prev_store) });
+        return true;
     }
 
-    const curr_data = load.getData(graph).symbol;
-    const dep_data = store.getData(graph).symbol;
-    if (!std.meta.eql(curr_data, dep_data)) {
-        return false;
-    }
-
-    try graph.relocateParents(iter.arena(), &iter.queue, store, load, .right);
-    try graph.relocateChildren(iter.arena(), &iter.queue, store, load, .right);
-    graph.remove(store);
-
-    log.debug("Merged store and load of {}[{d}..{d}] into [{}]", .{ iter.sema.getSymbolLocation(curr_data.symbol), curr_data.byte_start, curr_data.byte_end, @intFromEnum(load) });
     return false;
 }

@@ -245,13 +245,10 @@ fn compile(allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, t
         .data_arena = data_arena,
         .temp_arena = temp_arena,
     };
-    errdefer sema.deinit();
-
     sema.process() catch |err| switch (err) {
         error.AnalyzeFailed => return 1,
         else => |e| return e,
     };
-    defer sema.deinit();
 
     if (options.dump_sir_graph.len != 0) {
         // Delete and re-create file to avoid "File changed" pop-up stacking up in KGraphViewer even tho the setting to ask is disabled... -_-

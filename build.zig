@@ -4,25 +4,39 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const use_llvm = b.option(bool, "use-llvm", "Use LLVM for compiling znASM") orelse (optimize != .Debug or target.result.os.tag == .windows);
+    const options: Options = .{
+        .use_llvm = b.option(bool, "use-llvm", "Use LLVM for compiling znASM") orelse (optimize != .Debug or target.result.os.tag == .windows),
+        .track_allocations = b.option(Options.AllocationTracking, "track-allocations", "Tracks all performed memory allocations") orelse .none,
+    };
 
-    buildCompiler(b, target, optimize, use_llvm);
+    buildCompiler(b, target, optimize, options);
 }
 
-fn buildCompiler(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, use_llvm: bool) void {
+const Options = struct {
+    pub const AllocationTracking = enum { all, total, none };
+
+    use_llvm: bool,
+    track_allocations: AllocationTracking,
+};
+
+fn buildCompiler(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, options: Options) void {
+    const build_options = b.addOptions();
+    build_options.addOption(Options.AllocationTracking, @tagName(.track_allocations), options.track_allocations);
+
     const module = b.createModule(.{
         .root_source_file = b.path("compiler/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    module.addImport("build_options", build_options.createModule());
 
     // Executable
     const exe = b.addExecutable(.{
         .name = "znasm",
         .root_module = module,
     });
-    exe.use_llvm = use_llvm;
-    exe.use_lld = use_llvm;
+    exe.use_llvm = options.use_llvm;
+    exe.use_lld = options.use_llvm;
     b.installArtifact(exe);
 
     // 'run' step
