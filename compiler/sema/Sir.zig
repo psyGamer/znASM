@@ -1,6 +1,8 @@
 //! High-level Semantic Intermediate Representation
 //! Represented as a directed acyclic graph
 const std = @import("std");
+const log = std.log.scoped(.sir);
+
 const builtin_module = @import("../builtin_module.zig");
 const formatting = @import("../util/formatting.zig");
 
@@ -195,7 +197,7 @@ pub const Data = union(enum) {
 };
 
 /// Edge-connection between a parent and child node
-pub const Edge = packed struct(u64) {
+pub const Edge = struct {
     pub const Index = enum(u32) {
         const child_flag: u32 = 1 << 31;
         const extra_flag: u32 = 1 << 30;
@@ -220,11 +222,14 @@ pub const Edge = packed struct(u64) {
         }
         /// Gets the actual stored index
         pub fn getIndex(index: Edge.Index) u32 {
+            std.debug.assert(index != .none);
             return @intFromEnum(index) & ~(child_flag | extra_flag);
         }
 
         /// Marks whether this edges points to a child node
         pub fn markChild(index: *Edge.Index, is_child: bool) void {
+            std.debug.assert(index.* != .none);
+
             const idx_ptr: *u32 = @ptrCast(index);
             if (is_child) {
                 idx_ptr.* |= child_flag;
@@ -234,12 +239,16 @@ pub const Edge = packed struct(u64) {
         }
         /// Check if this edges points to a child node
         pub fn isChild(index: Edge.Index) bool {
+            std.debug.assert(index != .none);
+
             const idx: u32 = @intFromEnum(index);
             return idx & child_flag != 0;
         }
 
         /// Marks whether this index pointer to further indicies in `graph.extra`
         pub fn markExtra(index: *Edge.Index, is_extra: bool) void {
+            std.debug.assert(index.* != .none);
+
             const idx_ptr: *u32 = @ptrCast(index);
             if (is_extra) {
                 idx_ptr.* |= extra_flag;
@@ -249,6 +258,8 @@ pub const Edge = packed struct(u64) {
         }
         /// Check if this index pointer to further indicies in `graph.extra`
         pub fn isExtra(index: Edge.Index) bool {
+            std.debug.assert(index != .none);
+
             const idx: u32 = @intFromEnum(index);
             return idx & extra_flag != 0;
         }
@@ -258,8 +269,10 @@ pub const Edge = packed struct(u64) {
     child: Sir.Index,
     parent: Sir.Index,
 
-    /// Bit-size of this connection
-    bit_size: u16,
+    /// Bit-offset where relevant data starts. All bits before **must** be zero
+    bit_start_offset: u16,
+    /// Bit-offset where relevant data end. All bits after **must** be zero
+    bit_end_offset: u16,
 
     /// Intermediate register which performs this edge operation
     intermediate_register: builtin_module.CpuRegister,
@@ -272,9 +285,21 @@ pub const Edge = packed struct(u64) {
         return .{
             .child = child,
             .parent = parent,
-            .intermediate_register = .none,
-            .bit_size = 0,
+            .intermediate_register = undefined,
+            .bit_start_offset = undefined,
+            .bit_end_offset = undefined,
             .type = .dependency,
+        };
+    }
+    /// Declares a non-dataflow dependency between two nodes
+    pub fn initDataDependency(child: Sir.Index, parent: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_start_offset: u16, bit_end_offset: u16) Edge {
+        return .{
+            .child = child,
+            .parent = parent,
+            .bit_start_offset = bit_start_offset,
+            .bit_end_offset = bit_end_offset,
+            .intermediate_register = intermediate_register,
+            .type = .dataflow,
         };
     }
 
@@ -283,8 +308,9 @@ pub const Edge = packed struct(u64) {
         return .{
             .child = .none,
             .parent = parent,
-            .intermediate_register = .none,
-            .bit_size = 0,
+            .intermediate_register = undefined,
+            .bit_start_offset = undefined,
+            .bit_end_offset = undefined,
             .type = .dependency,
         };
     }
@@ -293,29 +319,32 @@ pub const Edge = packed struct(u64) {
         return .{
             .child = child,
             .parent = .none,
-            .intermediate_register = .none,
-            .bit_size = 0,
+            .intermediate_register = undefined,
+            .bit_start_offset = undefined,
+            .bit_end_offset = undefined,
             .type = .dependency,
         };
     }
 
     /// Dataflow connection between the to-be-added child and the parent
-    pub fn withDataParent(parent: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_size: u16) Edge {
+    pub fn withDataParent(parent: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_start_offset: u16, bit_end_offset: u16) Edge {
         return .{
             .child = .none,
             .parent = parent,
+            .bit_start_offset = bit_start_offset,
+            .bit_end_offset = bit_end_offset,
             .intermediate_register = intermediate_register,
-            .bit_size = bit_size,
             .type = .dataflow,
         };
     }
     /// Dataflow connection between the to-be-added parent and the child
-    pub fn withDataChild(child: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_size: u16) Edge {
+    pub fn withDataChild(child: Sir.Index, intermediate_register: builtin_module.CpuRegister, bit_start_offset: u16, bit_end_offset: u16) Edge {
         return .{
             .child = child,
             .parent = .none,
+            .bit_start_offset = bit_start_offset,
+            .bit_end_offset = bit_end_offset,
             .intermediate_register = intermediate_register,
-            .bit_size = bit_size,
             .type = .dataflow,
         };
     }
@@ -429,21 +458,25 @@ pub const Graph = struct {
             }
         } else {
             // Write additional edge indices into `extra`
+            const extra_storage = 2; // Encode in last two bytes
+            log.debug("Writing {d} edge indices into extra", .{edges.len - (edge_indices.len - extra_storage)});
+            try alignExtraListEnsureCapacity(&graph.extra, allocator, (edges.len - (edge_indices.len - extra_storage)) * @sizeOf(Edge.Index), @alignOf(Edge.Index));
+
             const extra_index: ExtraIndex = @intCast(graph.extra.items.len);
-            try graph.extra.ensureUnusedCapacity(allocator, (edges.len - edge_indices.len) * @sizeOf(Edge.Index));
-            for (edges[edge_indices.len..], edge_indices.len..) |edge, idx| {
+            for (edges[(edge_indices.len - extra_storage)..], (edge_indices.len - extra_storage)..) |edge, idx| {
                 var edge_idx: Edge.Index = .cast(edge_index + idx * @sizeOf(Edge));
                 edge_idx.markChild(edge.parent == index);
 
                 graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
             }
 
+            std.debug.assert(extra_storage == 2);
             edge_indices[edge_indices.len - 1] = .cast(extra_index);
             edge_indices[edge_indices.len - 1].markExtra(true);
             edge_indices[edge_indices.len - 2] = .cast(edges.len - edge_indices.len);
             edge_indices[edge_indices.len - 2].markExtra(true);
 
-            for (edges[0 .. edge_indices.len - 2], edge_indices[0 .. edge_indices.len - 2], 0..) |edge, *edge_idx, idx| {
+            for (edges[0..(edge_indices.len - extra_storage)], edge_indices[0..(edge_indices.len - extra_storage)], 0..) |edge, *edge_idx, idx| {
                 edge_idx.* = .cast(edge_index + idx * @sizeOf(Edge));
                 edge_idx.markChild(edge.parent == index);
             }
@@ -460,7 +493,7 @@ pub const Graph = struct {
     }
 
     /// Replaces the target node with new data, keeping edge connections
-    pub fn replace(graph: *Graph, allocator: std.mem.Allocator, index: Index, data: Data, node: Node.Index) !void {
+    pub fn replace(graph: *Graph, allocator: std.mem.Allocator, index: Index, data: Data) !void {
         const tag = std.meta.activeTag(data);
         const packed_data = try data.pack(allocator, &graph.extra);
 
@@ -468,7 +501,6 @@ pub const Graph = struct {
         graph.slice.data[@intFromEnum(index)] = switch (tag) {
             inline else => |t| @unionInit(Data.Bare, @tagName(t), @field(packed_data, @tagName(t))),
         };
-        graph.slice.sources[@intFromEnum(index)] = node;
     }
     /// Fully replaces the target with a new node, including edge connections
     pub fn replaceFull(graph: *Graph, allocator: std.mem.Allocator, index: Index, data: Data, edges: []const Edge, node: Node.Index) !void {
@@ -484,19 +516,11 @@ pub const Graph = struct {
 
         var it = graph.iterateEdges(index);
         while (it.next()) |edge| {
+            std.debug.assert(edge.child == index or edge.parent == index);
             graph.removeEdge(edge);
         }
     }
 
-    /// Adds a new edge connections between two nodes
-    pub fn addConnection(graph: *Graph, allocator: std.mem.Allocator, child: Index, parent: Index, intermedite_register: builtin_module.CpuRegister, bit_size: u16) !void {
-        return graph.addEdge(allocator, .{
-            .child = child,
-            .parent = parent,
-            .intermediate_register = intermedite_register,
-            .bit_size = bit_size,
-        });
-    }
     /// Adds a new edge connections between two nodes
     pub fn addEdge(graph: *Graph, allocator: std.mem.Allocator, edge: Edge) !void {
         try alignExtraList(&graph.extra, allocator, @alignOf(Edge));
@@ -509,6 +533,11 @@ pub const Graph = struct {
         }
     }
     /// Removes an existing edge connection between two nodes
+    pub fn removeEdge(_: *Graph, edge: *Edge) void {
+        edge.child = .none;
+        edge.parent = .none;
+    }
+    /// Removes an existing edge connection between two nodes
     pub fn removeConnection(graph: *Graph, child: Index, parent: Index) void {
         var it = graph.iterateParents(child);
         while (it.next()) |edge| {
@@ -518,14 +547,49 @@ pub const Graph = struct {
             }
         }
     }
-    /// Removes an existing edge connection between two nodes
-    pub fn removeEdge(_: *Graph, edge: *Edge) void {
-        edge.child = .none;
-        edge.parent = .none;
+
+    /// Relocates all direct children of `from` to `to`
+    pub fn relocateChildren(graph: *Graph, allocator: std.mem.Allocator, from: Index, to: Index) !void {
+        std.debug.assert(from != .none);
+        std.debug.assert(to != .none);
+
+        var it = graph.iterateChildren(from);
+        while (it.nextWithIndex()) |entry| {
+            const edge, const index = entry;
+            defer index.* = .none;
+
+            if (edge.child == to) {
+                graph.removeEdge(edge);
+                continue;
+            }
+
+            edge.parent = to;
+            try graph.appendEdge(allocator, edge.*, index.getIndex(), .parent);
+        }
+    }
+    /// Relocates all direct parents of `from` to `to`
+    pub fn relocateParents(graph: *Graph, allocator: std.mem.Allocator, from: Index, to: Index) !void {
+        std.debug.assert(from != .none);
+        std.debug.assert(to != .none);
+
+        var it = graph.iterateParents(from);
+        while (it.nextWithIndex()) |entry| {
+            const edge, const index = entry;
+            defer index.* = .none;
+
+            if (edge.parent == to) {
+                graph.removeEdge(edge);
+                continue;
+            }
+
+            edge.child = to;
+            try graph.appendEdge(allocator, edge.*, index.getIndex(), .child);
+        }
     }
 
     const EdgeRelation = enum { child, parent };
-    fn appendEdge(graph: *Graph, allocator: std.mem.Allocator, edge: Edge, edge_index: ExtraIndex, comptime relation: EdgeRelation) !void { // TODO: Maybe iterate edges and replace removed ones?
+    fn appendEdge(graph: *Graph, allocator: std.mem.Allocator, edge: Edge, edge_index: ExtraIndex, comptime relation: EdgeRelation) !void {
+        // TODO: Maybe iterate edges and replace removed ones?
         const edges = &graph.slice.edges[@intFromEnum(@field(edge, @tagName(relation)))];
         if (edges[edges.len - 1] == .none) {
             // Free slot in node
@@ -540,8 +604,9 @@ pub const Graph = struct {
             // Need to migrate to `extra`
             std.debug.assert(!edges[edges.len - 2].isExtra());
 
-            const extra_index: ExtraIndex = @intCast(graph.extra.items.len);
+            log.debug("Writing 3 edge indices into extra", .{});
             try alignExtraListEnsureCapacity(&graph.extra, allocator, 3 * @sizeOf(Edge.Index), @alignOf(Edge.Index));
+            const extra_index: ExtraIndex = @intCast(graph.extra.items.len);
             for (edges[(edges.len - 2)..]) |edge_idx| {
                 graph.extra.appendSliceAssumeCapacity(std.mem.asBytes(&edge_idx));
             }
@@ -562,6 +627,7 @@ pub const Graph = struct {
             const extra_index: ExtraIndex = edges[edges.len - 1].getIndex();
             const extra_length: ExtraIndex = edges[edges.len - 2].getIndex();
 
+            log.debug("Writing {d} edge indices into extra", .{extra_length + 1});
             try alignExtraListEnsureCapacity(&graph.extra, allocator, (extra_length + 1) * @sizeOf(Edge.Index), @alignOf(Edge.Index));
 
             const new_extra_index: ExtraIndex = @intCast(graph.extra.items.len);
@@ -606,21 +672,15 @@ pub const Graph = struct {
             },
 
             pub fn next(iter: *Iterator) ?*Edge {
+                const edge, _ = iter.nextWithIndex() orelse return null;
+                return edge;
+            }
+            pub fn nextWithIndex(iter: *Iterator) ?struct { *Edge, *Edge.Index } {
                 // Stored in the node
                 while (iter.edge_index < @as(Edges, undefined).len) : (iter.edge_index += 1) {
-                    const edges = iter.graph.slice.edges[@intFromEnum(iter.access_data.node)];
-                    if (edges[iter.edge_index] == .none) {
-                        return null;
-                    }
-
-                    // Check for `extra` encoding
-                    if (edges[iter.edge_index].isExtra()) {
-                        std.debug.assert(iter.edge_index == @as(Edges, undefined).len - 2);
-                        std.debug.assert(edges[iter.edge_index + 1].isExtra());
-                        iter.edge_index = edges[iter.edge_index + 1].getIndex();
-                        std.debug.assert(iter.edge_index > @as(Edges, undefined).len);
-                        iter.access_data = .{ .extra_end = iter.edge_index + edges[@as(Edges, undefined).len - 2].getIndex() * @sizeOf(Edge.Index) };
-                        break;
+                    const edges = &iter.graph.slice.edges[@intFromEnum(iter.access_data.node)];
+                    if (edges[iter.edge_index] == .none or edges[iter.edge_index].isExtra()) {
+                        continue;
                     }
 
                     if (yield_children and edges[iter.edge_index].isChild() or
@@ -628,18 +688,30 @@ pub const Graph = struct {
                     {
                         const edge = edges[iter.edge_index].get(iter.graph.extra);
                         if (edge.child != .none and edge.parent != .none) {
-                            iter.edge_index += 1;
-                            return edge;
+                            defer iter.edge_index += 1;
+                            return .{ edge, &edges[iter.edge_index] };
                         }
                     }
                 }
+
+                // Check for `extra` encoding
                 if (iter.edge_index == @as(Edges, undefined).len) {
-                    return null;
+                    const edges = iter.graph.slice.edges[@intFromEnum(iter.access_data.node)];
+                    if (edges[@as(Edges, undefined).len - 1] != .none and edges[@as(Edges, undefined).len - 1].isExtra()) {
+                        iter.edge_index = edges[@as(Edges, undefined).len - 1].getIndex();
+                        std.debug.assert(iter.edge_index > @as(Edges, undefined).len);
+                        iter.access_data = .{ .extra_end = iter.edge_index + edges[@as(Edges, undefined).len - 2].getIndex() * @sizeOf(Edge.Index) };
+                    } else {
+                        return null;
+                    }
                 }
 
                 // Stored in `extra`
                 while (iter.edge_index < iter.access_data.extra_end) : (iter.edge_index += @sizeOf(Edge.Index)) {
-                    const index = std.mem.bytesToValue(Edge.Index, iter.graph.extra.items[iter.edge_index..(iter.edge_index + @sizeOf(Edge.Index))]);
+                    const index: *Edge.Index = @alignCast(@ptrCast(iter.graph.extra.items[iter.edge_index..(iter.edge_index + @sizeOf(Edge.Index))]));
+                    if (index.* == .none) {
+                        continue;
+                    }
 
                     if (yield_children and index.isChild() or
                         yield_parents and !index.isChild())
@@ -647,7 +719,7 @@ pub const Graph = struct {
                         const edge = index.get(iter.graph.extra);
                         if (edge.child != .none and edge.parent != .none) {
                             iter.edge_index += @sizeOf(Edge.Index);
-                            return edge;
+                            return .{ edge, index };
                         }
                     }
                 }
@@ -658,6 +730,8 @@ pub const Graph = struct {
     }
     /// Iterates all edges of the given node
     pub fn iterateEdges(graph: *Graph, index: Index) EdgeIterator(true, true) {
+        std.debug.assert(index != .none);
+
         return .{
             .graph = graph,
             .edge_index = 0,
@@ -666,6 +740,8 @@ pub const Graph = struct {
     }
     /// Iterates all child-edges of the given node
     pub fn iterateChildren(graph: *Graph, index: Index) EdgeIterator(true, false) {
+        std.debug.assert(index != .none);
+
         return .{
             .graph = graph,
             .edge_index = 0,
@@ -674,6 +750,8 @@ pub const Graph = struct {
     }
     /// Iterates all parent-edges of the given node
     pub fn iterateParents(graph: *Graph, index: Index) EdgeIterator(false, true) {
+        std.debug.assert(index != .none);
+
         return .{
             .graph = graph,
             .edge_index = 0,
@@ -861,10 +939,10 @@ pub const Graph = struct {
                 switch (edge.type) {
                     .dependency => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d}\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id }),
                     .dataflow => switch (edge.intermediate_register) {
-                        .none => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=gray32,fontcolor=gray32,fontsize=10,label=\"{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
-                        .a => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=crimson,fontcolor=crimson,fontsize=10,label=\"a{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
-                        .x => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=forestgreen,fontcolor=forestgreen,fontsize=10,label=\"x{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
-                        .y => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=dodgerblue,fontcolor=dodgerblue,fontsize=10,label=\"y{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
+                        .none => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=gray32,fontcolor=gray32,fontsize=10,label=\"{d}..{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_start_offset, edge.bit_end_offset }),
+                        .a => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=crimson,fontcolor=crimson,fontsize=10,label=\"a{d}..{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_start_offset, edge.bit_end_offset }),
+                        .x => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=forestgreen,fontcolor=forestgreen,fontsize=10,label=\"x{d}..{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_start_offset, edge.bit_end_offset }),
+                        .y => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=dodgerblue,fontcolor=dodgerblue,fontsize=10,label=\"y{d}..{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_start_offset, edge.bit_end_offset }),
                     },
                 }
             }

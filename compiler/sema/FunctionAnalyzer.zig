@@ -234,10 +234,10 @@ pub fn handleBlock(ana: *Analyzer, node: Node.Index) Error!void {
     }
 
     // Ensure start and end are somehow connected
-    var it = start.iterateChildren(&ana.graph);
-    if (it.next() == null) {
-        try ana.graph.addEdge(ana.dataAllocator(), .initDependency(end, start));
-    }
+    // var it = start.iterateChildren(&ana.graph);
+    // if (it.next() == null) {
+    try ana.graph.addEdge(ana.dataAllocator(), .initDependency(end, start));
+    // }
 }
 
 fn handleLabel(ana: *Analyzer, node: Node.Index) Error!void {
@@ -421,7 +421,7 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
         {
             break edge.parent;
         }
-    } else scope.start; // This is the first store
+    } else .none;
 
     const expr_node, _, const int_reg = try sir_gen.parseExpression(ana.sema, &ana.graph, assign.value, ana.module, .{
         .start_node = scope.start,
@@ -435,7 +435,10 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
             .symbol = symbol,
             .byte_start = write_start,
             .byte_end = write_end,
-        } }, &.{ .withDataParent(expr_node, .a, field_size), .withParent(prev_store_node) }, node);
+        } }, &.{.withDataParent(expr_node, .a, 0, field_size)}, node);
+        if (prev_store_node != .none) {
+            try ana.graph.addEdge(ana.dataAllocator(), .initDependency(store_node, prev_store_node));
+        }
 
         // Update `block_end` connection
         if (prev_store_node != scope.start) {
@@ -477,34 +480,31 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
             .byte_start = write_start,
             .byte_end = write_end,
         } }, &.{}, node);
-        if (prev_store_node != scope.start) {
+        if (prev_store_node != .none) {
             try ana.graph.addEdge(ana.dataAllocator(), .initDependency(load_node, prev_store_node));
         }
 
         const and_mask = try ana.create(.{ .value = mask_value.toConst() }, &.{}, node);
-        const and_node = try ana.create(.bit_and, &.{ .withDataParent(load_node, int_reg, access_size), .withDataParent(and_mask, int_reg, access_size) }, node);
+        const and_node = try ana.create(.bit_and, &.{ .withDataParent(load_node, int_reg, 0, access_size), .withDataParent(and_mask, int_reg, 0, access_size) }, node);
 
         const store_cleared_node = try ana.create(.{ .symbol = .{
             .symbol = symbol,
             .byte_start = write_start,
             .byte_end = write_end,
-        } }, &.{.withDataParent(and_node, int_reg, access_size)}, node);
+        } }, &.{.withDataParent(and_node, int_reg, 0, access_size)}, node);
 
         // Place value into field
-        const shift_node = try ana.create(.{ .bit_shift_left = field_start }, &.{.withDataParent(expr_node, int_reg, field_size)}, node);
-        const or_node = try ana.create(.bit_or, &.{ .withDataParent(store_cleared_node, int_reg, access_size), .withDataParent(shift_node, int_reg, access_size) }, node);
+        const shift_node = try ana.create(.{ .bit_shift_left = field_start }, &.{.withDataParent(expr_node, int_reg, 0, field_size)}, node);
+        const or_node = try ana.create(.bit_or, &.{ .withDataParent(store_cleared_node, int_reg, 0, access_size), .withDataParent(shift_node, int_reg, field_start, field_start + field_size) }, node);
 
         const store_node = try ana.create(.{ .symbol = .{
             .symbol = symbol,
             .byte_start = write_start,
             .byte_end = write_end,
-        } }, &.{.withDataParent(or_node, int_reg, access_size)}, node);
-        if (prev_store_node == scope.start) {
-            try ana.graph.addEdge(ana.dataAllocator(), .initDependency(store_node, scope.start));
-        }
+        } }, &.{.withDataParent(or_node, int_reg, 0, access_size)}, node);
 
         // Update `block_end` connection
-        if (prev_store_node != scope.start) {
+        if (prev_store_node != .none) {
             ana.graph.removeConnection(scope.end, prev_store_node);
         }
         try ana.graph.addEdge(ana.dataAllocator(), .initDependency(scope.end, store_node));
