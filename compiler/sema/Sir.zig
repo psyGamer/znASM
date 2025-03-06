@@ -1,5 +1,5 @@
 //! High-level Semantic Intermediate Representation
-//! Represented as a 'Sea of Nodes' directed acyclic graph
+//! Represented as a directed acyclic graph
 const std = @import("std");
 const builtin_module = @import("../builtin_module.zig");
 const formatting = @import("../util/formatting.zig");
@@ -86,10 +86,26 @@ pub const Data = union(enum) {
     /// Nodes which indicate the end of an SSA block
     pub const block_ends: []const std.meta.Tag(Data) = &.{.@"return"};
 
+    // Miscellaneous nodes
+
     /// Indicates the start of a Single-Static-Assignment (SSA) block
     block_start: void,
     /// Indicates the end of a Single-Static-Assignment (SSA) block
     block_end: void,
+
+    /// Invalid node, which got optimized away
+    invalid: void,
+
+    // Control-flow nodes
+
+    /// Return from the current function
+    ///
+    /// Dependencies:
+    ///  - Assignments to global variables (`var` / `reg`)
+    ///  - Assignments to return variables (TODO)
+    @"return": void,
+
+    // SSA Nodes
 
     /// Compile-time known immediate value
     /// Cannot have dependencies
@@ -104,15 +120,15 @@ pub const Data = union(enum) {
         byte_end: u16,
     },
 
-    /// Return from the current function
-    ///
-    /// Dependencies:
-    ///  - Assignments to global variables (`var` / `reg`)
-    ///  - Assignments to return variables (TODO)
-    @"return": void,
+    /// Shifts the one parent value left by `n` bits
+    bit_shift_left: u16,
+    /// Shifts the one parent value right by `n` bits
+    bit_shift_right: u16,
 
-    /// Invalid node, which got optimized away
-    invalid: void,
+    /// Applies a bitwise AND between the two parent values
+    bit_and: void,
+    /// Applies a bitwise OR between the two parent values
+    bit_or: void,
 
     pub fn unpack(packed_data: Packed, extra: Graph.ExtraList) Data {
         switch (packed_data) {
@@ -150,14 +166,20 @@ pub const Data = union(enum) {
     pub const Packed = union(std.meta.Tag(Data)) {
         block_start: void,
         block_end: void,
+        invalid: void,
+
+        @"return": void,
+
         value: struct {
             positive: bool,
             limbs_len: u16,
             limbs_index: u32,
         },
         symbol: @TypeOf(@as(Data, undefined).symbol),
-        @"return": void,
-        invalid: void,
+        bit_shift_left: u16,
+        bit_shift_right: u16,
+        bit_and: void,
+        bit_or: void,
     };
 
     /// Bare union of the packed data representation
@@ -791,6 +813,7 @@ pub const Graph = struct {
             // const src_template_small = "<BR/><FONT COLOR=\"#191919\" POINT-SIZE=\"11\">{s}:{d}:{d}</FONT>";
 
             const color_control_flow = "fillcolor=darkorchid2";
+            const style_ssa = "shape=box,fillcolor=chartreuse4]\n";
 
             const index: Index = @enumFromInt(@as(std.meta.Tag(Index), @intCast(idx)));
 
@@ -800,26 +823,29 @@ pub const Graph = struct {
             const src_file = formatting.fmtHtmlEscape(ast.source_path);
             const src_line = formatting.fmtHtmlEscape(std.mem.trim(u8, src_loc.source_line, " "));
 
-            switch (index.getTag(graph)) {
-                .value => {
-                    const int_value = index.getData(graph).value;
-                    try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "{}>,fillcolor=darkorange]\n", .{ idx, id, idx, int_value });
+            switch (index.getData(graph)) {
+                .block_start => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA Start>,shape=hexagon,fillcolor=blueviolet]\n", .{ idx, id, idx }),
+                .block_end => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA End>,shape=hexagon,fillcolor=blueviolet]\n", .{ idx, id, idx }),
+                .invalid => {}, // ignore
+
+                .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "return>,shape=hexagon," ++ color_control_flow ++ "]\n", .{ idx, id, idx }),
+
+                .value => |data| {
+                    try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "${x}>,fillcolor=darkorange]\n", .{ idx, id, idx, data });
                 },
-                .symbol => {
-                    const target = index.getData(graph).symbol;
-                    const target_type = switch (target.symbol.get(@constCast(sema)).*) {
+                .symbol => |data| {
+                    const data_type = switch (data.symbol.get(@constCast(sema)).*) {
                         .constant => |const_sym| const_sym.type,
                         .variable => |var_sym| var_sym.type,
                         .register => |reg_sym| reg_sym.type,
                         else => unreachable,
                     };
-                    try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "{}[{d}..{d}] ({})" ++ src_template ++ ">,shape=box,fillcolor=firebrick1]\n", .{ idx, id, idx, sema.getSymbolLocation(target.symbol), target.byte_start, target.byte_end, target_type.fmt(sema), src_file, src_loc.line + 1, src_loc.column + 1, src_line });
+                    try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "{}[{d}..{d}] ({})" ++ src_template ++ ">,shape=box,fillcolor=firebrick1]\n", .{ idx, id, idx, sema.getSymbolLocation(data.symbol), data.byte_start, data.byte_end, data_type.fmt(sema), src_file, src_loc.line + 1, src_loc.column + 1, src_line });
                 },
-                .block_start => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA Start>,shape=hexagon,fillcolor=blueviolet]\n", .{ idx, id, idx }),
-                .block_end => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "SSA End>,shape=hexagon,fillcolor=blueviolet]\n", .{ idx, id, idx }),
-                .@"return" => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "return>,shape=hexagon," ++ color_control_flow ++ "]\n", .{ idx, id, idx }),
-                .invalid => {}, // ignore
-                // else => try writer.print(indent ++ "N{d}_{d} [label=<{s}" ++ src_template ++ ">,fillcolor=lightgray]\n", .{ idx, id, @tagName(index.getTag(graph)), src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
+                .bit_shift_left => |data| try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "&lt;&lt; {d}" ++ src_template ++ ">," ++ style_ssa, .{ idx, id, idx, data, src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
+                .bit_shift_right => |data| try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "&gt;&gt; {d}" ++ src_template ++ ">," ++ style_ssa, .{ idx, id, idx, data, src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
+                .bit_and => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "AND" ++ src_template ++ ">," ++ style_ssa, .{ idx, id, idx, src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
+                .bit_or => try writer.print(indent ++ "N{d}_{d} [label=<" ++ idx_template ++ "OR" ++ src_template ++ ">," ++ style_ssa, .{ idx, id, idx, src_file, src_loc.line + 1, src_loc.column + 1, src_line }),
             }
         }
 
@@ -835,7 +861,7 @@ pub const Graph = struct {
                 switch (edge.type) {
                     .dependency => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d}\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id }),
                     .dataflow => switch (edge.intermediate_register) {
-                        .none => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=darkgray,fontcolor=darkgray,fontsize=10,label=\"{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
+                        .none => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=gray32,fontcolor=gray32,fontsize=10,label=\"{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
                         .a => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=crimson,fontcolor=crimson,fontsize=10,label=\"a{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
                         .x => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=forestgreen,fontcolor=forestgreen,fontsize=10,label=\"x{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),
                         .y => try writer.print(indent ++ "N{d}_{d} -> N{d}_{d} [color=dodgerblue,fontcolor=dodgerblue,fontsize=10,label=\"y{d}\"]\n", .{ @intFromEnum(index), id, @intFromEnum(edge.child), id, edge.bit_size }),

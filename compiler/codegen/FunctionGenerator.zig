@@ -11,7 +11,7 @@ const Expression = Sema.Expression;
 const TypeExpression = Sema.TypeExpression;
 const CodeGen = @import("../CodeGen.zig");
 
-const SemanticIr = @import("../sema/SemanticIr.zig");
+const SemanticIr = @import("../sema/Sir.zig");
 const AssemblyIr = @import("AssemblyIr.zig");
 const Generator = @This();
 const Error = CodeGen.GenerateError;

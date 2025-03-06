@@ -1,4 +1,4 @@
-//! Iterative optimizer for reducing Semantic IR graph
+//! Iterative optimizer for reducing an SIR graph
 const std = @import("std");
 const runtime_safty = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,

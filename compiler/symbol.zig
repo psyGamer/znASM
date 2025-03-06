@@ -6,7 +6,7 @@ const Ast = @import("Ast.zig");
 const Sema = @import("Sema.zig");
 const Expression = Sema.Expression;
 const TypeExpression = Sema.TypeExpression;
-const SemanticIr = @import("sema/SemanticIr.zig");
+const Sir = Sema.Sir;
 const AssemblyIr = @import("codegen/AssemblyIr.zig");
 const InstructionInfo = @import("CodeGen.zig").InstructionInfo;
 
@@ -129,7 +129,7 @@ pub const Symbol = union(enum) {
         labels: []const struct { []const u8, u16 },
 
         /// High-level Semantic IR graph
-        semantic_ir: SemanticIr.Graph,
+        semantic_ir: Sir.Graph,
         /// Low-level Assembly IR instructions
         assembly_ir: []const AssemblyIr,
 
@@ -150,10 +150,10 @@ pub const Symbol = union(enum) {
         /// Type of this constant
         type: TypeExpression.Index,
         /// Root SIR node for the value
-        value: SemanticIr.Index,
+        value: Sir.Index,
 
         /// High-level Semantic IR graph
-        sir_graph: SemanticIr.Graph,
+        sir_graph: Sir.Graph,
     };
     pub const Variable = struct {
         /// Commonly shared data between symbols
@@ -192,7 +192,7 @@ pub const Symbol = union(enum) {
         pub const Field = struct {
             name: []const u8,
             type: TypeExpression.Index,
-            default_value: Expression.Index,
+            default_value: Sir.Index,
         };
 
         /// Commonly shared data between symbols
@@ -200,12 +200,15 @@ pub const Symbol = union(enum) {
 
         /// Fields of this struct
         fields: []const Field,
+
+        /// High-level Semantic IR graph
+        sir_graph: Sir.Graph,
     };
     pub const Packed = struct {
         pub const Field = struct {
             name: []const u8,
             type: TypeExpression.Index,
-            default_value: Expression.Index,
+            default_value: Sir.Index,
         };
 
         /// Commonly shared data between symbols
@@ -216,6 +219,9 @@ pub const Symbol = union(enum) {
 
         /// Fields of this packed
         fields: []const Field,
+
+        /// High-level Semantic IR graph
+        sir_graph: Sir.Graph,
     };
     pub const Enum = struct {
         pub const Field = struct {

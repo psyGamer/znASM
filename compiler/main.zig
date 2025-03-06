@@ -8,7 +8,7 @@ const builtin_module = @import("builtin_module.zig");
 const Ast = @import("Ast.zig");
 const Module = @import("Module.zig");
 const Sema = @import("Sema.zig");
-const SemanticIr = @import("sema/SemanticIr.zig");
+const Sir = Sema.Sir;
 const CodeGen = @import("CodeGen.zig");
 const Linker = @import("Linker.zig");
 const Rom = @import("Rom.zig");
@@ -264,7 +264,7 @@ fn compile(allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, t
 
         const graph_writer = graph_file.writer();
 
-        try SemanticIr.Graph.dumpPrologue(graph_writer);
+        try Sir.Graph.dumpPrologue(graph_writer);
         for (sema.symbols.items, 0..) |symbol, index| {
             var graph = switch (symbol) {
                 .function => |fn_sym| fn_sym.semantic_ir,
@@ -273,7 +273,7 @@ fn compile(allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, t
             };
             try graph.dumpGraph(graph_writer, &sema, .cast(index));
         }
-        try SemanticIr.Graph.dumpEpilogue(graph_writer);
+        try Sir.Graph.dumpEpilogue(graph_writer);
 
         const abs_path = try std.fs.cwd().realpathAlloc(allocator, options.dump_sir_graph);
         defer allocator.free(abs_path);

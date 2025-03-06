@@ -3,7 +3,7 @@ const builtin_module = @import("../builtin_module.zig");
 
 const Module = @import("../Module.zig");
 const Ast = @import("../Ast.zig");
-const NodeIndex = Ast.NodeIndex;
+const Node = Ast.Node;
 const Sema = @import("../Sema.zig");
 const Symbol = Sema.Symbol;
 const SymbolLocation = Sema.SymbolLocation;
@@ -35,7 +35,7 @@ pub const Expression = struct {
         }
 
         /// Parses the expression and resolves an index to it
-        pub fn resolve(sema: *Sema, target_type: TypeExpression.Index, node: NodeIndex, module: Module.Index) Error!Index {
+        pub fn resolve(sema: *Sema, target_type: TypeExpression.Index, node: Node.Index, module: Module.Index) Error!Index {
             try sema.expressions.append(sema.allocator, try .parse(sema, target_type, node, module));
             return @enumFromInt(@as(u32, @intCast(sema.expressions.items.len - 1)));
         }
@@ -62,10 +62,10 @@ pub const Expression = struct {
     },
     intermediate_register: builtin_module.CpuRegister,
 
-    node: NodeIndex,
+    node: Node.Index,
     module: Module.Index,
 
-    pub fn parse(sema: *Sema, target_type: TypeExpression.Index, node: NodeIndex, module: Module.Index) Error!Expression {
+    pub fn parse(sema: *Sema, target_type: TypeExpression.Index, node: Node.Index, module: Module.Index) Error!Expression {
         const ast = &module.get(sema).ast;
 
         switch (ast.nodeTag(node)) {
@@ -184,7 +184,7 @@ pub const Expression = struct {
                         // Apply specified values
                         const sub_range = ast.readExtraData(Ast.Node.SubRange, data.extra);
                         for (@intFromEnum(sub_range.extra_start)..@intFromEnum(sub_range.extra_end)) |extra_idx| {
-                            const field_node: NodeIndex = @enumFromInt(ast.extra_data[extra_idx]);
+                            const field_node: Node.Index = @enumFromInt(ast.extra_data[extra_idx]);
                             const field_token = ast.nodeToken(field_node);
                             const field_data = ast.nodeData(field_node).expr_init_field;
                             const field_name = ast.parseIdentifier(field_token);

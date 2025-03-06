@@ -13,7 +13,9 @@ const TypeExpression = Sema.TypeExpression;
 const BuiltinVar = @import("BuiltinVar.zig");
 const BuiltinFn = @import("BuiltinFn.zig");
 
-const Sir = @import("SemanticIr.zig");
+const Sir = Sema.Sir;
+const sir_gen = Sema.sir_gen;
+
 const Analyzer = @This();
 
 /// Scope for the currently active Static-Single-Assignment (SSA)
@@ -397,9 +399,11 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
         },
     };
 
-    // TODO: Support field access
-    const write_start: u16 = 0;
-    const write_end: u16 = root_type.byteSize(ana.sema);
+    const field_offset, const field_type = try sir_gen.calcFieldTarget(ana.sema, root_type, fields[1..], ana.module);
+    const field_size = field_type.bitSize(ana.sema);
+
+    const write_start: u16 = @divFloor(field_offset, 8);
+    const write_end: u16 = std.math.divCeil(u16, field_offset + field_size, 8) catch unreachable;
 
     // Depend on previous symbol, to keep a correct order
     const scope = ana.scopes.getLast();
@@ -419,22 +423,92 @@ fn handleAssignStatement(ana: *Analyzer, node: Node.Index) Error!void {
         }
     } else scope.start; // This is the first store
 
-    const expr_node, _ = try ana.sema.parseExpression(&ana.graph, assign.value, ana.module, .{
+    const expr_node, _, const int_reg = try sir_gen.parseExpression(ana.sema, &ana.graph, assign.value, ana.module, .{
         .start_node = scope.start,
         .end_node = scope.end,
-        .target_type = root_type,
+        .target_type = field_type,
     });
-    const store_node = try ana.create(.{ .symbol = .{
-        .symbol = symbol,
-        .byte_start = write_start,
-        .byte_end = write_end,
-    } }, &.{ .withDataParent(expr_node, .a, (write_end - write_start) * 8), .withParent(prev_store_node) }, node);
 
-    // Update `block_end` connection
-    if (prev_store_node != scope.start) {
-        ana.graph.removeConnection(scope.end, prev_store_node);
+    if (field_offset % 8 == 0 and field_size % 8 == 0) {
+        // Byte-aligned
+        const store_node = try ana.create(.{ .symbol = .{
+            .symbol = symbol,
+            .byte_start = write_start,
+            .byte_end = write_end,
+        } }, &.{ .withDataParent(expr_node, .a, field_size), .withParent(prev_store_node) }, node);
+
+        // Update `block_end` connection
+        if (prev_store_node != scope.start) {
+            ana.graph.removeConnection(scope.end, prev_store_node);
+        }
+        try ana.graph.addEdge(ana.dataAllocator(), .initDependency(scope.end, store_node));
+    } else {
+        // Packed
+        const access_size = (write_end - write_start) * 8;
+        const field_start = field_offset - write_start * 8;
+
+        // Create a mask for the field
+        const limbs_count = std.math.divCeil(u16, access_size, @bitSizeOf(std.math.big.Limb)) catch unreachable;
+        const mask_value: std.math.big.int.Mutable = .{
+            .limbs = try ana.tempAllocator().alloc(std.math.big.Limb, limbs_count),
+            .len = limbs_count,
+            .positive = true,
+        };
+        @memset(mask_value.limbs, std.math.maxInt(std.math.big.Limb));
+
+        std.debug.assert(field_size > 0);
+        const field_start_limb = @divFloor(field_start, @bitSizeOf(std.math.big.Limb));
+        const field_end_limb = @divFloor(field_start + field_size - 1, @bitSizeOf(std.math.big.Limb));
+
+        if (field_start_limb == field_end_limb) {
+            mask_value.limbs[field_start_limb] = ~((@as(std.math.big.Limb, 1) << @intCast(field_size)) - 1 << @intCast(field_start % @bitSizeOf(std.math.big.Limb)));
+        } else {
+            mask_value.limbs[field_start_limb] = (@as(std.math.big.Limb, 1) << @intCast(field_start % @bitSizeOf(std.math.big.Limb)));
+            mask_value.limbs[field_end_limb] = ~((@as(std.math.big.Limb, 1) << @intCast((field_start + field_size) % @bitSizeOf(std.math.big.Limb))) - 1);
+
+            if (field_start_limb + 1 < field_end_limb) {
+                @memset(mask_value.limbs[(field_start_limb + 1)..field_end_limb], 0);
+            }
+        }
+        mask_value.limbs[mask_value.len - 1] &= (@as(std.math.big.Limb, 1) << @intCast(root_type.bitSize(ana.sema) % @bitSizeOf(std.math.big.Limb))) - 1;
+
+        const load_node = try ana.create(.{ .symbol = .{
+            .symbol = symbol,
+            .byte_start = write_start,
+            .byte_end = write_end,
+        } }, &.{}, node);
+        if (prev_store_node != scope.start) {
+            try ana.graph.addEdge(ana.dataAllocator(), .initDependency(load_node, prev_store_node));
+        }
+
+        const and_mask = try ana.create(.{ .value = mask_value.toConst() }, &.{}, node);
+        const and_node = try ana.create(.bit_and, &.{ .withDataParent(load_node, int_reg, access_size), .withDataParent(and_mask, int_reg, access_size) }, node);
+
+        const store_cleared_node = try ana.create(.{ .symbol = .{
+            .symbol = symbol,
+            .byte_start = write_start,
+            .byte_end = write_end,
+        } }, &.{.withDataParent(and_node, int_reg, access_size)}, node);
+
+        // Place value into field
+        const shift_node = try ana.create(.{ .bit_shift_left = field_start }, &.{.withDataParent(expr_node, int_reg, field_size)}, node);
+        const or_node = try ana.create(.bit_or, &.{ .withDataParent(store_cleared_node, int_reg, access_size), .withDataParent(shift_node, int_reg, access_size) }, node);
+
+        const store_node = try ana.create(.{ .symbol = .{
+            .symbol = symbol,
+            .byte_start = write_start,
+            .byte_end = write_end,
+        } }, &.{.withDataParent(or_node, int_reg, access_size)}, node);
+        if (prev_store_node == scope.start) {
+            try ana.graph.addEdge(ana.dataAllocator(), .initDependency(store_node, scope.start));
+        }
+
+        // Update `block_end` connection
+        if (prev_store_node != scope.start) {
+            ana.graph.removeConnection(scope.end, prev_store_node);
+        }
+        try ana.graph.addEdge(ana.dataAllocator(), .initDependency(scope.end, store_node));
     }
-    try ana.graph.addEdge(ana.dataAllocator(), .initDependency(scope.end, store_node));
 
     // const assign_idx = ana.graph.items.len;
     // try ana.emit(.{ .assign_global = undefined }, node);

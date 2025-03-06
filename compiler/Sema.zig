@@ -21,8 +21,9 @@ pub const Symbol = @import("symbol.zig").Symbol;
 pub const SymbolLocation = @import("symbol.zig").SymbolLocation;
 pub const Expression = @import("sema/expression.zig").Expression;
 pub const TypeExpression = @import("sema/type_expression.zig").TypeExpression;
-pub const Sir = @import("sema/SemanticIr.zig");
+pub const Sir = @import("sema/Sir.zig");
 pub const SirIter = @import("sema/SirIter.zig");
+pub const sir_gen = @import("sema/sir_gen.zig");
 
 const Sema = @This();
 
@@ -355,6 +356,7 @@ fn gatherStructSymbol(sema: *Sema, symbol_name: []const u8, node: NodeIndex, mod
 
             // To be determined during analyzation
             .fields = &.{},
+            .sir_graph = .empty,
         },
     });
 }
@@ -371,6 +373,7 @@ fn gatherPackedSymbol(sema: *Sema, symbol_name: []const u8, node: NodeIndex, mod
             // To be determined during analyzation
             .backing_type = undefined,
             .fields = &.{},
+            .sir_graph = .empty,
         },
     });
 }
@@ -411,8 +414,8 @@ pub fn analyzeSymbol(sema: *Sema, symbol_idx: Symbol.Index, module_idx: Module.I
         .constant => sema.analyzeConstant(symbol_idx, module_idx),
         .variable => sema.analyzeVariable(symbol_idx, module_idx),
         .register => sema.analyzeRegister(symbol_idx, module_idx),
-        // .@"struct" => sema.analyzeStruct(symbol_idx, module_idx),
-        // .@"packed" => sema.analyzePacked(symbol_idx, module_idx),
+        .@"struct" => sema.analyzeStruct(symbol_idx, module_idx),
+        .@"packed" => sema.analyzePacked(symbol_idx, module_idx),
         // .@"enum" => sema.analyzeEnum(symbol_idx, module_idx),
         inline else => |_, t| std.log.err("TODO: {s}", .{@tagName(t)}),
     };
@@ -432,8 +435,6 @@ fn analyzeFunction(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     try SirIter.reduce(sema, &analyzer.graph);
 
     const fn_sym = symbol.getFn(sema);
-    // fn_sym.calling_convention = analyzer.calling_conv;
-    // fn_sym.local_variables = try analyzer.local_variables.toOwnedSlice(sema.allocator);
     fn_sym.semantic_ir = analyzer.graph;
 }
 fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
@@ -449,7 +450,7 @@ fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
     const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
     // TODO: Support implicit typing
-    const value, _ = try sema.parseExpression(&graph, const_def.value, module, .{
+    const value, _, _ = try sir_gen.parseExpression(sema, &graph, const_def.value, module, .{
         .start_node = start,
         .end_node = end,
         .target_type = ty,
@@ -483,7 +484,10 @@ fn analyzeRegister(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
 fn analyzeStruct(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
 
+    const node = symbol.getCommon(sema).node;
     const struct_def = ast.nodeData(symbol.getCommon(sema).node).struct_def;
+
+    var graph = symbol.getStruct(sema).sir_graph;
 
     var fields: std.ArrayListUnmanaged(Symbol.Struct.Field) = .empty;
     defer fields.deinit(sema.allocator);
@@ -501,21 +505,33 @@ fn analyzeStruct(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
                 try fields.append(sema.allocator, .{
                     .name = ast.parseIdentifier(ast.nodeToken(member_idx)),
                     .type = field_type,
-                    .default_value = if (field_extra.value != .none)
-                        try .resolve(sema, field_type, field_extra.value, module)
-                    else
-                        .none,
+                    .default_value = if (field_extra.value != .none) b: {
+                        const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
+                        const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
+                        const value, _, _ = try sir_gen.parseExpression(sema, &graph, field_extra.value, module, .{
+                            .start_node = start,
+                            .end_node = end,
+                            .target_type = field_type,
+                        });
+                        try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
+                        try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
+
+                        break :b value;
+                    } else .none,
                 });
             },
             else => unreachable,
         }
     }
 
-    symbol.getStruct(sema).fields = try fields.toOwnedSlice(sema.allocator);
+    const struct_sym = symbol.getStruct(sema);
+    struct_sym.fields = try fields.toOwnedSlice(sema.allocator);
+    struct_sym.sir_graph = graph;
 }
 fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
 
+    const node = symbol.getCommon(sema).node;
     const packed_def = ast.nodeData(symbol.getCommon(sema).node).packed_def;
     const data = ast.readExtraData(Ast.Node.PackedDefData, packed_def.extra);
 
@@ -524,6 +540,8 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
         try sema.emitError(ast.nodeToken(symbol.getCommon(sema).node).next(), module, .expected_int_backing_type, .{backing_type.fmt(sema)});
         return error.AnalyzeFailed;
     }
+
+    var graph = symbol.getPacked(sema).sir_graph;
 
     var fields: std.ArrayListUnmanaged(Symbol.Packed.Field) = .empty;
     defer fields.deinit(sema.allocator);
@@ -543,10 +561,19 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
                 const field: Symbol.Packed.Field = .{
                     .name = ast.parseIdentifier(ast.nodeToken(member_idx)),
                     .type = field_type,
-                    .default_value = if (field_extra.value != .none)
-                        try .resolve(sema, field_type, field_extra.value, module)
-                    else
-                        .none,
+                    .default_value = if (field_extra.value != .none) b: {
+                        const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
+                        const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
+                        const value, _, _ = try sir_gen.parseExpression(sema, &graph, field_extra.value, module, .{
+                            .start_node = start,
+                            .end_node = end,
+                            .target_type = field_type,
+                        });
+                        try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
+                        try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
+
+                        break :b value;
+                    } else .none,
                 };
                 try fields.append(sema.allocator, field);
 
@@ -564,6 +591,7 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
 
     packed_sym.backing_type = backing_type;
     packed_sym.fields = try fields.toOwnedSlice(sema.allocator);
+    packed_sym.sir_graph = graph;
 }
 fn analyzeEnum(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
     const ast = &module.get(sema).ast;
@@ -674,109 +702,6 @@ pub fn isSymbolAccessibleInBank(sema: Sema, sym: Symbol, bank: u8) bool {
         .register => true,
         .@"struct", .@"packed", .@"enum" => unreachable,
     };
-}
-
-// Expression parsing
-
-const ParseExpressionOptions = struct {
-    /// `block_start` node of the current SSA
-    start_node: Sir.Index,
-    /// `block_end` node of the current SSA
-    end_node: Sir.Index,
-
-    /// Result type of the expression
-    /// Can be `.none` if the type can be inferred from the expression itself
-    target_type: TypeExpression.Index,
-    // TODO: Local variables
-};
-pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module: Module.Index, options: ParseExpressionOptions) AnalyzeError!struct { Sir.Index, TypeExpression } {
-    const ast = &module.get(sema).ast;
-    switch (ast.nodeTag(node)) {
-        .expr_int_value => {
-            const value_literal = ast.nodeToken(node);
-            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.tempAllocator()) catch {
-                try sema.emitError(value_literal, module, .invalid_number, .{ast.tokenSource(value_literal)});
-                return error.AnalyzeFailed;
-            };
-
-            if (options.target_type != .none) {
-                if (!options.target_type.get(sema).isAssignableFrom(&.comptime_integer)) {
-                    try sema.emitError(value_literal, module, .expected_type, .{ options.target_type.fmt(sema), "comptime_int" });
-                    return error.AnalyzeFailed;
-                }
-
-                // Validate size
-                switch (options.target_type.get(sema).*) {
-                    .comptime_integer => {},
-                    .integer => |info| switch (info.signedness) {
-                        .signed => if (!value.fitsInTwosComp(.signed, info.bits)) {
-                            try sema.emitError(value_literal, module, .value_too_large, .{ value, "a", "signed", info.bits });
-                            return error.AnalyzeFailed;
-                        },
-                        .unsigned => if (!value.fitsInTwosComp(.unsigned, info.bits)) {
-                            try sema.emitError(value_literal, module, .value_too_large, .{ value, "an", "unsigned", info.bits });
-                            return error.AnalyzeFailed;
-                        },
-                    },
-                    else => unreachable,
-                }
-            }
-
-            return .{ try graph.create(sema.dataAllocator(), .{ .value = value }, &.{}, node), .comptime_integer };
-        },
-        .expr_ident => {
-            const symbol_ident = ast.nodeToken(node);
-            const symbol = try sema.resolveSymbol(symbol_ident, module);
-
-            const source_type = switch (symbol.get(sema).*) {
-                .constant => |const_sym| const_sym.type,
-                .variable => |var_sym| var_sym.type,
-                .register => |reg_sym| reg_sym.type,
-                else => {
-                    try sema.emitError(symbol_ident, module, .expected_const_var_reg_symbol, .{@tagName(symbol.get(sema).*)});
-                    return error.AnalyzeFailed;
-                },
-            };
-
-            // Validate type
-            if (options.target_type != .none and !options.target_type.get(sema).isAssignableFrom(source_type.get(sema))) {
-                try sema.emitError(symbol_ident, module, .expected_type, .{ options.target_type.fmt(sema), source_type.fmt(sema) });
-                return error.AnalyzeFailed;
-            }
-
-            // TODO: Field access support
-            const read_start = 0;
-            const read_end = source_type.byteSize(sema);
-
-            // Add dependency on previous `symbol` store
-            var it = options.end_node.iterateParents(graph);
-            const prev_store_node = while (it.next()) |edge| {
-                if (edge.parent.getTag(graph) != .symbol) {
-                    continue;
-                }
-
-                const data = edge.parent.getData(graph).symbol;
-                if (data.symbol == symbol and
-                    (data.byte_start >= read_start and data.byte_start < read_end or
-                        data.byte_end > read_start and data.byte_end <= read_end or
-                        data.byte_start <= read_start and data.byte_end >= read_end))
-                {
-                    break edge.parent;
-                }
-            } else .none;
-
-            const load_node = try graph.create(sema.dataAllocator(), .{ .symbol = .{
-                .symbol = symbol,
-                .byte_start = 0,
-                .byte_end = source_type.byteSize(sema),
-            } }, if (prev_store_node != .none) &.{.withParent(prev_store_node)} else &.{}, node);
-
-            return .{ load_node, .comptime_integer };
-        },
-        else => std.log.err("TODO: {s}", .{@tagName(ast.nodeTag(node))}),
-    }
-
-    return .{ .none, undefined };
 }
 
 // Parsing (TODO: Remove!!)
