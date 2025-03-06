@@ -46,10 +46,10 @@ pub inline fn create(ana: *Analyzer, data: Sir.Data, edges: []const Sir.Edge, no
 }
 
 pub inline fn dataAllocator(ana: Analyzer) std.mem.Allocator {
-    return ana.sema.dataAllocator();
+    return ana.sema.data_allocator;
 }
 pub inline fn tempAllocator(ana: Analyzer) std.mem.Allocator {
-    return ana.sema.tempAllocator();
+    return ana.sema.temp_allocator;
 }
 
 pub fn process(ana: *Analyzer) Error!void {

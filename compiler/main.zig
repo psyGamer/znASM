@@ -45,71 +45,132 @@ pub fn main() !u8 {
         else => std.heap.smp_allocator,
     };
 
-    var tracking_allocator = switch (build_options.track_allocations) {
+    var gpa_alloc_tracker = switch (build_options.track_allocations) {
         .none => {},
         .total => @as(TrackingAllocator(null), .init(gpa.allocator())),
-        .all => @as(TrackingAllocator(.{ .scope = .memory, .success_log_level = .debug, .failure_log_level = .err }), .init(gpa.allocator())),
+        .all => @as(TrackingAllocator(.{ .scope = .gpa_alloc, .success_log_level = .debug, .failure_log_level = .err }), .init(gpa.allocator())),
+    };
+    var data_alloc_tracker = switch (build_options.track_allocations) {
+        .none => {},
+        .total => @as(TrackingAllocator(null), .init(std.heap.page_allocator)),
+        .all => @as(TrackingAllocator(.{ .scope = .data_alloc, .success_log_level = .debug, .failure_log_level = .err }), .init(std.heap.page_allocator)),
+    };
+    var temp_alloc_tracker = switch (build_options.track_allocations) {
+        .none => {},
+        .total => @as(TrackingAllocator(null), .init(std.heap.page_allocator)),
+        .all => @as(TrackingAllocator(.{ .scope = .temp_alloc, .success_log_level = .debug, .failure_log_level = .err }), .init(std.heap.page_allocator)),
     };
 
-    const allocator =
-        if (build_options.track_allocations == .none)
-            gpa_allocator
-        else
-            tracking_allocator.allocator();
+    const allocator = if (build_options.track_allocations == .none) gpa_allocator else gpa_alloc_tracker.allocator();
 
-    var data_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var data_arena: std.heap.ArenaAllocator = .init(if (build_options.track_allocations == .none) std.heap.page_allocator else data_alloc_tracker.allocator());
     defer data_arena.deinit();
 
-    var temp_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var temp_arena: std.heap.ArenaAllocator = .init(if (build_options.track_allocations == .none) std.heap.page_allocator else temp_alloc_tracker.allocator());
     defer temp_arena.deinit();
 
+    var data_arena_tracker = switch (build_options.track_allocations) {
+        .none => {},
+        .total => @as(TrackingAllocator(null), .init(data_arena.allocator())),
+        .all => @as(TrackingAllocator(.{ .scope = .data_arena, .success_log_level = .debug, .failure_log_level = .err }), .init(data_arena.allocator())),
+    };
+    var temp_arena_tracker = switch (build_options.track_allocations) {
+        .none => {},
+        .total => @as(TrackingAllocator(null), .init(temp_arena.allocator())),
+        .all => @as(TrackingAllocator(.{ .scope = .temp_arena, .success_log_level = .debug, .failure_log_level = .err }), .init(temp_arena.allocator())),
+    };
+
+    const data_allocator = if (build_options.track_allocations == .none) data_arena.allocator() else data_arena_tracker.allocator();
+    const temp_allocator = if (build_options.track_allocations == .none) temp_arena.allocator() else temp_arena_tracker.allocator();
+
     defer if (build_options.track_allocations != .none) {
-        const log = std.log.scoped(.memory);
-        log.debug("Allocation Tracker results:", .{});
+        std.log.debug("Allocation Tracker results:", .{});
 
-        if (tracking_allocator.total_expand_times == 0) {
-            log.debug(" - Allocated {d} total bytes", .{tracking_allocator.total_expand_bytes});
-        } else {
-            log.debug(" - Allocated {d} total bytes in {d} calls with ~{d:.3} average bytes / call", .{
-                tracking_allocator.total_alloc_bytes,
-                tracking_allocator.total_alloc_times,
-                @as(f32, @floatFromInt(tracking_allocator.total_alloc_bytes)) / @as(f32, @floatFromInt(tracking_allocator.total_alloc_times)),
-            });
+        const fmtBytes = std.fmt.fmtIntSizeBin;
+        inline for (&.{ .gpa_alloc, .data_alloc, .data_arena, .temp_alloc, .temp_arena }) |category| {
+            switch (category) {
+                .gpa_alloc => std.log.debug(" * General Purpose Allocation results:", .{}),
+                .data_alloc => std.log.debug(" * Permanent Data Allocation results:", .{}),
+                .data_arena => std.log.debug(" * Permanent Data Arena results:", .{}),
+                .temp_alloc => std.log.debug(" * Temporary Data Allocation results:", .{}),
+                .temp_arena => std.log.debug(" * Temporary Data Arena results:", .{}),
+                else => unreachable,
+            }
+            const tracker = switch (category) {
+                .gpa_alloc => gpa_alloc_tracker,
+                .data_alloc => data_alloc_tracker,
+                .data_arena => data_arena_tracker,
+                .temp_alloc => temp_alloc_tracker,
+                .temp_arena => temp_arena_tracker,
+                else => unreachable,
+            };
+
+            if (tracker.total_alloc_times == 0) {
+                std.log.debug("     - Allocated {:.2}", .{fmtBytes(tracker.total_alloc_bytes)});
+            } else {
+                std.log.debug("     - Allocated {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_alloc_bytes),
+                    tracker.total_alloc_times,
+                    fmtBytes(@divFloor(tracker.total_alloc_bytes, tracker.total_alloc_times)),
+                });
+            }
+
+            if (tracker.total_free_times == 0) {
+                std.log.debug("     - Freed {:.2}", .{fmtBytes(tracker.total_free_bytes)});
+            } else {
+                std.log.debug("     - Freed {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_free_bytes),
+                    tracker.total_free_times,
+                    fmtBytes(@divFloor(tracker.total_free_bytes, tracker.total_free_times)),
+                });
+            }
+
+            if (tracker.total_success_shrink_times == 0) {
+                std.log.debug("     - Shrunken allocations by {:.2}", .{fmtBytes(tracker.total_success_shrink_bytes)});
+            } else {
+                std.log.debug("     - Shrunken allocations by {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_success_shrink_bytes),
+                    tracker.total_success_shrink_times,
+                    fmtBytes(@divFloor(tracker.total_success_shrink_bytes, tracker.total_success_shrink_times)),
+                });
+            }
+
+            if (tracker.total_success_expand_times == 0) {
+                std.log.debug("     - Expended allocations by {:.2}", .{fmtBytes(tracker.total_success_expand_bytes)});
+            } else {
+                std.log.debug("     - Expended allocations by {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_success_expand_bytes),
+                    tracker.total_success_expand_times,
+                    fmtBytes(@divFloor(tracker.total_success_expand_bytes, tracker.total_success_expand_times)),
+                });
+            }
+
+            if (tracker.total_attempt_shrink_times == 0) {
+                std.log.debug("     - Attempted allocation shrinkages by {:.2}", .{fmtBytes(tracker.total_attempt_shrink_bytes)});
+            } else {
+                std.log.debug("     - Attempted allocation shrinkages by {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_attempt_shrink_bytes),
+                    tracker.total_attempt_shrink_times,
+                    fmtBytes(@divFloor(tracker.total_attempt_shrink_bytes, tracker.total_attempt_shrink_times)),
+                });
+            }
+
+            if (tracker.total_attempt_expand_times == 0) {
+                std.log.debug("     - Attempted allocation expansions by {:.2}", .{tracker.total_attempt_expand_bytes});
+            } else {
+                std.log.debug("     - Attempted allocation expansions by {:.2} in {d} calls with ~{:.2} / call", .{
+                    fmtBytes(tracker.total_attempt_expand_bytes),
+                    tracker.total_attempt_expand_times,
+                    fmtBytes(@divFloor(tracker.total_attempt_expand_bytes, tracker.total_attempt_expand_times)),
+                });
+            }
+
+            switch (category) {
+                .data_arena => std.log.debug("     - Arena Capacity: {:.2}", .{fmtBytes(data_arena.queryCapacity())}),
+                .temp_arena => std.log.debug("     - Arena Capacity: {:.2}", .{fmtBytes(temp_arena.queryCapacity())}),
+                else => {},
+            }
         }
-
-        if (tracking_allocator.total_expand_times == 0) {
-            log.debug(" - Freed {d} total bytes", .{tracking_allocator.total_expand_bytes});
-        } else {
-            log.debug(" - Freed {d} total bytes in {d} calls with ~{d:.3} average bytes / call", .{
-                tracking_allocator.total_free_bytes,
-                tracking_allocator.total_free_times,
-                @as(f32, @floatFromInt(tracking_allocator.total_free_bytes)) / @as(f32, @floatFromInt(tracking_allocator.total_free_times)),
-            });
-        }
-
-        if (tracking_allocator.total_expand_times == 0) {
-            log.debug(" - Shrunken allocations by {d} total bytes", .{tracking_allocator.total_expand_bytes});
-        } else {
-            log.debug(" - Shrunken allocations by {d} total bytes in {d} calls with ~{d:.3} average bytes / call", .{
-                tracking_allocator.total_shrink_bytes,
-                tracking_allocator.total_shrink_times,
-                @as(f32, @floatFromInt(tracking_allocator.total_shrink_bytes)) / @as(f32, @floatFromInt(tracking_allocator.total_shrink_times)),
-            });
-        }
-
-        if (tracking_allocator.total_expand_times == 0) {
-            log.debug(" - Expended allocations by {d} total bytes", .{tracking_allocator.total_expand_bytes});
-        } else {
-            log.debug(" - Expended allocations by {d} total bytes in {d} calls with ~{d:.3} average bytes / call", .{
-                tracking_allocator.total_expand_bytes,
-                tracking_allocator.total_expand_times,
-                @as(f32, @floatFromInt(tracking_allocator.total_expand_bytes)) / @as(f32, @floatFromInt(tracking_allocator.total_expand_times)),
-            });
-        }
-        log.debug("", .{});
-
-        log.debug("Temporary Arena Capacity: {d} bytes", .{temp_arena.queryCapacity()});
-        log.debug("Data Arena Capacity: {d} bytes", .{data_arena.queryCapacity()});
     };
 
     // Parse arguments
@@ -192,13 +253,10 @@ pub fn main() !u8 {
         return 1;
     }
 
-    return compile(allocator, &data_arena, &temp_arena, options);
+    return compile(allocator, data_allocator, temp_allocator, &data_arena, &temp_arena, options);
 }
 
-fn compile(allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, temp_arena: *std.heap.ArenaAllocator, options: CompilerOptions) !u8 {
-    const data_allocator = data_arena.allocator();
-    const temp_allocator = temp_arena.allocator();
-
+fn compile(allocator: std.mem.Allocator, data_allocator: std.mem.Allocator, temp_allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, temp_arena: *std.heap.ArenaAllocator, options: CompilerOptions) !u8 {
     // Parse all files into modules
     var modules: std.ArrayListUnmanaged(Module) = .{};
 
@@ -244,6 +302,8 @@ fn compile(allocator: std.mem.Allocator, data_arena: *std.heap.ArenaAllocator, t
         .allocator = allocator,
         .data_arena = data_arena,
         .temp_arena = temp_arena,
+        .data_allocator = data_allocator,
+        .temp_allocator = temp_allocator,
     };
     sema.process() catch |err| switch (err) {
         error.AnalyzeFailed => return 1,

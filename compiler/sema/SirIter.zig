@@ -19,10 +19,10 @@ graph: *Graph,
 queue: std.ArrayListUnmanaged(Sir.Index) = .empty,
 
 inline fn dataAllocator(iter: Iter) std.mem.Allocator {
-    return iter.sema.dataAllocator();
+    return iter.sema.data_allocator;
 }
 inline fn tempAllocator(iter: Iter) std.mem.Allocator {
-    return iter.sema.tempAllocator();
+    return iter.sema.temp_allocator;
 }
 
 /// Applies all available optimizations to the graph
@@ -30,7 +30,7 @@ pub fn reduce(sema: *Sema, graph: *Graph) !void {
     log.info("Applying SIR-reduction...", .{});
 
     var iter: Iter = .{ .sema = sema, .graph = graph };
-    defer iter.queue.deinit(sema.tempAllocator());
+    defer iter.queue.deinit(sema.temp_allocator);
 
     // Apply pre graph reductions
     next_iter: while (true) {

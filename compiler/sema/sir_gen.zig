@@ -33,7 +33,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
     switch (ast.nodeTag(node)) {
         .expr_int_value => {
             const value_literal = ast.nodeToken(node);
-            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.tempAllocator()) catch {
+            const value = ast.parseBigIntLiteral(std.math.big.int.Const, value_literal, sema.temp_allocator) catch {
                 try sema.emitError(value_literal, module, .invalid_number, .{ast.tokenSource(value_literal)});
                 return error.AnalyzeFailed;
             };
@@ -62,7 +62,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
             }
 
             const int_reg = try parseIntermediateRegister(sema, node.getData(ast).expr.intermediate_register, module);
-            return .{ try graph.create(sema.dataAllocator(), .{ .value = value }, &.{}, node), .comptime_integer, int_reg };
+            return .{ try graph.create(sema.data_allocator, .{ .value = value }, &.{}, node), .comptime_integer, int_reg };
         },
         .expr_ident => {
             const symbol_ident = ast.nodeToken(node);
@@ -105,7 +105,7 @@ pub fn parseExpression(sema: *Sema, graph: *Sir.Graph, node: Node.Index, module:
                 }
             } else .none;
 
-            const load_node = try graph.create(sema.dataAllocator(), .{ .symbol = .{
+            const load_node = try graph.create(sema.data_allocator, .{ .symbol = .{
                 .symbol = symbol,
                 .byte_start = 0,
                 .byte_end = source_type.byteSize(sema),
@@ -194,11 +194,11 @@ pub fn calcFieldTarget(sema: *Sema, root_type: TypeExpression.Index, fields: []c
 //     const field_size = field_type.bitSize(sema);
 
 //     // Shift field into LSB
-//     const shift_node = try graph.create(sema.dataAllocator(), .{ .bit_shift_left = field_offset }, &.{.withDataParent(parent, int_reg, parent_size)}, parent.getSourceNode(graph));
+//     const shift_node = try graph.create(sema.data_allocator, .{ .bit_shift_left = field_offset }, &.{.withDataParent(parent, int_reg, parent_size)}, parent.getSourceNode(graph));
 
 //     // Create a mask for only the field
 //     const limbs_count = std.math.divCeil(u16, parent_size - field_offset, @bitSizeOf(std.math.big.Limb)) catch unreachable;
-//     const mask_value: std.math.big.int.Mutable = .{ .limbs = try sema.tempAllocator().alloc(std.math.big.Limb, limbs_count), .len = limbs_count, .positive = true };
+//     const mask_value: std.math.big.int.Mutable = .{ .limbs = try sema.temp_allocator.alloc(std.math.big.Limb, limbs_count), .len = limbs_count, .positive = true };
 
 //     const last_limb = (std.math.divCeil(u16, field_size, @bitSizeOf(std.math.big.Limb)) catch unreachable) - 1;
 //     @memset(mask_value.limbs[0..last_limb], std.math.maxInt(std.math.big.Limb));
@@ -207,8 +207,8 @@ pub fn calcFieldTarget(sema: *Sema, root_type: TypeExpression.Index, fields: []c
 //         @memset(mask_value.limbs[(last_limb + 1)..], 0);
 //     }
 
-//     const and_mask = try graph.create(sema.dataAllocator(), .{ .value = mask_value }, &.{}, parent.getSourceNode(graph));
-//     const and_node = try graph.create(sema.dataAllocator(), .bit_and, &.{ .withDataParent(shift_node, int_reg, parent_size - field_offset), .withDataParent(and_mask, int_reg, parent_size - field_offset) }, parent.getSourceNode(graph));
+//     const and_mask = try graph.create(sema.data_allocator, .{ .value = mask_value }, &.{}, parent.getSourceNode(graph));
+//     const and_node = try graph.create(sema.data_allocator, .bit_and, &.{ .withDataParent(shift_node, int_reg, parent_size - field_offset), .withDataParent(and_mask, int_reg, parent_size - field_offset) }, parent.getSourceNode(graph));
 
 //     return and_node;
 // }
@@ -221,11 +221,11 @@ pub fn calcFieldTarget(sema: *Sema, root_type: TypeExpression.Index, fields: []c
 //     const field_size = field_type.bitSize(sema);
 
 //     // Shift into correct offset
-//     const shift_node = try graph.create(sema.dataAllocator(), .{ .bit_shift_right = field_offset }, &.{.withDataParent(parent, int_reg, field_size)}, parent.getSourceNode(graph));
+//     const shift_node = try graph.create(sema.data_allocator, .{ .bit_shift_right = field_offset }, &.{.withDataParent(parent, int_reg, field_size)}, parent.getSourceNode(graph));
 
 //     // Create a mask for only the field
 //     const limbs_count = std.math.divCeil(u16, parent_size - field_offset, @bitSizeOf(std.math.big.Limb)) catch unreachable;
-//     const mask_value: std.math.big.int.Mutable = .{ .limbs = try sema.tempAllocator().alloc(std.math.big.Limb, limbs_count), .len = limbs_count, .positive = true };
+//     const mask_value: std.math.big.int.Mutable = .{ .limbs = try sema.temp_allocator.alloc(std.math.big.Limb, limbs_count), .len = limbs_count, .positive = true };
 
 //     const last_limb = (std.math.divCeil(u16, field_size, @bitSizeOf(std.math.big.Limb)) catch unreachable) - 1;
 //     @memset(mask_value.limbs[0..last_limb], std.math.maxInt(std.math.big.Limb));
@@ -234,8 +234,8 @@ pub fn calcFieldTarget(sema: *Sema, root_type: TypeExpression.Index, fields: []c
 //         @memset(mask_value.limbs[(last_limb + 1)..], 0);
 //     }
 
-//     const and_mask = try graph.create(sema.dataAllocator(), .{ .value = mask_value }, &.{}, parent.getSourceNode(graph));
-//     const and_node = try graph.create(sema.dataAllocator(), .bit_and, &.{ .withDataParent(shift_node, int_reg, parent_size - field_offset), .withDataParent(and_mask, int_reg, parent_size - field_offset) }, parent.getSourceNode(graph));
+//     const and_mask = try graph.create(sema.data_allocator, .{ .value = mask_value }, &.{}, parent.getSourceNode(graph));
+//     const and_node = try graph.create(sema.data_allocator, .bit_and, &.{ .withDataParent(shift_node, int_reg, parent_size - field_offset), .withDataParent(and_mask, int_reg, parent_size - field_offset) }, parent.getSourceNode(graph));
 
 //     return and_node;
 // }

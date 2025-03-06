@@ -14,13 +14,17 @@ pub fn TrackingAllocator(
         parent_allocator: Allocator,
 
         total_alloc_bytes: usize = 0,
-        total_shrink_bytes: usize = 0,
-        total_expand_bytes: usize = 0,
+        total_success_shrink_bytes: usize = 0,
+        total_success_expand_bytes: usize = 0,
+        total_attempt_shrink_bytes: usize = 0,
+        total_attempt_expand_bytes: usize = 0,
         total_free_bytes: usize = 0,
 
         total_alloc_times: usize = 0,
-        total_shrink_times: usize = 0,
-        total_expand_times: usize = 0,
+        total_success_shrink_times: usize = 0,
+        total_success_expand_times: usize = 0,
+        total_attempt_shrink_times: usize = 0,
+        total_attempt_expand_times: usize = 0,
         total_free_times: usize = 0,
 
         const Self = @This();
@@ -94,18 +98,26 @@ pub fn TrackingAllocator(
             ret_addr: usize,
         ) bool {
             const self: *Self = @ptrCast(@alignCast(context));
+            if (new_len <= memory.len) {
+                self.total_attempt_shrink_bytes += memory.len - new_len;
+                self.total_attempt_shrink_times += 1;
+            } else {
+                self.total_attempt_expand_bytes += new_len - memory.len;
+                self.total_attempt_expand_times += 1;
+            }
+
             if (self.parent_allocator.rawResize(memory, alignment, new_len, ret_addr)) {
                 if (new_len <= memory.len) {
-                    self.total_shrink_bytes += memory.len - new_len;
-                    self.total_shrink_times += 1;
+                    self.total_success_shrink_bytes += memory.len - new_len;
+                    self.total_success_shrink_times += 1;
                     logHelper(
                         .success,
                         "resize shrink - success - {} to {}, alignment: {}",
                         .{ memory.len, new_len, alignment },
                     );
                 } else {
-                    self.total_expand_bytes += new_len - memory.len;
-                    self.total_expand_times += 1;
+                    self.total_success_expand_bytes += new_len - memory.len;
+                    self.total_success_expand_times += 1;
                     logHelper(
                         .success,
                         "resize expand - success - {} to {}, alignment: {}",
@@ -132,19 +144,27 @@ pub fn TrackingAllocator(
             ret_addr: usize,
         ) ?[*]u8 {
             const self: *Self = @ptrCast(@alignCast(context));
+            if (new_len <= memory.len) {
+                self.total_attempt_shrink_bytes += memory.len - new_len;
+                self.total_attempt_shrink_times += 1;
+            } else {
+                self.total_attempt_expand_bytes += new_len - memory.len;
+                self.total_attempt_expand_times += 1;
+            }
+
             const result = self.parent_allocator.rawRemap(memory, alignment, new_len, ret_addr);
             if (result != null) {
                 if (new_len <= memory.len) {
-                    self.total_shrink_bytes += memory.len - new_len;
-                    self.total_shrink_times += 1;
+                    self.total_success_shrink_bytes += memory.len - new_len;
+                    self.total_success_shrink_times += 1;
                     logHelper(
                         .success,
                         "remap shrink - success - {} to {}, alignment: {}",
                         .{ memory.len, new_len, alignment },
                     );
                 } else {
-                    self.total_expand_bytes += new_len - memory.len;
-                    self.total_expand_times += 1;
+                    self.total_success_expand_bytes += new_len - memory.len;
+                    self.total_success_expand_times += 1;
                     logHelper(
                         .success,
                         "remap expand - success - {} to {}, alignment: {}",

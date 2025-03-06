@@ -3,6 +3,9 @@ const memory_map = @import("memory_map.zig");
 const rich = @import("util/rich.zig");
 const builtin_module = @import("builtin_module.zig");
 
+const build_options = @import("build_options");
+const TrackingAllocator = @import("util/allocation.zig").TrackingAllocator;
+
 const ErrorSystem = @import("error.zig").ErrorSystem;
 const TypedIndex = @import("util/typed_index.zig").TypedIndex;
 const Ast = @import("Ast.zig");
@@ -88,17 +91,13 @@ data_arena: *std.heap.ArenaAllocator,
 temp_arena: *std.heap.ArenaAllocator,
 
 /// Allocator for permanent data storage
-pub inline fn dataAllocator(sema: Sema) std.mem.Allocator {
-    return sema.data_arena.allocator();
-}
+data_allocator: std.mem.Allocator,
 /// Allocator for temporary data storage
-pub inline fn tempAllocator(sema: Sema) std.mem.Allocator {
-    return sema.temp_arena.allocator();
-}
+temp_allocator: std.mem.Allocator,
 
 pub fn process(sema: *Sema) AnalyzeError!void {
     // Gather symbols
-    try sema.module_map.ensureUnusedCapacity(sema.dataAllocator(), sema.modules.len);
+    try sema.module_map.ensureUnusedCapacity(sema.data_allocator, sema.modules.len);
     for (0..sema.modules.len) |module_idx| {
         try sema.gatherSymbols(.cast(module_idx));
     }
@@ -447,16 +446,16 @@ fn analyzeConstant(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Anal
     var graph = symbol.getConst(sema).sir_graph;
     const ty: TypeExpression.Index = try .resolve(sema, data.type, module, symbol);
 
-    const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
-    const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
+    const start = try graph.create(sema.data_allocator, .block_start, &.{}, node);
+    const end = try graph.create(sema.data_allocator, .block_end, &.{}, node);
     // TODO: Support implicit typing
     const value, _, _ = try sir_gen.parseExpression(sema, &graph, const_def.value, module, .{
         .start_node = start,
         .end_node = end,
         .target_type = ty,
     });
-    try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
-    try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
+    try graph.addEdge(sema.data_allocator, .initDependency(value, start));
+    try graph.addEdge(sema.data_allocator, .initDependency(end, value));
 
     const const_sym = symbol.getConst(sema);
     const_sym.type = ty;
@@ -488,9 +487,7 @@ fn analyzeStruct(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
     const struct_def = ast.nodeData(symbol.getCommon(sema).node).struct_def;
 
     var graph = symbol.getStruct(sema).sir_graph;
-
     var fields: std.ArrayListUnmanaged(Symbol.Struct.Field) = .empty;
-    defer fields.deinit(sema.allocator);
 
     const member_range = ast.nodeData(struct_def.block).sub_range;
     for (@intFromEnum(member_range.extra_start)..@intFromEnum(member_range.extra_end)) |extra_idx| {
@@ -506,15 +503,15 @@ fn analyzeStruct(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
                     .name = ast.parseIdentifier(ast.nodeToken(member_idx)),
                     .type = field_type,
                     .default_value = if (field_extra.value != .none) b: {
-                        const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
-                        const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
+                        const start = try graph.create(sema.data_allocator, .block_start, &.{}, node);
+                        const end = try graph.create(sema.data_allocator, .block_end, &.{}, node);
                         const value, _, _ = try sir_gen.parseExpression(sema, &graph, field_extra.value, module, .{
                             .start_node = start,
                             .end_node = end,
                             .target_type = field_type,
                         });
-                        try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
-                        try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
+                        try graph.addEdge(sema.data_allocator, .initDependency(value, start));
+                        try graph.addEdge(sema.data_allocator, .initDependency(end, value));
 
                         break :b value;
                     } else .none,
@@ -525,7 +522,7 @@ fn analyzeStruct(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
     }
 
     const struct_sym = symbol.getStruct(sema);
-    struct_sym.fields = try fields.toOwnedSlice(sema.allocator);
+    struct_sym.fields = try fields.toOwnedSlice(sema.data_allocator);
     struct_sym.sir_graph = graph;
 }
 fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
@@ -542,9 +539,7 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
     }
 
     var graph = symbol.getPacked(sema).sir_graph;
-
     var fields: std.ArrayListUnmanaged(Symbol.Packed.Field) = .empty;
-    defer fields.deinit(sema.allocator);
 
     var total_bit_size: u16 = 0;
 
@@ -562,20 +557,20 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
                     .name = ast.parseIdentifier(ast.nodeToken(member_idx)),
                     .type = field_type,
                     .default_value = if (field_extra.value != .none) b: {
-                        const start = try graph.create(sema.dataAllocator(), .block_start, &.{}, node);
-                        const end = try graph.create(sema.dataAllocator(), .block_end, &.{}, node);
+                        const start = try graph.create(sema.data_allocator, .block_start, &.{}, node);
+                        const end = try graph.create(sema.data_allocator, .block_end, &.{}, node);
                         const value, _, _ = try sir_gen.parseExpression(sema, &graph, field_extra.value, module, .{
                             .start_node = start,
                             .end_node = end,
                             .target_type = field_type,
                         });
-                        try graph.addEdge(sema.dataAllocator(), .initDependency(value, start));
-                        try graph.addEdge(sema.dataAllocator(), .initDependency(end, value));
+                        try graph.addEdge(sema.data_allocator, .initDependency(value, start));
+                        try graph.addEdge(sema.data_allocator, .initDependency(end, value));
 
                         break :b value;
                     } else .none,
                 };
-                try fields.append(sema.allocator, field);
+                try fields.append(sema.data_allocator, field);
 
                 total_bit_size += field.type.bitSize(sema);
             },
@@ -590,7 +585,7 @@ fn analyzePacked(sema: *Sema, symbol: Symbol.Index, module: Module.Index) Analyz
     }
 
     packed_sym.backing_type = backing_type;
-    packed_sym.fields = try fields.toOwnedSlice(sema.allocator);
+    packed_sym.fields = try fields.toOwnedSlice(sema.data_allocator);
     packed_sym.sir_graph = graph;
 }
 fn analyzeEnum(sema: *Sema, symbol: Symbol.Index, module: Module.Index) AnalyzeError!void {
@@ -638,8 +633,8 @@ pub fn createSymbol(sema: *Sema, module_idx: Module.Index, name: []const u8, sym
     const module = module_idx.get(sema);
 
     const symbol_idx: Symbol.Index = .cast(sema.symbols.items.len);
-    try sema.symbols.append(sema.dataAllocator(), symbol);
-    try module.symbol_map.putNoClobber(sema.dataAllocator(), name, symbol_idx);
+    try sema.symbols.append(sema.data_allocator, symbol);
+    try module.symbol_map.putNoClobber(sema.data_allocator, name, symbol_idx);
 
     var common = symbol_idx.getCommon(sema);
     common.module_index = module_idx;
